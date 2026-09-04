@@ -133,15 +133,22 @@ export function Reader({ book, onBack, initialTarget }: ReaderProps) {
     await runAi(() => api.aiExplain(text, aiQuestion.trim()));
   };
 
-  /** 选中文本送去 AI 解释 */
-  const handleAiExplainSelection = () => {
+  /** 选中文本送去 AI：一键短解释 / 一键翻译（适配 1B 小模型，短问短答） */
+  const handleAiQuick = async (kind: 'explain' | 'translate') => {
     if (!sel) return;
-    setAiContext(sel.text);
-    setAiQuestion('');
-    setAiAnswer('');
+    const api = window.electronAPI;
+    if (!api) return;
+    const text = sel.text.slice(0, 1000);
     setSel(null);
     clearEpubSelection();
+    setAiContext(text);
+    setAiQuestion('');
     setPanel('ai');
+    if (kind === 'translate') {
+      await runAi(() => api.aiTranslate(text));
+    } else {
+      await runAi(() => api.aiExplain(text, '请用一两句话简短解释这段文字的意思'));
+    }
   };
 
   // 手机模式
@@ -984,8 +991,11 @@ export function Reader({ book, onBack, initialTarget }: ReaderProps) {
           <button onClick={() => { speak(sel.text); setSel(null); clearEpubSelection(); }} title="朗读选中">
             🔊 朗读
           </button>
-          <button onClick={handleAiExplainSelection} title="AI 解释选中">
-            ✨ AI
+          <button onClick={() => handleAiQuick('explain')} title="AI 一键短解释">
+            ✨ 解释
+          </button>
+          <button onClick={() => handleAiQuick('translate')} title="AI 一键翻译">
+            🌐 翻译
           </button>
           <button
             onClick={async () => {

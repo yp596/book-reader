@@ -18,7 +18,7 @@ export function Settings() {
   const [settings, setSettings] = useState<SettingsData>({
     aiProvider: 'ollama',
     aiBaseUrl: 'http://localhost:11434',
-    aiModel: 'qwen2.5:7b',
+    aiModel: 'minicpm5-1b',
     aiApiKey: '',
     webdavUrl: '',
     webdavUser: '',
@@ -156,7 +156,7 @@ export function Settings() {
         </div>
         <div className="form-row">
           <label>模型名称</label>
-          <input value={settings.aiModel} onChange={e => handleChange('aiModel', e.target.value)} placeholder="qwen2.5:7b" />
+          <input value={settings.aiModel} onChange={e => handleChange('aiModel', e.target.value)} placeholder="minicpm5-1b" />
         </div>
         {settings.aiProvider !== 'ollama' && (
           <div className="form-row">

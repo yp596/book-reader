@@ -369,7 +369,7 @@ export function registerIpcHandlers() {
 
   function getAiService(): AiService {
     const baseUrl = (db.getSetting('aiBaseUrl') || 'http://localhost:11434').replace(/\/$/, '');
-    const model = db.getSetting('aiModel') || 'qwen2.5:7b';
+    const model = db.getSetting('aiModel') || 'minicpm5-1b';
     const apiKey = db.getSetting('aiApiKey') || undefined;
     return new AiService({ provider: 'custom', baseUrl, model, apiKey });
   }
