@@ -645,3 +645,10 @@
   padding-left: 12px;
   border-left: 1px dashed var(--border-light);
 }
+
+.mind-expand-hint {
+  margin-left: auto;
+  font-size: 11px;
+  color: var(--accent-light);
+  white-space: nowrap;
+}

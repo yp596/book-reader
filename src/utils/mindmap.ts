@@ -3,6 +3,8 @@
 export interface MindNode {
   text: string;
   children: MindNode[];
+  /** 章节跳转目标（懒加载子分支用）：EPUB {href}，TXT {page,endPage} */
+  target?: { href?: string; page?: number; endPage?: number };
 }
 
 /** Markdown 缩进列表解析为树，可容错小模型的不规范输出 */

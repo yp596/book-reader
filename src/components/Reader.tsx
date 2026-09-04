@@ -96,6 +96,76 @@ export function Reader({ book, onBack, initialTarget }: ReaderProps) {
   const [aiWord, setAiWord] = useState('');
   /** 思维导图 */
   const [mindNodes, setMindNodes] = useState<MindNode[] | null>(null);
+  const [mindTitle, setMindTitle] = useState('');
+
+  /** EPUB 按 href 取整章文本（复用检索的 spine 加载套路） */
+  const loadChapterText = async (href: string): Promise<string> => {
+    const epubBook = bookRef.current;
+    if (!epubBook) return '';
+    const item = epubBook.spine.spineItems.find(
+      (it: any) => it.href === href || href.includes(it.href) || it.href.includes(href),
+    );
+    if (!item) return '';
+    try {
+      const doc = await item.load(epubBook.load.bind(epubBook));
+      const text = ((doc as any)?.body?.textContent as string) || '';
+      return text.replace(/\s+/g, ' ').trim();
+    } finally {
+      try { item.unload(); } catch { /* 忽略 */ }
+    }
+  };
+
+  /** 本书章节脑图：书名 → 章节 → 点章现生成子分支 */
+  const handleBookMindmap = async () => {
+    const api = window.electronAPI;
+    if (!api || (book.file_type !== 'epub' && book.file_type !== 'txt')) return;
+    setAiLoading(true);
+    try {
+      let chapterNodes: MindNode[] = [];
+      if (book.file_type === 'epub') {
+        chapterNodes = chapters.map(ch => ({
+          text: ch.label,
+          children: [],
+          target: { href: ch.href },
+        }));
+      } else {
+        const toc = await api.getBookToc(book.id);
+        const entries = (toc as { label: string; page?: number }[]) || [];
+        chapterNodes = entries.map((t, i) => ({
+          text: t.label,
+          children: [],
+          target: { page: t.page ?? 0, endPage: entries[i + 1]?.page },
+        }));
+      }
+      if (chapterNodes.length === 0) {
+        setAiAnswer('本书没有目录信息，无法按章节生成。');
+        setPanel('ai');
+        return;
+      }
+      setMindNodes([{ text: book.title, children: chapterNodes }]);
+      setMindTitle(`《${book.title}》章节脑图`);
+    } finally {
+      setAiLoading(false);
+    }
+  };
+
+  /** 展开某章节：取文本 → AI 大纲 → 子分支 */
+  const expandMindChapter = async (node: MindNode): Promise<MindNode[]> => {
+    const api = window.electronAPI;
+    if (!api || !node.target) return [];
+    let text = '';
+    if (node.target.href) {
+      text = await loadChapterText(node.target.href);
+    } else if (node.target.page != null) {
+      const end = node.target.endPage ?? totalPages;
+      text = txtPages.slice(node.target.page, Math.min(end, totalPages)).join('\n');
+    }
+    text = text.trim().slice(0, 3000);
+    if (!text) return [{ text: '该章节无正文', children: [] }];
+    const outline = await api.aiMindmap(text);
+    const sub = parseMindmap(outline);
+    return sub.length > 0 ? sub : [{ text: '生成失败，换一章试试', children: [] }];
+  };
 
   /** AI 调用统一入口（含未配置提示） */
   const runAi = async (fn: () => Promise<string>) => {
@@ -1122,6 +1192,11 @@ export function Reader({ book, onBack, initialTarget }: ReaderProps) {
               <button className="btn-secondary small" onClick={handleAiMindmap} disabled={aiLoading}>
                 🧠 脑图
               </button>
+              {book.file_type !== 'pdf' && (
+                <button className="btn-secondary small" onClick={handleBookMindmap} disabled={aiLoading}>
+                  📚 本书脑图
+                </button>
+              )}
               {aiContext && (
                 <button className="btn-secondary small" onClick={() => setAiContext('')}>
                   改用整页
@@ -1316,7 +1391,12 @@ export function Reader({ book, onBack, initialTarget }: ReaderProps) {
 
       {/* 思维导图 */}
       {mindNodes && (
-        <MindmapView nodes={mindNodes} onClose={() => setMindNodes(null)} />
+        <MindmapView
+          nodes={mindNodes}
+          title={mindTitle}
+          onClose={() => { setMindNodes(null); setMindTitle(''); }}
+          onExpand={expandMindChapter}
+        />
       )}
     </div>
   );
