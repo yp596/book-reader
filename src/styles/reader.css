@@ -529,3 +529,53 @@
   border-color: var(--accent);
   box-shadow: 0 4px 15px var(--accent-glow);
 }
+
+/* 高亮颜色点 */
+.hl-colors {
+  display: flex;
+  gap: 6px;
+  align-items: center;
+  padding: 8px 10px;
+  border-right: 1px solid var(--border);
+  margin-right: 2px;
+}
+
+.hl-dot {
+  width: 20px;
+  height: 20px;
+  border-radius: 50%;
+  border: 2px solid transparent;
+  cursor: pointer;
+  padding: 0;
+  transition: var(--transition);
+}
+
+.hl-dot:hover {
+  border-color: white;
+  transform: scale(1.15);
+}
+
+/* 检索词标红 */
+.txt-page mark.search-mark {
+  background: rgba(255, 152, 0, 0.55);
+  color: inherit;
+  border-radius: 2px;
+}
+
+/* 顶栏字体选择 */
+.reader-select {
+  padding: 8px 10px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  background: transparent;
+  color: var(--text-secondary);
+  font-size: 13px;
+  cursor: pointer;
+  outline: none;
+  max-width: 110px;
+}
+
+.reader-select option {
+  background: var(--bg-card);
+  color: var(--text-primary);
+}

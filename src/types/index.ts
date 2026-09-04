@@ -35,6 +35,7 @@ export interface Bookmark {
   book_id: number;
   position: string;
   text?: string;
+  color?: string;
   created_at: string;
 }
 

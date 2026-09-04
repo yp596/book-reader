@@ -11,6 +11,7 @@ interface SettingsData {
   fontSize: number;
   lineHeight: number;
   theme: 'dark' | 'light' | 'sepia';
+  fontFamily: string;
   ttsRate: number;
 }
 
@@ -26,6 +27,7 @@ export function Settings() {
     fontSize: 18,
     lineHeight: 1.8,
     theme: 'dark',
+    fontFamily: 'system',
     ttsRate: 1,
   });
   const [saved, setSaved] = useState(false);
@@ -124,6 +126,16 @@ export function Settings() {
             <option value="dark">深色</option>
             <option value="light">浅色</option>
             <option value="sepia">护眼</option>
+          </select>
+        </div>
+        <div className="form-row">
+          <label>默认字体</label>
+          <select value={settings.fontFamily} onChange={e => handleChange('fontFamily', e.target.value)}>
+            <option value="system">系统默认</option>
+            <option value="serif">宋体</option>
+            <option value="sans">黑体</option>
+            <option value="kai">楷体</option>
+            <option value="mono">等宽</option>
           </select>
         </div>
         <div className="form-row">

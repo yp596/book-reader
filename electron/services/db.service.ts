@@ -136,6 +136,7 @@ export class DatabaseService {
       `ALTER TABLE books ADD COLUMN favorite INTEGER DEFAULT 0`,
       `ALTER TABLE books ADD COLUMN category TEXT DEFAULT ''`,
       `ALTER TABLE books ADD COLUMN toc TEXT DEFAULT ''`,
+      `ALTER TABLE bookmarks ADD COLUMN color TEXT DEFAULT 'yellow'`,
     ]) {
       try {
         this.db.run(ddl);
@@ -310,10 +311,10 @@ export class DatabaseService {
     return this.all('SELECT * FROM bookmarks WHERE book_id = ? ORDER BY created_at DESC', [bookId]);
   }
 
-  insertBookmark(bookmark: { book_id: number; position: string; text?: string }) {
+  insertBookmark(bookmark: { book_id: number; position: string; text?: string; color?: string }) {
     this.run(
-      'INSERT INTO bookmarks (book_id, position, text) VALUES (?, ?, ?)',
-      [bookmark.book_id, bookmark.position, bookmark.text ?? null],
+      'INSERT INTO bookmarks (book_id, position, text, color) VALUES (?, ?, ?, ?)',
+      [bookmark.book_id, bookmark.position, bookmark.text ?? null, bookmark.color ?? 'yellow'],
     );
     const row = this.get('SELECT last_insert_rowid() as id');
     return row?.id;

@@ -1,9 +1,10 @@
-import { useState, useEffect, useRef } from 'react';
+import { useState, useEffect, useRef, type CSSProperties } from 'react';
 import ePub from 'epubjs';
 import * as pdfjsLib from 'pdfjs-dist';
 import PdfWorkerUrl from 'pdfjs-dist/build/pdf.worker.min.mjs?url';
 import { Book, Bookmark, Note, TocEntry } from '../types';
 import { escapeHtml, excerptAround, clampPage } from '../utils/text';
+import { fontStackOf, highlightColorOf, HIGHLIGHT_COLORS } from '../utils/reader-options';
 
 pdfjsLib.GlobalWorkerOptions.workerSrc = PdfWorkerUrl;
 
@@ -50,6 +51,13 @@ export function Reader({ book, onBack, initialTarget }: ReaderProps) {
     lineHeight: 1.8,
     theme: 'dark' as 'dark' | 'light' | 'sepia',
   });
+  // B 批：字体 / 双栏 / 自动翻页 / 检索词高亮
+  const [fontKey, setFontKey] = useState('system');
+  const fontKeyRef = useRef('system');
+  const [dualColumn, setDualColumn] = useState(false);
+  const [autoPlay, setAutoPlay] = useState(false);
+  const [searchMark, setSearchMark] = useState('');
+  const autoTimerRef = useRef<ReturnType<typeof setInterval> | null>(null);
 
   // 选中弹窗 / 笔记草稿
   const [sel, setSel] = useState<SelPopup | null>(null);
@@ -164,10 +172,20 @@ export function Reader({ book, onBack, initialTarget }: ReaderProps) {
 
   useEffect(() => {
     readStartRef.current = Date.now();
-    // 载入朗读速度偏好
+    // 载入朗读速度与字体偏好
     window.electronAPI?.getSetting('ttsRate').then(v => {
       const r = Number(v);
       if (!Number.isNaN(r) && r >= 0.5 && r <= 2) setTtsRate(r);
+    });
+    window.electronAPI?.getSetting('fontFamily').then(v => {
+      if (v && fontStackOf(v)) {
+        fontKeyRef.current = v;
+        setFontKey(v);
+        // 首屏可能已按默认字体渲染，重新应用
+        if (renditionRef.current) {
+          applyTheme(renditionRef.current, 'dark', 18);
+        }
+      }
     });
     loadBook();
     return () => {
@@ -243,13 +261,19 @@ export function Reader({ book, onBack, initialTarget }: ReaderProps) {
     const nav = await epubBook.loaded.navigation;
     setChapters(nav.toc.map((ch: any) => ({ label: (ch.label as string).trim(), href: ch.href })));
 
-    // 恢复已保存的高亮
+    // 恢复已保存的高亮（含颜色）
     try {
       const api = window.electronAPI;
       if (api) {
         const saved = (await api.getBookmarks(book.id)) as Bookmark[];
         for (const b of saved) {
-          try { rendition.annotations.highlight(b.position); } catch { /* CFI 失效则跳过 */ }
+          try {
+            const color = highlightColorOf(b.color || 'yellow');
+            rendition.annotations.highlight(b.position, {}, undefined, undefined, {
+              fill: color.epubFill,
+              'fill-opacity': '0.35',
+            });
+          } catch { /* CFI 失效则跳过 */ }
         }
       }
     } catch { /* 忽略 */ }
@@ -329,14 +353,23 @@ export function Reader({ book, onBack, initialTarget }: ReaderProps) {
     try { lastContentsRef.current?.window.getSelection().removeAllRanges(); } catch { /* 忽略 */ }
   };
 
-  const handleHighlight = async () => {
+  const handleHighlight = async (colorKey: string = 'yellow') => {
     if (!sel) return;
     const api = window.electronAPI;
     if (!api) return;
+    const color = highlightColorOf(colorKey);
     if (book.file_type === 'epub' && renditionRef.current) {
-      renditionRef.current.annotations.highlight(sel.position);
+      renditionRef.current.annotations.highlight(sel.position, {}, undefined, undefined, {
+        fill: color.epubFill,
+        'fill-opacity': '0.35',
+      });
     }
-    await api.addBookmark({ book_id: book.id, position: sel.position, text: sel.text.slice(0, 200) });
+    await api.addBookmark({
+      book_id: book.id,
+      position: sel.position,
+      text: sel.text.slice(0, 200),
+      color: color.key,
+    });
     clearEpubSelection();
     setSel(null);
     await refreshMarks();
@@ -422,26 +455,42 @@ export function Reader({ book, onBack, initialTarget }: ReaderProps) {
     });
   };
 
-  /** 当前 TXT 页渲染（含高亮） */
+  /** TXT 当前页渲染：书签高亮（含颜色）+ 检索词高亮合并 */
   const renderTxtHtml = () => {
     const text = txtPages[pageIndex] || '';
-    const marks = bookmarks
-      .filter(b => b.position.startsWith(`txt:${pageIndex}:`))
-      .map(b => {
-        const parts = b.position.split(':');
-        return { s: Number(parts[2]), e: Number(parts[3]), id: b.id };
-      })
-      .filter(m => !Number.isNaN(m.s) && !Number.isNaN(m.e) && m.s < m.e && m.s < text.length)
-      .sort((a, b) => a.s - b.s);
-    if (marks.length === 0) return null;
+    interface TxtRange { s: number; e: number; cls: string; style?: string }
+    const ranges: TxtRange[] = [];
+    // 书签优先
+    for (const b of bookmarks) {
+      if (!b.position.startsWith(`txt:${pageIndex}:`)) continue;
+      const parts = b.position.split(':');
+      const s = Number(parts[2]);
+      const e = Number(parts[3]);
+      if (Number.isNaN(s) || Number.isNaN(e) || s >= e || s >= text.length) continue;
+      const color = highlightColorOf(b.color || 'yellow');
+      ranges.push({ s, e: Math.min(e, text.length), cls: '', style: `background:${color.css}` });
+    }
+    // 检索词（跳过与书签重叠的部分）
+    if (searchMark) {
+      const kw = searchMark.toLowerCase();
+      const lower = text.toLowerCase();
+      let idx = lower.indexOf(kw);
+      while (idx >= 0) {
+        const overlap = ranges.some(r => idx < r.e && idx + kw.length > r.s);
+        if (!overlap) ranges.push({ s: idx, e: idx + kw.length, cls: 'search-mark' });
+        idx = lower.indexOf(kw, idx + 1);
+      }
+    }
+    if (ranges.length === 0) return null;
+    ranges.sort((a, b) => a.s - b.s);
     let html = '';
     let last = 0;
-    for (const m of marks) {
-      if (m.s < last) continue;
-      const end = Math.min(m.e, text.length);
-      html += escapeHtml(text.slice(last, m.s));
-      html += `<mark data-id="${m.id}">${escapeHtml(text.slice(m.s, end))}</mark>`;
-      last = end;
+    for (const r of ranges) {
+      if (r.s < last) continue;
+      html += escapeHtml(text.slice(last, r.s));
+      const open = r.cls ? `<mark class="${r.cls}">` : `<mark style="${r.style}">`;
+      html += `${open}${escapeHtml(text.slice(r.s, r.e))}</mark>`;
+      last = r.e;
     }
     html += escapeHtml(text.slice(last));
     return html;
@@ -521,8 +570,9 @@ export function Reader({ book, onBack, initialTarget }: ReaderProps) {
       light: 'background: #ffffff; color: #333333;',
       sepia: 'background: #f4ecd8; color: #5b4636;',
     };
+    const stack = fontStackOf(fontKeyRef.current);
     rendition.themes.default({
-      'body': themes[theme],
+      'body': themes[theme] + (stack ? ` font-family: ${stack};` : ''),
       'p, div, span': { 'font-size': `${fontSize}px !important` },
     });
   };
@@ -543,6 +593,49 @@ export function Reader({ book, onBack, initialTarget }: ReaderProps) {
     setSettings(s => ({ ...s, fontSize: newSize }));
     if (renditionRef.current) applyTheme(renditionRef.current, settings.theme, newSize);
   };
+
+  const changeFont = (key: string) => {
+    fontKeyRef.current = key;
+    setFontKey(key);
+    window.electronAPI?.setSetting('fontFamily', key);
+    if (renditionRef.current) {
+      applyTheme(renditionRef.current, settings.theme, settings.fontSize);
+    }
+  };
+
+  /** 双栏：TXT 用 CSS 分栏，EPUB 用 spread */
+  const toggleDualColumn = () => {
+    const next = !dualColumn;
+    setDualColumn(next);
+    if (book.file_type === 'epub' && renditionRef.current) {
+      try {
+        renditionRef.current.spread(next ? 'always' : 'none');
+      } catch { /* 忽略 */ }
+    }
+  };
+
+  /** 自动翻页 */
+  const stopAuto = () => {
+    if (autoTimerRef.current) {
+      clearInterval(autoTimerRef.current);
+      autoTimerRef.current = null;
+    }
+    setAutoPlay(false);
+  };
+
+  const nextRef = useRef(() => {});
+  nextRef.current = () => advancePage(1);
+
+  const toggleAutoPlay = () => {
+    if (autoPlay) {
+      stopAuto();
+      return;
+    }
+    setAutoPlay(true);
+    autoTimerRef.current = setInterval(() => nextRef.current(), 3000);
+  };
+
+  useEffect(() => () => stopAuto(), []);
 
   // ---------- 翻页 ----------
 
@@ -604,26 +697,36 @@ export function Reader({ book, onBack, initialTarget }: ReaderProps) {
     return () => clearInterval(t);
   }, [phoneMode]);
 
-  const handlePrev = () => {
-    setSel(null);
+  /** 无副作用翻页（自动播放用，不停播） */
+  const advancePage = (dir: 1 | -1) => {
     if (book.file_type === 'epub') {
-      renditionRef.current?.prev();
-    } else if (pageIndex > 0) {
+      clearEpubSearchMarks();
+      setSearchMark('');
+      if (dir > 0) renditionRef.current?.next();
+      else renditionRef.current?.prev();
+    } else if (dir > 0 && pageIndex < totalPages - 1) {
+      const next = pageIndex + 1;
+      setPageIndex(next);
+      setSearchMark('');
+      window.electronAPI?.updateProgress(book.id, totalPages > 0 ? next / totalPages : 0);
+    } else if (dir < 0 && pageIndex > 0) {
       const next = pageIndex - 1;
       setPageIndex(next);
+      setSearchMark('');
       window.electronAPI?.updateProgress(book.id, totalPages > 0 ? next / totalPages : 0);
     }
   };
 
+  const handlePrev = () => {
+    setSel(null);
+    stopAuto();
+    advancePage(-1);
+  };
+
   const handleNext = () => {
     setSel(null);
-    if (book.file_type === 'epub') {
-      renditionRef.current?.next();
-    } else if (pageIndex < totalPages - 1) {
-      const next = pageIndex + 1;
-      setPageIndex(next);
-      window.electronAPI?.updateProgress(book.id, totalPages > 0 ? next / totalPages : 0);
-    }
+    stopAuto();
+    advancePage(1);
   };
 
   const goToChapter = (href: string) => {
@@ -720,11 +823,67 @@ export function Reader({ book, onBack, initialTarget }: ReaderProps) {
 
   const jumpToHit = (hit: SearchHit) => {
     if (book.file_type === 'txt' && typeof hit.target === 'number') {
+      setSearchMark(keyword.trim());
       setPageIndex(hit.target);
     } else if (book.file_type === 'epub' && typeof hit.target === 'string') {
-      renditionRef.current?.display(hit.target);
+      const kw = keyword.trim();
+      setSearchMark(kw);
+      // 章节显示完成后再框选关键词
+      renditionRef.current?.display(hit.target).then(() => markEpubKeyword(kw)).catch(() => {});
     }
     setPanel(null);
+  };
+
+  /** 清除 EPUB 章内检索标红 */
+  const clearEpubSearchMarks = () => {
+    try {
+      const contents = renditionRef.current?.getContents?.() ?? [];
+      for (const c of contents) {
+        c.document.querySelectorAll('mark.epub-search').forEach((el: Element) => {
+          const parent = el.parentNode;
+          if (!parent) return;
+          parent.replaceChild(c.document.createTextNode(el.textContent || ''), el);
+          parent.normalize();
+        });
+      }
+    } catch { /* 忽略 */ }
+  };
+
+  /** EPUB 当前章节内框选关键词（每文本节点首处） */
+  const markEpubKeyword = (kw: string) => {
+    clearEpubSearchMarks();
+    if (!kw.trim()) return;
+    try {
+      const lower = kw.toLowerCase();
+      const contents = renditionRef.current?.getContents?.() ?? [];
+      for (const c of contents) {
+        const doc = c.document as Document;
+        const walker = doc.createTreeWalker(doc.body, window.NodeFilter.SHOW_TEXT);
+        const nodes: Text[] = [];
+        let n: Node | null;
+        while ((n = walker.nextNode())) {
+          if ((n.parentElement as Element | null)?.closest?.('mark.epub-search')) continue;
+          nodes.push(n as Text);
+        }
+        for (const t of nodes) {
+          const text = t.textContent || '';
+          const idx = text.toLowerCase().indexOf(lower);
+          if (idx < 0) continue;
+          const mark = doc.createElement('mark');
+          mark.className = 'epub-search';
+          mark.setAttribute('style', 'background:rgba(255,152,0,.55);color:inherit;border-radius:2px;');
+          mark.textContent = text.slice(idx, idx + kw.length);
+          const parent = t.parentNode;
+          if (!parent) continue;
+          parent.insertBefore(doc.createTextNode(text.slice(0, idx)), t);
+          parent.insertBefore(mark, t);
+          parent.insertBefore(doc.createTextNode(text.slice(idx + kw.length)), t);
+          parent.removeChild(t);
+        }
+      }
+    } catch (err) {
+      console.error('标红关键词失败:', err);
+    }
   };
 
   // ---------- 渲染 ----------
@@ -741,6 +900,18 @@ export function Reader({ book, onBack, initialTarget }: ReaderProps) {
         <button className="back-btn" onClick={onBack}>← 返回</button>
         <h2 className="reader-title">{book.title}</h2>
         <div className="reader-actions">
+          <select
+            className="reader-select"
+            value={fontKey}
+            onChange={e => changeFont(e.target.value)}
+            title="字体"
+          >
+            <option value="system">系统字体</option>
+            <option value="serif">宋体</option>
+            <option value="sans">黑体</option>
+            <option value="kai">楷体</option>
+            <option value="mono">等宽</option>
+          </select>
           <button onClick={() => changeFontSize(-2)} title="缩小字号">A-</button>
           <button onClick={() => changeFontSize(2)} title="放大字号">A+</button>
           <button onClick={() => changeTheme('dark')} className={settings.theme === 'dark' ? 'active' : ''}>🌙</button>
@@ -782,6 +953,22 @@ export function Reader({ book, onBack, initialTarget }: ReaderProps) {
               ✨
             </button>
           )}
+          {book.file_type !== 'pdf' && (
+            <button
+              onClick={toggleDualColumn}
+              className={dualColumn ? 'active' : ''}
+              title="双栏 / 单栏"
+            >
+              📖
+            </button>
+          )}
+          <button
+            onClick={toggleAutoPlay}
+            className={autoPlay ? 'active' : ''}
+            title={autoPlay ? '停止自动翻页' : '自动翻页'}
+          >
+            {autoPlay ? '⏸' : '▶'}
+          </button>
           <button
             onClick={() => setPhoneMode(m => !m)}
             className={phoneMode ? 'active' : ''}
@@ -937,7 +1124,13 @@ export function Reader({ book, onBack, initialTarget }: ReaderProps) {
             <div
               ref={txtRef}
               className="txt-page"
-              style={{ fontSize: settings.fontSize, lineHeight: settings.lineHeight }}
+              style={{
+                fontSize: settings.fontSize,
+                lineHeight: settings.lineHeight,
+                fontFamily: fontStackOf(fontKey) || undefined,
+                columnCount: dualColumn ? 2 : undefined,
+                columnGap: dualColumn ? '48px' : undefined,
+              } as CSSProperties}
               onMouseUp={handleTxtMouseUp}
             >
               {txtHtml ? (
@@ -978,7 +1171,17 @@ export function Reader({ book, onBack, initialTarget }: ReaderProps) {
       {/* 选中操作条 */}
       {sel && (
         <div className="select-popup" style={{ left: sel.x, top: sel.y }}>
-          <button onClick={handleHighlight} title="高亮并加入书签">🖍 高亮</button>
+          <div className="hl-colors">
+            {HIGHLIGHT_COLORS.map(c => (
+              <button
+                key={c.key}
+                className="hl-dot"
+                style={{ background: c.css }}
+                title={`高亮（${c.label}）`}
+                onClick={() => handleHighlight(c.key)}
+              />
+            ))}
+          </div>
           <button
             onClick={() => {
               setNoteDraft({ text: sel.text, position: sel.position });
