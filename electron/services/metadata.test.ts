@@ -3,7 +3,7 @@ import fs from 'fs';
 import os from 'os';
 import path from 'path';
 import JSZip from 'jszip';
-import { extractMetadata } from './metadata';
+import { extractMetadata, parseTxtChapters } from './metadata';
 
 let tmpDir: string;
 
@@ -78,8 +78,7 @@ describe('EPUB 元数据', () => {
   });
 });
 
-describe('兜底', () => {
-  it('未知格式返回 null', async () => {
+describe('兜底', () => {  it('未知格式返回 null', async () => {
     const p = path.join(tmpDir, 'book.xyz');
     fs.writeFileSync(p, 'data');
     expect(await extractMetadata(p, '.xyz')).toBeNull();
@@ -87,5 +86,35 @@ describe('兜底', () => {
 
   it('不存在的文件返回 null（不抛异常）', async () => {
     expect(await extractMetadata(path.join(tmpDir, 'missing.txt'), '.txt')).toBeNull();
+  });
+});
+
+describe('parseTxtChapters', () => {
+  it('识别第X章标题', () => {
+    const text = '三体\n\n第一章 科学边界\n正文正文\n\n第二章 台球\n更多正文';
+    const toc = parseTxtChapters(text);
+    expect(toc.map(t => t.label)).toEqual(['第一章 科学边界', '第二章 台球']);
+  });
+
+  it('识别序言尾声番外', () => {
+    const text = '序言\nxxx\n第一章 开始\nxxx\n尾声\nxxx';
+    const toc = parseTxtChapters(text);
+    expect(toc.map(t => t.label)).toEqual(['序言', '第一章 开始', '尾声']);
+  });
+
+  it('超长行不算章节', () => {
+    const text = '第一章 ' + 'x'.repeat(50) + '\n正文';
+    expect(parseTxtChapters(text)).toEqual([]);
+  });
+
+  it('无章节返回空数组', () => {
+    expect(parseTxtChapters('普通正文\n换行继续')).toEqual([]);
+  });
+
+  it('页码随字数递增', () => {
+    const text = '第一章\n' + 'x'.repeat(5000) + '\n第二章\n正文';
+    const toc = parseTxtChapters(text);
+    expect(toc[0].page).toBe(0);
+    expect(toc[1].page).toBeGreaterThan(0);
   });
 });

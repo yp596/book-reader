@@ -8,6 +8,14 @@ export interface Book {
   progress: number;
   last_read_at?: string;
   created_at: string;
+  favorite?: number;
+  category?: string;
+}
+
+export interface TocEntry {
+  label: string;
+  href: string;
+  page?: number;
 }
 
 export interface BookSource {
@@ -60,6 +68,13 @@ declare global {
   interface Window {
     electronAPI: {
       importBook: () => Promise<any>;
+      importPaths: (paths: string[]) => Promise<any>;
+      getPathForFile: (file: File) => string;
+      renameBook: (id: number, title: string) => Promise<void>;
+      toggleFavorite: (id: number) => Promise<number>;
+      setCategory: (id: number, category: string) => Promise<void>;
+      getCategories: () => Promise<string[]>;
+      getBookToc: (id: number) => Promise<TocEntry[]>;
       getAllBooks: () => Promise<Book[]>;
       getBookById: (id: number) => Promise<Book>;
       deleteBook: (id: number) => Promise<void>;

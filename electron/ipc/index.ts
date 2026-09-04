@@ -2,9 +2,38 @@ import { ipcMain, dialog, BrowserWindow, app, shell } from 'electron';
 import fs from 'fs';
 import path from 'path';
 import { DatabaseService } from '../services/db.service';
-import { extractMetadata } from '../services/metadata';
+import { extractMetadata, extractToc } from '../services/metadata';
 import { buildCrawlerFromRow } from '../services/book-source';
 import { AiService } from '../services/ai-service';
+
+/** 单文件导入复用逻辑（对话框/拖拽共用） */
+async function importOneFile(db: DatabaseService, filePath: string) {
+  const ext = path.extname(filePath).toLowerCase();
+  if (!['.epub', '.txt', '.pdf'].includes(ext)) {
+    throw new Error(`不支持的格式：${ext || '(无后缀)'}`);
+  }
+  const fileName = path.basename(filePath, path.extname(filePath));
+  const booksDir = path.join(app.getPath('userData'), 'books');
+  if (!fs.existsSync(booksDir)) {
+    fs.mkdirSync(booksDir, { recursive: true });
+  }
+  const destPath = path.join(booksDir, `${Date.now()}-${path.basename(filePath)}`);
+  fs.copyFileSync(filePath, destPath);
+
+  const meta = await extractMetadata(destPath, ext);
+  const id = db.insertBook({
+    title: meta?.title ?? fileName,
+    author: meta?.author,
+    file_path: destPath,
+    file_type: ext.slice(1),
+  });
+  // 提取目录并缓存
+  try {
+    const toc = await extractToc(destPath, ext);
+    if (toc.length > 0) db.setBookToc(Number(id), JSON.stringify(toc));
+  } catch { /* 目录失败不阻塞导入 */ }
+  return { id: Number(id), path: destPath };
+}
 
 export function registerIpcHandlers() {
   const db = DatabaseService.getInstance();
@@ -24,32 +53,30 @@ export function registerIpcHandlers() {
 
     if (result.canceled) return [];
 
-    const booksDir = path.join(app.getPath('userData'), 'books');
-    if (!fs.existsSync(booksDir)) {
-      fs.mkdirSync(booksDir, { recursive: true });
-    }
-
     const imported = [];
     for (const filePath of result.filePaths) {
-      const ext = path.extname(filePath);
-      const fileName = path.basename(filePath, ext);
-      const destPath = path.join(booksDir, `${Date.now()}-${path.basename(filePath)}`);
-
-      fs.copyFileSync(filePath, destPath);
-
-      // 优先从内容提取书名作者，失败回退文件名
-      const meta = await extractMetadata(destPath, ext);
-
-      const id = db.insertBook({
-        title: meta?.title ?? fileName,
-        author: meta?.author,
-        file_path: destPath,
-        file_type: ext.slice(1),
-      });
-
-      imported.push({ id: Number(id), path: destPath });
+      try {
+        imported.push(await importOneFile(db, filePath));
+      } catch (err) {
+        console.error(`导入失败 [${filePath}]:`, err);
+      }
     }
 
+    return imported;
+  });
+
+  // 拖拽导入（渲染进程传真实路径）
+  ipcMain.handle('books:importPaths', async (_event, filePaths: string[]) => {
+    const imported = [];
+    for (const filePath of filePaths) {
+      try {
+        if (fs.existsSync(filePath) && fs.statSync(filePath).isFile()) {
+          imported.push(await importOneFile(db, filePath));
+        }
+      } catch (err) {
+        console.error(`导入失败 [${filePath}]:`, err);
+      }
+    }
     return imported;
   });
 
@@ -108,6 +135,39 @@ export function registerIpcHandlers() {
   // 清除全部阅读记录
   ipcMain.handle('books:clearHistory', () => {
     db.clearReadingHistory();
+  });
+
+  // 重命名 / 收藏 / 分类
+  ipcMain.handle('books:rename', (_event, id: number, title: string) => {
+    if (!title?.trim()) throw new Error('书名不能为空');
+    db.renameBook(id, title);
+  });
+
+  ipcMain.handle('books:toggleFavorite', (_event, id: number) => {
+    return db.toggleFavorite(id);
+  });
+
+  ipcMain.handle('books:setCategory', (_event, id: number, category: string) => {
+    db.setCategory(id, category);
+  });
+
+  ipcMain.handle('books:categories', () => {
+    return db.getCategories();
+  });
+
+  // 书籍目录（读导入时缓存，无缓存则实时解析）
+  ipcMain.handle('books:toc', async (_event, id: number) => {
+    const book = db.getBookById(id) as any;
+    if (!book) throw new Error('书籍不存在');
+    if (book.toc) {
+      try {
+        const cached = JSON.parse(book.toc);
+        if (Array.isArray(cached) && cached.length > 0) return cached;
+      } catch { /* 缓存损坏则重新解析 */ }
+    }
+    const toc = await extractToc(book.file_path, '.' + book.file_type);
+    if (toc.length > 0) db.setBookToc(id, JSON.stringify(toc));
+    return toc;
   });
 
   // 全屏切换

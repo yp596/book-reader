@@ -1,8 +1,10 @@
-import { contextBridge, ipcRenderer } from 'electron';
+import { contextBridge, ipcRenderer, webUtils } from 'electron';
 
 contextBridge.exposeInMainWorld('electronAPI', {
   // Books
   importBook: () => ipcRenderer.invoke('books:import'),
+  importPaths: (paths: string[]) => ipcRenderer.invoke('books:importPaths', paths),
+  getPathForFile: (file: File) => webUtils.getPathForFile(file),
   getAllBooks: () => ipcRenderer.invoke('books:getAll'),
   getBookById: (id: number) => ipcRenderer.invoke('books:getById', id),
   deleteBook: (id: number) => ipcRenderer.invoke('books:delete', id),
@@ -20,6 +22,16 @@ contextBridge.exposeInMainWorld('electronAPI', {
     ipcRenderer.invoke('window:toggleFullscreen'),
   refreshBookMetadata: (id: number) =>
     ipcRenderer.invoke('books:refreshMetadata', id),
+  renameBook: (id: number, title: string) =>
+    ipcRenderer.invoke('books:rename', id, title),
+  toggleFavorite: (id: number) =>
+    ipcRenderer.invoke('books:toggleFavorite', id),
+  setCategory: (id: number, category: string) =>
+    ipcRenderer.invoke('books:setCategory', id, category),
+  getCategories: () =>
+    ipcRenderer.invoke('books:categories'),
+  getBookToc: (id: number) =>
+    ipcRenderer.invoke('books:toc', id),
 
   // Sources
   getAllSources: () => ipcRenderer.invoke('sources:getAll'),

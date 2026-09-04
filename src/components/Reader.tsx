@@ -2,7 +2,7 @@ import { useState, useEffect, useRef } from 'react';
 import ePub from 'epubjs';
 import * as pdfjsLib from 'pdfjs-dist';
 import PdfWorkerUrl from 'pdfjs-dist/build/pdf.worker.min.mjs?url';
-import { Book, Bookmark, Note } from '../types';
+import { Book, Bookmark, Note, TocEntry } from '../types';
 import { escapeHtml, excerptAround, clampPage } from '../utils/text';
 
 pdfjsLib.GlobalWorkerOptions.workerSrc = PdfWorkerUrl;
@@ -10,6 +10,8 @@ pdfjsLib.GlobalWorkerOptions.workerSrc = PdfWorkerUrl;
 interface ReaderProps {
   book: Book;
   onBack: () => void;
+  /** 从详情页目录跳入的初始位置 */
+  initialTarget?: TocEntry | null;
 }
 
 type Panel = 'toc' | 'notes' | 'marks' | 'search' | 'ai' | null;
@@ -29,7 +31,7 @@ interface SearchHit {
   target: string | number;
 }
 
-export function Reader({ book, onBack }: ReaderProps) {
+export function Reader({ book, onBack, initialTarget }: ReaderProps) {
   const viewerRef = useRef<HTMLDivElement>(null);
   const bookRef = useRef<any>(null);
   const renditionRef = useRef<any>(null);
@@ -224,7 +226,12 @@ export function Reader({ book, onBack }: ReaderProps) {
 
     renditionRef.current = rendition;
     applyTheme(rendition, settings.theme, settings.fontSize);
-    await rendition.display();
+    // 详情页跳入则直达章节，否则从头显示
+    if (initialTarget?.href) {
+      await rendition.display(initialTarget.href);
+    } else {
+      await rendition.display();
+    }
 
     const nav = await epubBook.loaded.navigation;
     setChapters(nav.toc.map((ch: any) => ({ label: (ch.label as string).trim(), href: ch.href })));
@@ -282,8 +289,9 @@ export function Reader({ book, onBack }: ReaderProps) {
     }
     if (current) pages.push(current);
     setTxtPages(pages.length > 0 ? pages : ['（空文件）']);
-    setPageIndex(0);
-    setTotalPages(pages.length || 1);
+    const total = pages.length || 1;
+    setPageIndex(initialTarget?.page != null ? clampPage(initialTarget.page + 1, total) - 1 : 0);
+    setTotalPages(total);
   };
 
   const loadPdf = async (bytes: Uint8Array) => {
@@ -291,7 +299,9 @@ export function Reader({ book, onBack }: ReaderProps) {
     const pdfDoc = await pdfjsLib.getDocument({ data }).promise;
     pdfDocRef.current = pdfDoc;
     setTotalPages(pdfDoc.numPages);
-    setPageIndex(0);
+    setPageIndex(
+      initialTarget?.page != null ? clampPage(initialTarget.page, pdfDoc.numPages) - 1 : 0,
+    );
     setPdfReady(true);
   };
 

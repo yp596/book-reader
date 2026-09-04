@@ -131,6 +131,16 @@ export class DatabaseService {
     try {
       this.db.run(`ALTER TABLE book_sources ADD COLUMN rules TEXT DEFAULT ''`);
     } catch { /* 列已存在则忽略 */ }
+    // 存量库迁移：书籍表加收藏/分类/目录缓存列
+    for (const ddl of [
+      `ALTER TABLE books ADD COLUMN favorite INTEGER DEFAULT 0`,
+      `ALTER TABLE books ADD COLUMN category TEXT DEFAULT ''`,
+      `ALTER TABLE books ADD COLUMN toc TEXT DEFAULT ''`,
+    ]) {
+      try {
+        this.db.run(ddl);
+      } catch { /* 列已存在则忽略 */ }
+    }
     this.save();
   }
 
@@ -184,6 +194,34 @@ export class DatabaseService {
 
   updateBookInfo(id: number, title: string, author: string | null) {
     this.run('UPDATE books SET title = ?, author = ? WHERE id = ?', [title, author, id]);
+  }
+
+  renameBook(id: number, title: string) {
+    this.run('UPDATE books SET title = ? WHERE id = ?', [title.trim(), id]);
+  }
+
+  toggleFavorite(id: number): number {
+    const row = this.get('SELECT favorite FROM books WHERE id = ?', [id]) as
+      | { favorite: number }
+      | undefined;
+    const next = row?.favorite ? 0 : 1;
+    this.run('UPDATE books SET favorite = ? WHERE id = ?', [next, id]);
+    return next;
+  }
+
+  setCategory(id: number, category: string) {
+    this.run('UPDATE books SET category = ? WHERE id = ?', [category.trim(), id]);
+  }
+
+  getCategories(): string[] {
+    const rows = this.all(
+      `SELECT DISTINCT category FROM books WHERE category IS NOT NULL AND category != '' ORDER BY category`,
+    );
+    return rows.map(r => r.category as string);
+  }
+
+  setBookToc(id: number, tocJson: string) {
+    this.run('UPDATE books SET toc = ? WHERE id = ?', [tocJson, id]);
   }
 
   deleteBook(id: number) {
