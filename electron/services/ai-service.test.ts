@@ -63,4 +63,11 @@ describe('快捷方法', () => {
     expect(await svc.translate('hello')).toBe('done');
     expect(fetch).toHaveBeenCalledTimes(3);
   });
+
+  it('translate 提示词要求只输出译文（防小模型话痨）', async () => {
+    stubChatReply('译文');
+    await makeService().translate('hello');
+    const body = (fetch as any).mock.calls[0][1].body as string;
+    expect(body).toMatch(/只输出译文/);
+  });
 });

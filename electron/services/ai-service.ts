@@ -64,10 +64,12 @@ export class AiService {
   }
 
   async translate(text: string, targetLang: string = 'zh-CN'): Promise<string> {
+    const target = targetLang === 'zh-CN' ? '中文' : '英文';
     return this.chat([
       {
         role: 'system',
-        content: `你是一个专业的翻译助手。请将以下内容翻译成${targetLang === 'zh-CN' ? '中文' : '英文'}。`,
+        // 小模型易话痨：强制只输出译文
+        content: `你是一个翻译助手。请将用户输入翻译成${target}。只输出译文，不要解释、不要注音、不要添加任何多余内容。`,
       },
       {
         role: 'user',
