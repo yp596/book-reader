@@ -202,7 +202,7 @@ export function BookList({ books, searchQuery, onSelectBook, onShowDetail, onRef
     >
       {dragOver && (
         <div className="drop-overlay">
-          <div className="drop-hint">📚 松开导入 EPUB / TXT / PDF</div>
+          <div className="drop-hint">📚 松开导入 EPUB / TXT / PDF / DOCX</div>
         </div>
       )}
 
@@ -277,7 +277,7 @@ export function BookList({ books, searchQuery, onSelectBook, onShowDetail, onRef
         <div className="empty-state">
           <div className="empty-icon">📚</div>
           <h2>书架空空如也</h2>
-          <p>点击「导入书籍」或直接拖入 EPUB、TXT、PDF 文件</p>
+          <p>点击「导入书籍」或直接拖入 EPUB、TXT、PDF、DOCX 文件</p>
         </div>
       ) : viewMode === 'grid' ? (
         <div className="book-grid">

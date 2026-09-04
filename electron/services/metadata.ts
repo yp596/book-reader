@@ -1,6 +1,8 @@
 import fs from 'fs';
 import JSZip from 'jszip';
 import * as pdfjsLib from 'pdfjs-dist';
+import mammoth from 'mammoth';
+import * as cheerio from 'cheerio/slim';
 
 export interface BookMetadata {
   title: string;
@@ -24,6 +26,8 @@ export async function extractMetadata(filePath: string, ext: string): Promise<Bo
         return await extractPdfMetadata(filePath);
       case '.txt':
         return extractTxtMetadata(filePath);
+      case '.docx':
+        return await extractDocxMetadata(filePath);
       default:
         return null;
     }
@@ -193,8 +197,7 @@ export function parseTxtChapters(text: string): TocEntry[] {
   return entries;
 }
 
-function readTextHead(filePath: string, maxBytes = 65536): string {
-  const buffer = fs.readFileSync(filePath);
+function readTextHead(filePath: string, maxBytes = 65536): string {  const buffer = fs.readFileSync(filePath);
   const head = buffer.slice(0, maxBytes);
   try {
     return new TextDecoder('utf-8', { fatal: true }).decode(head);
@@ -240,4 +243,64 @@ async function extractPdfToc(filePath: string): Promise<TocEntry[]> {
   } finally {
     await pdfDoc.destroy();
   }
+}
+
+// ============ DOCX ============
+
+/** DOCX：读 core.xml 的标题作者 */
+async function extractDocxMetadata(filePath: string): Promise<BookMetadata | null> {
+  const buffer = fs.readFileSync(filePath);
+  const zip = await JSZip.loadAsync(buffer);
+  const coreFile = zip.file('docProps/core.xml');
+  if (coreFile) {
+    const core = await coreFile.async('string');
+    const title = /<dc:title>([^<]*)<\/dc:title>/.exec(core)?.[1]?.trim();
+    const author = /<dc:creator>([^<]*)<\/dc:creator>/.exec(core)?.[1]?.trim();
+    if (title) return { title: decodeXmlEntities(title), author: author || undefined };
+  }
+  // 回退：首个标题
+  const chapters = await docxToChapters(filePath);
+  const firstTitle = chapters.find(c => c.title)?.title;
+  return firstTitle ? { title: firstTitle } : null;
+}
+
+/** DOCX 转章节：mammoth 转 HTML，按 h1/h2 切章，正文转纯文本段落 */
+export async function docxToChapters(
+  filePath: string,
+): Promise<{ title: string; content: string }[]> {
+  const buffer = fs.readFileSync(filePath);
+  const { value: html } = await mammoth.convertToHtml({ buffer });
+  const $ = cheerio.load(html);
+  const chapters: { title: string; paras: string[] }[] = [];
+  let current: { title: string; paras: string[] } = { title: '', paras: [] };
+
+  const flush = () => {
+    if (current.title || current.paras.length > 0) chapters.push(current);
+    current = { title: '', paras: [] };
+  };
+
+  // slim 的 load 不包 body，用文档序选择器并跳过嵌套元素
+  $('h1, h2, p, li').each((_, el) => {
+    if ($(el).parents('h1, h2, p, li').length > 0) return;
+    const tag = (el as any).tagName?.toLowerCase() ?? '';
+    const text = $(el).text().trim();
+    if (!text) return;
+    if (tag === 'h1' || tag === 'h2') {
+      flush();
+      current = { title: text.slice(0, 100), paras: [] };
+    } else {
+      current.paras.push(text);
+    }
+  });
+  flush();
+
+  if (chapters.length === 0) return [];
+  // 无标题文档：合成单章
+  if (chapters.length === 1 && !chapters[0].title) {
+    return [{ title: '正文', content: chapters[0].paras.join('\n') }];
+  }
+  return chapters.map((c, i) => ({
+    title: c.title || `第 ${i + 1} 节`,
+    content: c.paras.join('\n'),
+  }));
 }

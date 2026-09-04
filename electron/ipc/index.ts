@@ -2,7 +2,7 @@ import { ipcMain, dialog, BrowserWindow, app, shell, Notification } from 'electr
 import fs from 'fs';
 import path from 'path';
 import { DatabaseService } from '../services/db.service';
-import { extractMetadata, extractToc } from '../services/metadata';
+import { extractMetadata, extractToc, docxToChapters } from '../services/metadata';
 import { buildCrawlerFromRow, applyTextFilters } from '../services/book-source';
 import { buildEpub } from '../services/epub-export';
 import { AiService } from '../services/ai-service';
@@ -43,7 +43,7 @@ async function fetchChapterContent(
 /** 单文件导入复用逻辑（对话框/拖拽共用） */
 async function importOneFile(db: DatabaseService, filePath: string) {
   const ext = path.extname(filePath).toLowerCase();
-  if (!['.epub', '.txt', '.pdf'].includes(ext)) {
+  if (!['.epub', '.txt', '.pdf', '.docx'].includes(ext)) {
     throw new Error(`不支持的格式：${ext || '(无后缀)'}`);
   }
   const fileName = path.basename(filePath, path.extname(filePath));
@@ -51,22 +51,41 @@ async function importOneFile(db: DatabaseService, filePath: string) {
   if (!fs.existsSync(booksDir)) {
     fs.mkdirSync(booksDir, { recursive: true });
   }
-  const destPath = path.join(booksDir, `${Date.now()}-${path.basename(filePath)}`);
-  fs.copyFileSync(filePath, destPath);
 
-  const meta = await extractMetadata(destPath, ext);
+  // DOCX：导入时转 EPUB 落盘，后续全按 EPUB 走（阅读/目录/检索零改动）
+  let storePath = filePath;
+  let storeExt = ext;
+  let docxToc: { label: string; href: string }[] | null = null;
+  if (ext === '.docx') {
+    const chapters = await docxToChapters(filePath);
+    if (chapters.length === 0) throw new Error('DOCX 内容为空或解析失败');
+    const meta = await extractMetadata(filePath, ext);
+    const title = meta?.title ?? fileName;
+    const { buildEpub } = await import('../services/epub-export');
+    const buf = await buildEpub(title, chapters);
+    storePath = path.join(booksDir, `${Date.now()}-${fileName}.epub`);
+    fs.writeFileSync(storePath, buf);
+    storeExt = '.epub';
+    docxToc = chapters.map((c, i) => ({ label: c.title, href: `Text/ch${i + 1}.xhtml` }));
+  } else {
+    const destPath = path.join(booksDir, `${Date.now()}-${path.basename(filePath)}`);
+    fs.copyFileSync(filePath, destPath);
+    storePath = destPath;
+  }
+
+  const meta = ext === '.docx' ? await extractMetadata(filePath, ext) : await extractMetadata(storePath, storeExt);
   const id = db.insertBook({
     title: meta?.title ?? fileName,
     author: meta?.author,
-    file_path: destPath,
-    file_type: ext.slice(1),
+    file_path: storePath,
+    file_type: storeExt.slice(1),
   });
-  // 提取目录并缓存
+  // 提取目录并缓存（DOCX 用转换时的章节，EPUB 读 NCX）
   try {
-    const toc = await extractToc(destPath, ext);
+    const toc = docxToc ?? (await extractToc(storePath, storeExt));
     if (toc.length > 0) db.setBookToc(Number(id), JSON.stringify(toc));
   } catch { /* 目录失败不阻塞导入 */ }
-  return { id: Number(id), path: destPath };
+  return { id: Number(id), path: storePath };
 }
 
 export function registerIpcHandlers() {
@@ -79,7 +98,7 @@ export function registerIpcHandlers() {
     const result = await dialog.showOpenDialog(win!, {
       title: '导入书籍',
       filters: [
-        { name: '电子书', extensions: ['epub', 'txt', 'pdf'] },
+        { name: '电子书', extensions: ['epub', 'txt', 'pdf', 'docx'] },
         { name: '所有文件', extensions: ['*'] },
       ],
       properties: ['openFile', 'multiSelections'],

@@ -3,7 +3,7 @@ import fs from 'fs';
 import os from 'os';
 import path from 'path';
 import JSZip from 'jszip';
-import { extractMetadata, parseTxtChapters } from './metadata';
+import { extractMetadata, parseTxtChapters, docxToChapters } from './metadata';
 
 let tmpDir: string;
 
@@ -116,5 +116,49 @@ describe('parseTxtChapters', () => {
     const toc = parseTxtChapters(text);
     expect(toc[0].page).toBe(0);
     expect(toc[1].page).toBeGreaterThan(0);
+  });
+});
+
+describe('DOCX', () => {
+  const CONTENT_TYPES =
+    '<?xml version="1.0"?><Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"><Default Extension="xml" ContentType="application/xml"/><Override PartName="/word/document.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.document.main+xml"/></Types>';
+
+  async function makeDocx(opts?: { title?: string; author?: string; body?: string }): Promise<string> {
+    const JSZipMod = (await import('jszip')).default;
+    const zip = new JSZipMod();
+    zip.file('[Content_Types].xml', CONTENT_TYPES);
+    const paras = (opts?.body ?? '<w:p><w:pPr><w:pStyle w:val="Heading1"/></w:pPr><w:r><w:t>第一章</w:t></w:r></w:p><w:p><w:r><w:t>正文内容</w:t></w:r></w:p>');
+    zip.file(
+      'word/document.xml',
+      `<?xml version="1.0"?><w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:body>${paras}</w:body></w:document>`,
+    );
+    if (opts?.title || opts?.author) {
+      zip.file(
+        'docProps/core.xml',
+        `<?xml version="1.0"?><cp:coreProperties xmlns:cp="http://schemas.openxmlformats.org/package/2006/metadata/core-properties" xmlns:dc="http://purl.org/dc/elements/1.1/">${opts.title ? `<dc:title>${opts.title}</dc:title>` : ''}${opts.author ? `<dc:creator>${opts.author}</dc:creator>` : ''}</cp:coreProperties>`,
+      );
+    }
+    const p = path.join(tmpDir, `test-${Date.now()}.docx`);
+    fs.writeFileSync(p, await zip.generateAsync({ type: 'nodebuffer' }));
+    return p;
+  }
+
+  it('读 core.xml 书名作者', async () => {
+    const p = await makeDocx({ title: '文档标题', author: '作者名' });
+    expect(await extractMetadata(p, '.docx')).toEqual({ title: '文档标题', author: '作者名' });
+  });
+
+  it('无 core.xml 回退首标题', async () => {
+    const p = await makeDocx();
+    expect(await extractMetadata(p, '.docx')).toEqual({ title: '第一章' });
+  });
+
+  it('按标题切章', async () => {
+    const p = await makeDocx({
+      body: '<w:p><w:pPr><w:pStyle w:val="Heading1"/></w:pPr><w:r><w:t>上篇</w:t></w:r></w:p><w:p><w:r><w:t>内容一</w:t></w:r></w:p><w:p><w:pPr><w:pStyle w:val="Heading2"/></w:pPr><w:r><w:t>第一节</w:t></w:r></w:p><w:p><w:r><w:t>内容二</w:t></w:r></w:p>',
+    });
+    const chapters = await docxToChapters(p);
+    expect(chapters.map(c => c.title)).toEqual(['上篇', '第一节']);
+    expect(chapters[0].content).toContain('内容一');
   });
 });
