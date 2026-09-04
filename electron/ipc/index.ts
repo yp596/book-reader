@@ -4,6 +4,7 @@ import path from 'path';
 import { DatabaseService } from '../services/db.service';
 import { extractMetadata } from '../services/metadata';
 import { buildCrawlerFromRow } from '../services/book-source';
+import { AiService } from '../services/ai-service';
 
 export function registerIpcHandlers() {
   const db = DatabaseService.getInstance();
@@ -301,6 +302,32 @@ export function registerIpcHandlers() {
 
   ipcMain.handle('stats:readingTime', () => {
     return db.getReadingTimeStats();
+  });
+
+  // ============ AI 阅读助手 ============
+  // 配置来自设置页（aiBaseUrl/aiModel/aiApiKey），支持 Ollama / OpenAI / 兼容接口
+
+  function getAiService(): AiService {
+    const baseUrl = (db.getSetting('aiBaseUrl') || 'http://localhost:11434').replace(/\/$/, '');
+    const model = db.getSetting('aiModel') || 'qwen2.5:7b';
+    const apiKey = db.getSetting('aiApiKey') || undefined;
+    return new AiService({ provider: 'custom', baseUrl, model, apiKey });
+  }
+
+  ipcMain.handle('ai:summarize', async (_event, text: string) => {
+    if (!text?.trim()) throw new Error('没有可总结的内容');
+    return getAiService().summarize(text.slice(0, 8000));
+  });
+
+  ipcMain.handle('ai:explain', async (_event, text: string, question: string) => {
+    if (!text?.trim()) throw new Error('没有可解读的内容');
+    if (!question?.trim()) throw new Error('请输入问题');
+    return getAiService().explain(text.slice(0, 8000), question.trim());
+  });
+
+  ipcMain.handle('ai:translate', async (_event, text: string) => {
+    if (!text?.trim()) throw new Error('没有可翻译的内容');
+    return getAiService().translate(text.slice(0, 4000));
   });
 
   // ============ WebDAV 同步 ============

@@ -1,4 +1,6 @@
-import * as cheerio from 'cheerio';
+// 用 slim 入口：去掉 fromURL（及其 undici 依赖），
+// undici 7 的 sqlite 缓存会在 Electron 老 Node 上触发 node:sqlite 崩溃
+import * as cheerio from 'cheerio/slim';
 
 export interface BookSourceConfig {
   name: string;

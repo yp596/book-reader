@@ -287,6 +287,14 @@
   background: var(--bg-hover);
 }
 
+/* ============ AI 助手 ============ */
+.ai-actions {
+  display: flex;
+  gap: 8px;
+  flex-wrap: wrap;
+  margin-bottom: 4px;
+}
+
 /* ============ 选中操作条 ============ */.select-popup {
   position: fixed;
   z-index: 200;

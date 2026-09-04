@@ -55,6 +55,11 @@ contextBridge.exposeInMainWorld('electronAPI', {
   syncBackup: () => ipcRenderer.invoke('sync:backup'),
   syncRestore: () => ipcRenderer.invoke('sync:restore'),
 
+  // AI
+  aiSummarize: (text: string) => ipcRenderer.invoke('ai:summarize', text),
+  aiExplain: (text: string, question: string) => ipcRenderer.invoke('ai:explain', text, question),
+  aiTranslate: (text: string) => ipcRenderer.invoke('ai:translate', text),
+
   // Events
   onOpenFile: (callback: () => void) =>
     ipcRenderer.on('menu:open-file', callback),

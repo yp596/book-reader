@@ -106,6 +106,9 @@ declare global {
       getReadingTimeStats: () => Promise<{ today: number; total: number }>;
       syncBackup: () => Promise<boolean>;
       syncRestore: () => Promise<number>;
+      aiSummarize: (text: string) => Promise<string>;
+      aiExplain: (text: string, question: string) => Promise<string>;
+      aiTranslate: (text: string) => Promise<string>;
       onOpenFile: (callback: () => void) => void;
     };
   }

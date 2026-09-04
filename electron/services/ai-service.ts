@@ -25,8 +25,10 @@ export class AiService {
           messages,
           stream: false,
         }),
+        signal: AbortSignal.timeout(120000),
       });
 
+      if (!response.ok) throw new Error(`AI 服务返回 ${response.status}`);
       const data = await response.json();
       return data.choices?.[0]?.message?.content || '';
     } catch (error) {

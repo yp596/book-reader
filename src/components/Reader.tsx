@@ -12,7 +12,7 @@ interface ReaderProps {
   onBack: () => void;
 }
 
-type Panel = 'toc' | 'notes' | 'marks' | 'search' | null;
+type Panel = 'toc' | 'notes' | 'marks' | 'search' | 'ai' | null;
 
 interface SelPopup {
   x: number;
@@ -74,6 +74,73 @@ export function Reader({ book, onBack }: ReaderProps) {
 
   // TTS
   const [speaking, setSpeaking] = useState(false);
+
+  // AI 助手
+  const [aiAnswer, setAiAnswer] = useState('');
+  const [aiLoading, setAiLoading] = useState(false);
+  const [aiQuestion, setAiQuestion] = useState('');
+  const [aiContext, setAiContext] = useState('');
+
+  /** AI 调用统一入口（含未配置提示） */
+  const runAi = async (fn: () => Promise<string>) => {
+    const api = window.electronAPI;
+    if (!api) return;
+    setAiLoading(true);
+    setAiAnswer('');
+    try {
+      setAiAnswer(await fn());
+    } catch (err) {
+      setAiAnswer(`调用失败：${err instanceof Error ? err.message : '未知错误'}\n请检查设置页的 AI 服务地址与模型是否可用。`);
+    } finally {
+      setAiLoading(false);
+    }
+  };
+
+  const handleAiSummarize = async () => {
+    const api = window.electronAPI;
+    if (!api) return;
+    const text = aiContext || (await getCurrentPageText());
+    if (!text.trim()) {
+      setAiAnswer('当前页没有可总结的文本（PDF 暂不支持）。');
+      return;
+    }
+    setPanel('ai');
+    await runAi(() => api.aiSummarize(text));
+  };
+
+  const handleAiTranslate = async () => {
+    const api = window.electronAPI;
+    if (!api) return;
+    const text = aiContext || (await getCurrentPageText());
+    if (!text.trim()) {
+      setAiAnswer('当前页没有可翻译的文本（PDF 暂不支持）。');
+      return;
+    }
+    setPanel('ai');
+    await runAi(() => api.aiTranslate(text));
+  };
+
+  const handleAiAsk = async () => {
+    const api = window.electronAPI;
+    if (!api || !aiQuestion.trim()) return;
+    const text = aiContext || (await getCurrentPageText());
+    if (!text.trim()) {
+      setAiAnswer('当前页没有正文，无法结合上下文回答（PDF 暂不支持）。');
+      return;
+    }
+    await runAi(() => api.aiExplain(text, aiQuestion.trim()));
+  };
+
+  /** 选中文本送去 AI 解释 */
+  const handleAiExplainSelection = () => {
+    if (!sel) return;
+    setAiContext(sel.text);
+    setAiQuestion('');
+    setAiAnswer('');
+    setSel(null);
+    clearEpubSelection();
+    setPanel('ai');
+  };
 
   // 手机模式
   const [phoneMode, setPhoneMode] = useState(false);
@@ -387,6 +454,26 @@ export function Reader({ book, onBack }: ReaderProps) {
     setSpeaking(false);
   };
 
+  /** 取当前页文本（AI 上下文用）：TXT 取本页，EPUB 取当前 CFI 范围 */
+  const getCurrentPageText = async (): Promise<string> => {
+    if (book.file_type === 'txt') {
+      return txtPages[pageIndex] || '';
+    }
+    if (book.file_type === 'epub') {
+      try {
+        const loc = renditionRef.current?.currentLocation?.();
+        const cfi: string | undefined = loc?.start?.cfi;
+        if (!cfi || !bookRef.current) return '';
+        const range = await bookRef.current.getRange(cfi);
+        return (range.toString() as string).trim();
+      } catch (err) {
+        console.error('获取当前页文本失败:', err);
+        return '';
+      }
+    }
+    return '';
+  };
+
   /** 顶栏朗读：TXT 读剩余全文，EPUB 读当前页 */
   const handleHeaderSpeak = async () => {
     if (speaking) {
@@ -673,6 +760,11 @@ export function Reader({ book, onBack }: ReaderProps) {
               🔍
             </button>
           )}
+          {book.file_type !== 'pdf' && (
+            <button onClick={() => togglePanel('ai')} className={panel === 'ai' ? 'active' : ''} title="AI 助手">
+              ✨
+            </button>
+          )}
           <button
             onClick={() => setPhoneMode(m => !m)}
             className={phoneMode ? 'active' : ''}
@@ -738,6 +830,45 @@ export function Reader({ book, onBack }: ReaderProps) {
                   </div>
                 </div>
               ))
+            )}
+          </div>
+        )}
+
+        {panel === 'ai' && (
+          <div className="toc-panel">
+            <h3>✨ AI 助手</h3>
+            <p className="section-desc">
+              {aiContext ? '基于选中文本回答' : '基于当前页正文回答'}（PDF 暂不支持）
+            </p>
+            <div className="ai-actions">
+              <button className="btn-secondary small" onClick={handleAiSummarize} disabled={aiLoading}>
+                总结本页
+              </button>
+              <button className="btn-secondary small" onClick={handleAiTranslate} disabled={aiLoading}>
+                翻译本页
+              </button>
+              {aiContext && (
+                <button className="btn-secondary small" onClick={() => setAiContext('')}>
+                  改用整页
+                </button>
+              )}
+            </div>
+            <div className="search-box" style={{ marginTop: 12 }}>
+              <input
+                value={aiQuestion}
+                onChange={e => setAiQuestion(e.target.value)}
+                onKeyDown={e => e.key === 'Enter' && handleAiAsk()}
+                placeholder="就本页内容提问..."
+              />
+              <button className="btn-primary" onClick={handleAiAsk} disabled={aiLoading || !aiQuestion.trim()}>
+                问
+              </button>
+            </div>
+            {aiLoading && <p className="empty-text">思考中...</p>}
+            {!aiLoading && aiAnswer && (
+              <div className="mark-item">
+                <p className="mark-note" style={{ whiteSpace: 'pre-wrap' }}>{aiAnswer}</p>
+              </div>
             )}
           </div>
         )}
@@ -842,6 +973,9 @@ export function Reader({ book, onBack }: ReaderProps) {
           </button>
           <button onClick={() => { speak(sel.text); setSel(null); clearEpubSelection(); }} title="朗读选中">
             🔊 朗读
+          </button>
+          <button onClick={handleAiExplainSelection} title="AI 解释选中">
+            ✨ AI
           </button>
           <button
             onClick={async () => {
