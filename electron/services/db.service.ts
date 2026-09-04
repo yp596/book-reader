@@ -178,6 +178,7 @@ export class DatabaseService {
       `ALTER TABLE books ADD COLUMN category TEXT DEFAULT ''`,
       `ALTER TABLE books ADD COLUMN toc TEXT DEFAULT ''`,
       `ALTER TABLE bookmarks ADD COLUMN color TEXT DEFAULT 'yellow'`,
+      `ALTER TABLE books ADD COLUMN locations TEXT DEFAULT ''`,
     ]) {
       try {
         this.db.run(ddl);
@@ -264,6 +265,10 @@ export class DatabaseService {
 
   setBookToc(id: number, tocJson: string) {
     this.run('UPDATE books SET toc = ? WHERE id = ?', [tocJson, id]);
+  }
+
+  setBookLocations(id: number, locationsJson: string) {
+    this.run('UPDATE books SET locations = ? WHERE id = ?', [locationsJson, id]);
   }
 
   deleteBook(id: number) {

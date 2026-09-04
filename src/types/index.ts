@@ -10,6 +10,8 @@ export interface Book {
   created_at: string;
   favorite?: number;
   category?: string;
+  toc?: string;
+  locations?: string;
 }
 
 export interface TocEntry {
@@ -123,6 +125,7 @@ declare global {
       revealBookFile: (id: number) => Promise<void>;
       clearReadingHistory: () => Promise<void>;
       toggleFullscreen: () => Promise<boolean>;
+      setBookLocations: (id: number, locationsJson: string) => Promise<void>;
       refreshBookMetadata: (id: number) => Promise<{ title: string; author?: string }>;
       getAllSources: () => Promise<BookSource[]>;
       addSource: (source: Omit<BookSource, 'id' | 'enabled' | 'created_at'>) => Promise<any>;

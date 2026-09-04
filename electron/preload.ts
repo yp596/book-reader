@@ -20,6 +20,8 @@ contextBridge.exposeInMainWorld('electronAPI', {
     ipcRenderer.invoke('books:clearHistory'),
   toggleFullscreen: (): Promise<boolean> =>
     ipcRenderer.invoke('window:toggleFullscreen'),
+  setBookLocations: (id: number, locationsJson: string) =>
+    ipcRenderer.invoke('books:setLocations', id, locationsJson),
   refreshBookMetadata: (id: number) =>
     ipcRenderer.invoke('books:refreshMetadata', id),
   renameBook: (id: number, title: string) =>

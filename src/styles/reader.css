@@ -652,3 +652,7 @@
   color: var(--accent-light);
   white-space: nowrap;
 }
+
+.page-indicator.wide {
+  min-width: 200px;
+}

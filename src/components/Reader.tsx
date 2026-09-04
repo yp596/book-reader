@@ -47,6 +47,7 @@ export function Reader({ book, onBack, initialTarget }: ReaderProps) {
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState('');
   const [chapters, setChapters] = useState<{ label: string; href: string }[]>([]);
+  const chaptersRef = useRef<{ label: string; href: string }[]>([]);
   const [panel, setPanel] = useState<Panel>(null);
   const [settings, setSettings] = useState({
     fontSize: 18,
@@ -60,6 +61,18 @@ export function Reader({ book, onBack, initialTarget }: ReaderProps) {
   const [autoPlay, setAutoPlay] = useState(false);
   const [searchMark, setSearchMark] = useState('');
   const autoTimerRef = useRef<ReturnType<typeof setInterval> | null>(null);
+  // 章节模式：章内分页，章界另起
+  const [chapterIdx, setChapterIdx] = useState<number | null>(null);
+  const [chapterPage, setChapterPage] = useState(0);
+  const [chapterTotal, setChapterTotal] = useState(0);
+  const [bookPercent, setBookPercent] = useState(0);
+  const locationRef = useRef<{
+    href: string; startPage: number; endPage: number; total: number; progress: number;
+  }>({ href: '', startPage: 1, endPage: 1, total: 1, progress: 0 });
+  const chapterIdxRef = useRef<number | null>(null);
+  const locationsRef = useRef<string[]>([]);
+  const locationsDoneRef = useRef(false);
+  const aliveRef = useRef<{ alive: boolean }>({ alive: true });
 
   // 选中弹窗 / 笔记草稿
   const [sel, setSel] = useState<SelPopup | null>(null);
@@ -313,6 +326,7 @@ export function Reader({ book, onBack, initialTarget }: ReaderProps) {
     loadBook();
     return () => {
       // 离开阅读器时上报本次阅读时长
+      aliveRef.current.alive = false;
       const seconds = (Date.now() - readStartRef.current) / 1000;
       window.electronAPI?.recordReadingTime(book.id, seconds);
       stopSpeak();
@@ -382,7 +396,32 @@ export function Reader({ book, onBack, initialTarget }: ReaderProps) {
     }
 
     const nav = await epubBook.loaded.navigation;
-    setChapters(nav.toc.map((ch: any) => ({ label: (ch.label as string).trim(), href: ch.href })));
+    const toc = nav.toc.map((ch: any) => ({ label: (ch.label as string).trim(), href: ch.href }));
+    setChapters(toc);
+    chaptersRef.current = toc;
+
+    // 位置索引：有缓存直接用，否则后台生成并存库（不阻塞阅读）
+    const mountGuard = { alive: true };
+    aliveRef.current = mountGuard;
+    (async () => {
+      try {
+        const cached = (book as Book & { locations?: string }).locations;
+        if (cached) {
+          const arr = JSON.parse(cached);
+          if (Array.isArray(arr) && arr.length > 0) {
+            locationsRef.current = arr;
+            locationsDoneRef.current = true;
+            return;
+          }
+        }
+        if (!mountGuard.alive) return;
+        const list = await epubBook.locations.generate(800);
+        if (!mountGuard.alive || !Array.isArray(list) || list.length === 0) return;
+        locationsRef.current = list;
+        locationsDoneRef.current = true;
+        await window.electronAPI?.setBookLocations(book.id, JSON.stringify(list));
+      } catch { /* 失败则降级为无 locations 行为 */ }
+    })();
 
     // 恢复已保存的高亮（含颜色）
     try {
@@ -421,7 +460,27 @@ export function Reader({ book, onBack, initialTarget }: ReaderProps) {
     rendition.on('relocated', (location: any) => {
       const progress = location.start?.progress || 0;
       window.electronAPI?.updateProgress(book.id, progress);
+      // 章节模式状态同步（唯一可信源）
+      const href: string = location.start?.href || location.end?.href || '';
+      const startPage: number = location.start?.displayed?.page ?? 1;
+      const endPage: number = location.end?.displayed?.page ?? startPage;
+      const total: number = location.end?.displayed?.total ?? location.start?.displayed?.total ?? 1;
+      locationRef.current = { href, startPage, endPage, total, progress };
+      const idx = resolveChapterIdx(href);
+      chapterIdxRef.current = idx;
+      setChapterIdx(idx);
+      setChapterPage(startPage);
+      setChapterTotal(total);
+      setBookPercent(Math.round(progress * 100));
     });
+  };
+
+  /** href 解析为目录序号，非目录章节返回 null */
+  const resolveChapterIdx = (href: string): number | null => {
+    if (!href || chaptersRef.current.length === 0) return null;
+    const norm = (h: string) => h.split('#')[0].split('/').pop();
+    const idx = chaptersRef.current.findIndex(ch => norm(ch.href) === norm(href));
+    return idx >= 0 ? idx : null;
   };
 
   const loadTxt = (bytes: Uint8Array) => {
@@ -834,13 +893,60 @@ export function Reader({ book, onBack, initialTarget }: ReaderProps) {
     return () => clearInterval(t);
   }, [phoneMode]);
 
+  /** 该章末尾 CFI（无 locations 时返回空） */
+  const chapterEndCfi = (href: string): string => {
+    try {
+      const list = locationsRef.current;
+      if (list.length === 0) return '';
+      const item = bookRef.current?.spine.spineItems.find(
+        (it: any) => it.href === href || href.includes(it.href) || it.href.includes(href),
+      );
+      if (!item || item.index == null) return '';
+      // 章 CFI 基：/(spineIndex+1)*2!（见 epubcfi.generateChapterComponent）
+      const base = `/6/${(item.index + 1) * 2}!`;
+      let last = '';
+      for (const cfi of list) {
+        if (cfi.startsWith('epubcfi(' + base) || cfi.startsWith(base)) last = cfi;
+        else if (last) break; // 已过本章区间
+      }
+      return last;
+    } catch {
+      return '';
+    }
+  };
+
   /** 无副作用翻页（自动播放用，不停播） */
   const advancePage = (dir: 1 | -1) => {
     if (book.file_type === 'epub') {
       clearEpubSearchMarks();
       setSearchMark('');
-      if (dir > 0) renditionRef.current?.next();
-      else renditionRef.current?.prev();
+      const loc = locationRef.current;
+      const idx = chapterIdxRef.current;
+      const toc = chaptersRef.current;
+      if (dir > 0) {
+        // 本章末页 → 下一章另起；否则章内翻页
+        const atChapterEnd = loc.endPage >= loc.total;
+        if (atChapterEnd && idx != null && idx < toc.length - 1) {
+          renditionRef.current?.display(toc[idx + 1].href);
+          return;
+        }
+        renditionRef.current?.next();
+        return;
+      }
+      // 本章首页 → 上一章末尾；否则章内回翻
+      if (loc.startPage <= 1 && idx != null && idx > 0) {
+        const prevHref = toc[idx - 1].href;
+        const endCfi = chapterEndCfi(prevHref);
+        if (endCfi) {
+          renditionRef.current?.display(endCfi);
+        } else {
+          // 降级：上一章开头（仍保证无混合页）
+          renditionRef.current?.display(prevHref);
+        }
+        return;
+      }
+      renditionRef.current?.prev();
+      return;
     } else if (dir > 0 && pageIndex < totalPages - 1) {
       const next = pageIndex + 1;
       setPageIndex(next);
@@ -1301,6 +1407,11 @@ export function Reader({ book, onBack, initialTarget }: ReaderProps) {
 
       <div className="reader-footer">
         <button className="nav-btn" onClick={handlePrev}>上一页</button>
+        {book.file_type === 'epub' && chapterIdx != null && chapterTotal > 0 ? (
+          <span className="page-indicator wide">
+            第{chapterIdx + 1}章 · {chapterPage}/{chapterTotal}页 · {bookPercent}%
+          </span>
+        ) : null}
         {book.file_type !== 'epub' && totalPages > 0 && (
           <>
             <span className="page-indicator">{pageIndex + 1} / {totalPages}</span>

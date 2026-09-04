@@ -233,6 +233,11 @@ export function registerIpcHandlers() {
     return next;
   });
 
+  // EPUB 位置索引缓存
+  ipcMain.handle('books:setLocations', (_event, id: number, locationsJson: string) => {
+    db.setBookLocations(id, locationsJson);
+  });
+
   // 按 id 读取书籍文件内容（base64），渲染进程无文件访问权限，必须经主进程
   ipcMain.handle('books:getFileData', (_event, id: number) => {
     const book = db.getBookById(id) as { file_path: string } | undefined;
