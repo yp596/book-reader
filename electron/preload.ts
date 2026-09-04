@@ -92,6 +92,7 @@ contextBridge.exposeInMainWorld('electronAPI', {
   aiSummarize: (text: string) => ipcRenderer.invoke('ai:summarize', text),
   aiExplain: (text: string, question: string) => ipcRenderer.invoke('ai:explain', text, question),
   aiTranslate: (text: string) => ipcRenderer.invoke('ai:translate', text),
+  aiMindmap: (text: string) => ipcRenderer.invoke('ai:mindmap', text),
 
   // RAG
   getRagStatus: () => ipcRenderer.invoke('rag:status'),

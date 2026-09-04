@@ -174,6 +174,7 @@ declare global {
       aiSummarize: (text: string) => Promise<string>;
       aiExplain: (text: string, question: string) => Promise<string>;
       aiTranslate: (text: string) => Promise<string>;
+      aiMindmap: (text: string) => Promise<string>;
       getRagStatus: () => Promise<{ book_id: number; title: string; chunks: number; updated_at: string }[]>;
       buildRagIndex: (bookId: number) => Promise<{ chunks: number }>;
       clearRagIndex: (bookId: number) => Promise<void>;

@@ -602,6 +602,11 @@ export function registerIpcHandlers() {
     return getAiService().translate(text.slice(0, 4000));
   });
 
+  ipcMain.handle('ai:mindmap', async (_event, text: string) => {
+    if (!text?.trim()) throw new Error('没有可生成导图的内容');
+    return getAiService().generateMindmap(text.slice(0, 6000));
+  });
+
   // ============ WebDAV 同步 ============
   // 同步内容：进度、书签、笔记、书源、设置（不含书籍文件，跨设备需各自导入同名书籍）
 

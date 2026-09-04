@@ -90,4 +90,19 @@ export class AiService {
       },
     ]);
   }
+
+  async generateMindmap(text: string): Promise<string> {
+    return this.chat([
+      {
+        role: 'system',
+        // 面向小模型：格式约束前置、层级封顶、禁废话
+        content:
+          '你是一个思维导图助手。把用户输入提炼为层级大纲，只输出Markdown无序列表：顶层用-开头，子级比父级多缩进两空格，最多3层，每行不超过20字。不要解释、不要代码块围栏。',
+      },
+      {
+        role: 'user',
+        content: text,
+      },
+    ]);
+  }
 }

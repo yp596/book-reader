@@ -5,6 +5,8 @@ import PdfWorkerUrl from 'pdfjs-dist/build/pdf.worker.min.mjs?url';
 import { Book, Bookmark, Note, TocEntry } from '../types';
 import { escapeHtml, excerptAround, clampPage } from '../utils/text';
 import { fontStackOf, highlightColorOf, HIGHLIGHT_COLORS } from '../utils/reader-options';
+import { parseMindmap, MindNode } from '../utils/mindmap';
+import { MindmapView } from './Mindmap';
 
 pdfjsLib.GlobalWorkerOptions.workerSrc = PdfWorkerUrl;
 
@@ -92,6 +94,8 @@ export function Reader({ book, onBack, initialTarget }: ReaderProps) {
   const [aiContext, setAiContext] = useState('');
   /** 查词模式：答案可存入生词本 */
   const [aiWord, setAiWord] = useState('');
+  /** 思维导图 */
+  const [mindNodes, setMindNodes] = useState<MindNode[] | null>(null);
 
   /** AI 调用统一入口（含未配置提示） */
   const runAi = async (fn: () => Promise<string>) => {
@@ -130,6 +134,32 @@ export function Reader({ book, onBack, initialTarget }: ReaderProps) {
     }
     setPanel('ai');
     await runAi(() => api.aiTranslate(text));
+  };
+
+  const handleAiMindmap = async () => {
+    const api = window.electronAPI;
+    if (!api) return;
+    const text = aiContext || (await getCurrentPageText());
+    if (!text.trim()) {
+      setAiAnswer('当前页没有正文，无法生成导图（PDF 暂不支持）。');
+      setPanel('ai');
+      return;
+    }
+    setPanel('ai');
+    setAiLoading(true);
+    try {
+      const outline = await api.aiMindmap(text);
+      const nodes = parseMindmap(outline);
+      if (nodes.length === 0) {
+        setAiAnswer('导图生成失败，模型返回为空。');
+        return;
+      }
+      setMindNodes(nodes);
+    } catch (err) {
+      setAiAnswer(`调用失败：${err instanceof Error ? err.message : '未知错误'}\n请检查设置页的 AI 服务地址与模型是否可用。`);
+    } finally {
+      setAiLoading(false);
+    }
   };
 
   const handleAiAsk = async () => {
@@ -1089,6 +1119,9 @@ export function Reader({ book, onBack, initialTarget }: ReaderProps) {
               <button className="btn-secondary small" onClick={handleAiTranslate} disabled={aiLoading}>
                 翻译本页
               </button>
+              <button className="btn-secondary small" onClick={handleAiMindmap} disabled={aiLoading}>
+                🧠 脑图
+              </button>
               {aiContext && (
                 <button className="btn-secondary small" onClick={() => setAiContext('')}>
                   改用整页
@@ -1279,6 +1312,11 @@ export function Reader({ book, onBack, initialTarget }: ReaderProps) {
             </div>
           </div>
         </div>
+      )}
+
+      {/* 思维导图 */}
+      {mindNodes && (
+        <MindmapView nodes={mindNodes} onClose={() => setMindNodes(null)} />
       )}
     </div>
   );
