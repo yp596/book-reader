@@ -9,6 +9,30 @@ import { Statistics } from './components/Statistics';
 
 type View = 'library' | 'reader' | 'sources' | 'settings' | 'stats';
 
+// 安全获取 electronAPI，preload 未就绪时返回空实现
+const api = window.electronAPI ?? {
+  importBook: async () => [],
+  getAllBooks: async () => [],
+  getBookById: async () => null,
+  deleteBook: async () => {},
+  updateProgress: async () => {},
+  getAllSources: async () => [],
+  addSource: async () => 0,
+  deleteSource: async () => {},
+  searchBooks: async () => [],
+  getChapters: async () => [],
+  getChapterContent: async () => '',
+  getBookmarks: async () => [],
+  addBookmark: async () => 0,
+  deleteBookmark: async () => {},
+  getNotes: async () => [],
+  addNote: async () => 0,
+  deleteNote: async () => {},
+  getSetting: async () => null,
+  setSetting: async () => {},
+  onOpenFile: () => {},
+};
+
 function App() {
   const [books, setBooks] = useState<Book[]>([]);
   const [currentBook, setCurrentBook] = useState<Book | null>(null);
@@ -16,12 +40,12 @@ function App() {
   const [searchQuery, setSearchQuery] = useState('');
 
   const loadBooks = async () => {
-    const allBooks = await window.electronAPI.getAllBooks();
+    const allBooks = await api.getAllBooks();
     setBooks(allBooks as Book[]);
   };
 
   const handleOpenFile = async () => {
-    await window.electronAPI.importBook();
+    await api.importBook();
     await loadBooks();
   };
 

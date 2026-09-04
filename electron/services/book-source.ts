@@ -92,8 +92,42 @@ export class BookSourceCrawler {
       headers: {
         'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
       },
+      signal: AbortSignal.timeout(15000),
     });
+    if (!response.ok) throw new Error(`请求失败：${response.status}`);
     return response.text();
+  }
+}
+
+/** 从数据库行构造爬虫：优先 rules JSON，否则返回 null（规则不完整） */
+export function buildCrawlerFromRow(source: any): BookSourceCrawler | null {
+  try {
+    if (!source?.rules) return null;
+    const r = JSON.parse(source.rules);
+    if (!r?.search?.url || !r?.search?.list) return null;
+    return new BookSourceCrawler({
+      name: source.name,
+      url: source.url || '',
+      search: {
+        url: r.search.url || '',
+        list: r.search.list || '',
+        name: r.search.name || '',
+        author: r.search.author || '',
+        cover: r.search.cover || '',
+        detail: r.search.detail || '',
+      },
+      chapters: {
+        list: r.chapters?.list || '',
+        name: r.chapters?.name || '',
+        url: r.chapters?.url || '',
+      },
+      content: {
+        content: r.content?.content || '',
+        next: r.content?.next,
+      },
+    });
+  } catch {
+    return null;
   }
 }
 

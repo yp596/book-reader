@@ -113,8 +113,24 @@ export class DatabaseService {
         key TEXT PRIMARY KEY,
         value TEXT NOT NULL
       )`,
+      // 在线书源章节缓存
+      `CREATE TABLE IF NOT EXISTS cached_chapters (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        source_id INTEGER NOT NULL,
+        book_url TEXT NOT NULL,
+        chapter_url TEXT NOT NULL UNIQUE,
+        title TEXT NOT NULL DEFAULT '',
+        content TEXT NOT NULL DEFAULT '',
+        idx INTEGER DEFAULT 0,
+        cached_at DATETIME DEFAULT CURRENT_TIMESTAMP
+      )`,
+      `CREATE INDEX IF NOT EXISTS idx_cached_book ON cached_chapters(book_url)`,
     ];
     for (const sql of tables) this.db.run(sql);
+    // 存量库迁移：书源表加规则列
+    try {
+      this.db.run(`ALTER TABLE book_sources ADD COLUMN rules TEXT DEFAULT ''`);
+    } catch { /* 列已存在则忽略 */ }
     this.save();
   }
 
@@ -166,6 +182,10 @@ export class DatabaseService {
     this.run('UPDATE books SET progress = ?, last_read_at = CURRENT_TIMESTAMP WHERE id = ?', [progress, id]);
   }
 
+  updateBookInfo(id: number, title: string, author: string | null) {
+    this.run('UPDATE books SET title = ?, author = ? WHERE id = ?', [title, author, id]);
+  }
+
   deleteBook(id: number) {
     this.run('DELETE FROM books WHERE id = ?', [id]);
   }
@@ -180,10 +200,10 @@ export class DatabaseService {
     return this.get('SELECT * FROM book_sources WHERE id = ?', [id]);
   }
 
-  insertSource(source: { name: string; url: string; search_url: string; chapters_url: string; content_url: string }) {
+  insertSource(source: { name: string; url: string; search_url: string; chapters_url: string; content_url: string; rules?: string }) {
     this.run(
-      'INSERT INTO book_sources (name, url, search_url, chapters_url, content_url) VALUES (?, ?, ?, ?, ?)',
-      [source.name, source.url, source.search_url, source.chapters_url, source.content_url],
+      'INSERT INTO book_sources (name, url, search_url, chapters_url, content_url, rules) VALUES (?, ?, ?, ?, ?, ?)',
+      [source.name, source.url, source.search_url, source.chapters_url, source.content_url, source.rules ?? ''],
     );
     const row = this.get('SELECT last_insert_rowid() as id');
     return row?.id;
@@ -191,6 +211,35 @@ export class DatabaseService {
 
   deleteSource(id: number) {
     this.run('DELETE FROM book_sources WHERE id = ?', [id]);
+  }
+
+  updateSourceRules(id: number, rules: string) {
+    this.run('UPDATE book_sources SET rules = ? WHERE id = ?', [rules, id]);
+  }
+
+  // ============ 在线章节缓存 ============
+
+  getCachedChapter(chapterUrl: string) {
+    return this.get('SELECT * FROM cached_chapters WHERE chapter_url = ?', [chapterUrl]);
+  }
+
+  getCachedChapters(bookUrl: string) {
+    return this.all('SELECT chapter_url FROM cached_chapters WHERE book_url = ?', [bookUrl]);
+  }
+
+  saveCachedChapter(c: {
+    source_id: number;
+    book_url: string;
+    chapter_url: string;
+    title: string;
+    content: string;
+    idx: number;
+  }) {
+    this.run(
+      `INSERT OR REPLACE INTO cached_chapters
+        (source_id, book_url, chapter_url, title, content, idx) VALUES (?, ?, ?, ?, ?, ?)`,
+      [c.source_id, c.book_url, c.chapter_url, c.title, c.content, c.idx],
+    );
   }
 
   // ============ Notes ============
@@ -231,8 +280,38 @@ export class DatabaseService {
     this.run('DELETE FROM bookmarks WHERE id = ?', [id]);
   }
 
-  // ============ Settings ============
+  // ============ 阅读计时 ============
 
+  private todayStr(): string {
+    const d = new Date();
+    return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
+  }
+
+  recordReadingTime(bookId: number, seconds: number) {
+    if (seconds < 5) return;
+    const today = this.todayStr();
+    const row = this.get('SELECT id FROM reading_stats WHERE book_id = ? AND date = ?', [bookId, today]) as
+      | { id: number }
+      | undefined;
+    if (row) {
+      this.run('UPDATE reading_stats SET duration = duration + ? WHERE id = ?', [Math.round(seconds), row.id]);
+    } else {
+      this.run('INSERT INTO reading_stats (book_id, duration, date) VALUES (?, ?, ?)', [
+        bookId,
+        Math.round(seconds),
+        today,
+      ]);
+    }
+  }
+
+  getReadingTimeStats(): { today: number; total: number } {
+    const today = this.todayStr();
+    const t = this.get('SELECT COALESCE(SUM(duration), 0) as s FROM reading_stats WHERE date = ?', [today]) as any;
+    const all = this.get('SELECT COALESCE(SUM(duration), 0) as s FROM reading_stats') as any;
+    return { today: Number(t?.s ?? 0), total: Number(all?.s ?? 0) };
+  }
+
+  // ============ Settings ============
   getSetting(key: string): string | null {
     const row = this.get('SELECT value FROM settings WHERE key = ?', [key]);
     return row?.value ?? null;

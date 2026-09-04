@@ -48,7 +48,25 @@ export function BookList({ books, searchQuery, onSelectBook, onRefresh }: BookLi
 
   const handleDelete = async () => {
     if (contextMenu) {
-      await window.electronAPI.deleteBook(contextMenu.book.id);
+      const api = window.electronAPI;
+      if (api) {
+        await api.deleteBook(contextMenu.book.id);
+      }
+      setContextMenu(null);
+      onRefresh();
+    }
+  };
+
+  const handleRefreshMetadata = async () => {
+    if (contextMenu) {
+      const api = window.electronAPI;
+      if (api) {
+        try {
+          await api.refreshBookMetadata(contextMenu.book.id);
+        } catch (err) {
+          alert(err instanceof Error ? err.message : '识别失败');
+        }
+      }
       setContextMenu(null);
       onRefresh();
     }
@@ -145,7 +163,7 @@ export function BookList({ books, searchQuery, onSelectBook, onRefresh }: BookLi
               <div className="book-list-info">
                 <h3>{book.title}</h3>
                 <p>{book.author || '未知作者'}</p>
-                <p className="book-meta">{book.file_type.toUpperCase()} · {book.progress > 0 ? `${Math.round(book.progress * 100)}%` : '未读'}</p>
+                <p className="book-meta">{book.file_type.toUpperCase()} · {book.progress > 0 ? `已读 ${Math.round(book.progress * 100)}%` : '未读'}</p>
               </div>
             </div>
           ))}
@@ -159,6 +177,7 @@ export function BookList({ books, searchQuery, onSelectBook, onRefresh }: BookLi
           onClick={() => setContextMenu(null)}
         >
           <div className="context-menu-item" onClick={handleRename}>重命名</div>
+          <div className="context-menu-item" onClick={handleRefreshMetadata}>重新识别标题</div>
           <div className="context-menu-item danger" onClick={handleDelete}>删除</div>
         </div>
       )}

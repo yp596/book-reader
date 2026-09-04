@@ -8,11 +8,13 @@
     "dev": "vite",
     "build": "tsc && vite build && electron-builder",
     "preview": "vite preview",
-    "electron:dev": "vite --config vite.config.ts"
+    "electron:dev": "vite --config vite.config.ts",
+    "test": "vitest run"
   },
   "dependencies": {
     "cheerio": "^1.0.0",
     "epubjs": "^0.3.93",
+    "jszip": "^3.10.1",
     "pdfjs-dist": "^4.8.69",
     "react": "^19.2.8",
     "react-dom": "^19.2.8",
@@ -29,6 +31,7 @@
     "typescript": "^5.7.0",
     "vite": "^6.0.0",
     "vite-plugin-electron": "^0.28.0",
-    "vite-plugin-electron-renderer": "^0.14.0"
+    "vite-plugin-electron-renderer": "^0.14.0",
+    "vitest": "^5.0.0"
   }
 }

@@ -27,16 +27,25 @@ export function Settings() {
     theme: 'dark',
   });
   const [saved, setSaved] = useState(false);
+  const [syncing, setSyncing] = useState(false);
+  const [lastSync, setLastSync] = useState('');
 
-  useEffect(() => {
-    loadSettings();
-  }, []);
+  useEffect(() => { loadSettings(); loadLastSync(); }, []);
+
+  const loadLastSync = async () => {
+    const api = window.electronAPI;
+    if (!api) return;
+    const v = await api.getSetting('lastSyncAt');
+    if (v) setLastSync(v);
+  };
 
   const loadSettings = async () => {
+    const api = window.electronAPI;
+    if (!api) return;
     const keys = Object.keys(settings) as (keyof SettingsData)[];
     const loaded = { ...settings };
     for (const key of keys) {
-      const value = await window.electronAPI.getSetting(key);
+      const value = await api.getSetting(key);
       if (value !== null) {
         (loaded as any)[key] = isNaN(Number(value)) ? value : Number(value);
       }
@@ -44,17 +53,53 @@ export function Settings() {
     setSettings(loaded);
   };
 
-  const handleSave = async () => {
+  const handleSave = async (silent = false) => {
+    const api = window.electronAPI;
+    if (!api) return;
     const entries = Object.entries(settings) as [keyof SettingsData, any][];
     for (const [key, value] of entries) {
-      await window.electronAPI.setSetting(key, String(value));
+      await api.setSetting(key, String(value));
     }
+    if (silent) return;
     setSaved(true);
     setTimeout(() => setSaved(false), 2000);
   };
 
   const handleChange = (key: keyof SettingsData, value: any) => {
     setSettings(s => ({ ...s, [key]: value }));
+  };
+
+  const handleBackup = async () => {
+    const api = window.electronAPI;
+    if (!api) return;
+    // 先保存当前配置再同步
+    await handleSave(true);
+    setSyncing(true);
+    try {
+      await api.syncBackup();
+      await loadLastSync();
+      alert('备份成功');
+    } catch (err) {
+      alert(`备份失败：${err instanceof Error ? err.message : '未知错误'}`);
+    } finally {
+      setSyncing(false);
+    }
+  };
+
+  const handleRestore = async () => {
+    if (!confirm('从 WebDAV 恢复会合并远端数据，确定继续？')) return;
+    const api = window.electronAPI;
+    if (!api) return;
+    setSyncing(true);
+    try {
+      const count = await api.syncRestore();
+      await loadLastSync();
+      alert(`恢复完成，合并 ${count} 条数据`);
+    } catch (err) {
+      alert(`恢复失败：${err instanceof Error ? err.message : '未知错误'}`);
+    } finally {
+      setSyncing(false);
+    }
   };
 
   return (
@@ -65,31 +110,15 @@ export function Settings() {
         <h2>阅读设置</h2>
         <div className="form-row">
           <label>默认字号</label>
-          <input
-            type="number"
-            value={settings.fontSize}
-            onChange={e => handleChange('fontSize', Number(e.target.value))}
-            min={12}
-            max={32}
-          />
+          <input type="number" value={settings.fontSize} onChange={e => handleChange('fontSize', Number(e.target.value))} min={12} max={32} />
         </div>
         <div className="form-row">
           <label>行间距</label>
-          <input
-            type="number"
-            value={settings.lineHeight}
-            onChange={e => handleChange('lineHeight', Number(e.target.value))}
-            min={1}
-            max={3}
-            step={0.1}
-          />
+          <input type="number" value={settings.lineHeight} onChange={e => handleChange('lineHeight', Number(e.target.value))} min={1} max={3} step={0.1} />
         </div>
         <div className="form-row">
           <label>默认主题</label>
-          <select
-            value={settings.theme}
-            onChange={e => handleChange('theme', e.target.value)}
-          >
+          <select value={settings.theme} onChange={e => handleChange('theme', e.target.value)}>
             <option value="dark">深色</option>
             <option value="light">浅色</option>
             <option value="sepia">护眼</option>
@@ -102,40 +131,24 @@ export function Settings() {
         <p className="section-desc">配置本地 Ollama 或其他 AI 服务用于阅读辅助</p>
         <div className="form-row">
           <label>AI 服务</label>
-          <select
-            value={settings.aiProvider}
-            onChange={e => handleChange('aiProvider', e.target.value)}
-          >
-            <option value="ollama">Ollama (本地)</option>
+          <select value={settings.aiProvider} onChange={e => handleChange('aiProvider', e.target.value)}>
+            <option value="ollama">Ollama（本地）</option>
             <option value="openai">OpenAI</option>
             <option value="custom">自定义</option>
           </select>
         </div>
         <div className="form-row">
           <label>服务地址</label>
-          <input
-            value={settings.aiBaseUrl}
-            onChange={e => handleChange('aiBaseUrl', e.target.value)}
-            placeholder="http://localhost:11434"
-          />
+          <input value={settings.aiBaseUrl} onChange={e => handleChange('aiBaseUrl', e.target.value)} placeholder="http://localhost:11434" />
         </div>
         <div className="form-row">
           <label>模型名称</label>
-          <input
-            value={settings.aiModel}
-            onChange={e => handleChange('aiModel', e.target.value)}
-            placeholder="qwen2.5:7b"
-          />
+          <input value={settings.aiModel} onChange={e => handleChange('aiModel', e.target.value)} placeholder="qwen2.5:7b" />
         </div>
         {settings.aiProvider !== 'ollama' && (
           <div className="form-row">
-            <label>API Key</label>
-            <input
-              type="password"
-              value={settings.aiApiKey}
-              onChange={e => handleChange('aiApiKey', e.target.value)}
-              placeholder="sk-..."
-            />
+            <label>API 密钥</label>
+            <input type="password" value={settings.aiApiKey} onChange={e => handleChange('aiApiKey', e.target.value)} placeholder="sk-..." />
           </div>
         )}
       </section>
@@ -145,31 +158,32 @@ export function Settings() {
         <p className="section-desc">配置 WebDAV 服务器同步书架、进度和笔记</p>
         <div className="form-row">
           <label>服务器地址</label>
-          <input
-            value={settings.webdavUrl}
-            onChange={e => handleChange('webdavUrl', e.target.value)}
-            placeholder="https://dav.example.com"
-          />
+          <input value={settings.webdavUrl} onChange={e => handleChange('webdavUrl', e.target.value)} placeholder="https://dav.example.com" />
         </div>
         <div className="form-row">
           <label>用户名</label>
-          <input
-            value={settings.webdavUser}
-            onChange={e => handleChange('webdavUser', e.target.value)}
-          />
+          <input value={settings.webdavUser} onChange={e => handleChange('webdavUser', e.target.value)} />
         </div>
         <div className="form-row">
           <label>密码</label>
-          <input
-            type="password"
-            value={settings.webdavPass}
-            onChange={e => handleChange('webdavPass', e.target.value)}
-          />
+          <input type="password" value={settings.webdavPass} onChange={e => handleChange('webdavPass', e.target.value)} />
         </div>
+        <div className="form-actions" style={{ justifyContent: 'flex-start' }}>
+          <button className="btn-secondary" onClick={handleBackup} disabled={syncing}>
+            {syncing ? '同步中...' : '⬆ 备份到云端'}
+          </button>
+          <button className="btn-secondary" onClick={handleRestore} disabled={syncing}>
+            {syncing ? '同步中...' : '⬇ 从云端恢复'}
+          </button>
+          {lastSync && <span className="book-meta">上次同步：{lastSync}</span>}
+        </div>
+        <p className="section-desc" style={{ marginTop: 12, marginBottom: 0 }}>
+          同步进度、书签、笔记、书源和阅读偏好，不含书籍文件（各设备需各自导入同名书籍）。
+        </p>
       </section>
 
       <div className="settings-footer">
-        <button className="btn-primary" onClick={handleSave}>
+        <button className="btn-primary" onClick={() => handleSave()}>
           {saved ? '✓ 已保存' : '保存设置'}
         </button>
       </div>

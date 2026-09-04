@@ -576,6 +576,75 @@ body {
 
 .source-card h3 { font-size: 15px; font-weight: 600; margin-bottom: 4px; }
 .source-card .source-url { font-size: 12px; color: var(--text-muted); }
+.source-warn { font-size: 12px; color: var(--warning); margin-top: 4px; }
+
+.search-error {
+  font-size: 13px;
+  color: var(--danger);
+  padding: 12px 16px;
+  background: rgba(255, 107, 107, 0.1);
+  border-radius: var(--radius-sm);
+  margin-bottom: 12px;
+}
+
+.form-sub {
+  font-size: 14px;
+  font-weight: 600;
+  color: var(--accent-light);
+  margin: 20px 0 12px;
+  padding-top: 16px;
+  border-top: 1px solid var(--border);
+}
+
+.form-inline {
+  display: flex;
+  gap: 10px;
+}
+
+.form-inline input {
+  flex: 1;
+  min-width: 0;
+  padding: 12px 16px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  background: var(--bg-input);
+  color: var(--text-primary);
+  font-size: 14px;
+  outline: none;
+  transition: var(--transition);
+}
+
+.form-inline input:focus {
+  border-color: var(--accent);
+  box-shadow: 0 0 0 3px var(--accent-glow);
+}
+
+/* 章节列表 */
+.chapter-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(220px, 1fr));
+  gap: 10px;
+}
+
+.chapter-item {
+  padding: 12px 16px;
+  background: var(--bg-card);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  font-size: 13px;
+  color: var(--text-secondary);
+  cursor: pointer;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  transition: var(--transition);
+}
+
+.chapter-item:hover {
+  border-color: var(--accent);
+  color: var(--text-primary);
+  background: var(--bg-hover);
+}
 
 /* ============ Settings ============ */
 .settings h1 {
@@ -610,7 +679,18 @@ body {
 .statistics h1 {
   font-size: 28px;
   font-weight: 700;
+  margin-bottom: 0;
+}
+
+.stats-header-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
   margin-bottom: 28px;
+}
+
+.stats-value.small {
+  font-size: 22px;
 }
 
 .stats-grid {

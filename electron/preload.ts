@@ -8,6 +8,10 @@ contextBridge.exposeInMainWorld('electronAPI', {
   deleteBook: (id: number) => ipcRenderer.invoke('books:delete', id),
   updateProgress: (id: number, progress: number) =>
     ipcRenderer.invoke('books:updateProgress', id, progress),
+  getBookFileData: (id: number): Promise<string> =>
+    ipcRenderer.invoke('books:getFileData', id),
+  refreshBookMetadata: (id: number) =>
+    ipcRenderer.invoke('books:refreshMetadata', id),
 
   // Sources
   getAllSources: () => ipcRenderer.invoke('sources:getAll'),
@@ -17,8 +21,10 @@ contextBridge.exposeInMainWorld('electronAPI', {
     ipcRenderer.invoke('sources:search', sourceId, keyword),
   getChapters: (sourceId: number, url: string) =>
     ipcRenderer.invoke('sources:chapters', sourceId, url),
-  getChapterContent: (sourceId: number, url: string) =>
-    ipcRenderer.invoke('sources:content', sourceId, url),
+  getChapterContent: (sourceId: number, book: any, chapter: any) =>
+    ipcRenderer.invoke('sources:content', sourceId, book, chapter),
+  exportBookTxt: (sourceId: number, book: any, chapters: any[]) =>
+    ipcRenderer.invoke('sources:exportTxt', sourceId, book, chapters),
 
   // Bookmarks & Notes
   getBookmarks: (bookId: number) => ipcRenderer.invoke('bookmarks:get', bookId),
@@ -32,6 +38,14 @@ contextBridge.exposeInMainWorld('electronAPI', {
   getSetting: (key: string) => ipcRenderer.invoke('settings:get', key),
   setSetting: (key: string, value: string) =>
     ipcRenderer.invoke('settings:set', key, value),
+
+  // Notes export & reading timer & sync
+  exportNotes: (bookId?: number) => ipcRenderer.invoke('notes:export', bookId),
+  recordReadingTime: (bookId: number, seconds: number) =>
+    ipcRenderer.invoke('stats:recordTime', bookId, seconds),
+  getReadingTimeStats: () => ipcRenderer.invoke('stats:readingTime'),
+  syncBackup: () => ipcRenderer.invoke('sync:backup'),
+  syncRestore: () => ipcRenderer.invoke('sync:restore'),
 
   // Events
   onOpenFile: (callback: () => void) =>

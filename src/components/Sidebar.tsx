@@ -11,7 +11,7 @@ export function Sidebar({ currentView, onNavigate, onOpenFile, onSearch }: Sideb
   return (
     <aside className="sidebar">
       <div className="sidebar-header">
-        <h1 className="app-title">📖 BookReader</h1>
+        <h1 className="app-title">📖 阅读书架</h1>
       </div>
 
       <div className="sidebar-search">

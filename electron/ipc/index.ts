@@ -2,6 +2,8 @@ import { ipcMain, dialog, BrowserWindow, app } from 'electron';
 import fs from 'fs';
 import path from 'path';
 import { DatabaseService } from '../services/db.service';
+import { extractMetadata } from '../services/metadata';
+import { buildCrawlerFromRow } from '../services/book-source';
 
 export function registerIpcHandlers() {
   const db = DatabaseService.getInstance();
@@ -34,8 +36,12 @@ export function registerIpcHandlers() {
 
       fs.copyFileSync(filePath, destPath);
 
+      // 优先从内容提取书名作者，失败回退文件名
+      const meta = await extractMetadata(destPath, ext);
+
       const id = db.insertBook({
-        title: fileName,
+        title: meta?.title ?? fileName,
+        author: meta?.author,
         file_path: destPath,
         file_type: ext.slice(1),
       });
@@ -44,6 +50,18 @@ export function registerIpcHandlers() {
     }
 
     return imported;
+  });
+
+  // 已入库书籍：从内容重新识别书名作者
+  ipcMain.handle('books:refreshMetadata', async (_event, id: number) => {
+    const book = db.getBookById(id) as
+      | { file_path: string; file_type: string }
+      | undefined;
+    if (!book) throw new Error('书籍不存在');
+    const meta = await extractMetadata(book.file_path, '.' + book.file_type);
+    if (!meta) throw new Error('未能从内容中识别出书名');
+    db.updateBookInfo(id, meta.title, meta.author ?? null);
+    return meta;
   });
 
   ipcMain.handle('books:getAll', () => {
@@ -62,6 +80,15 @@ export function registerIpcHandlers() {
     db.updateBookProgress(id, progress);
   });
 
+  // 按 id 读取书籍文件内容（base64），渲染进程无文件访问权限，必须经主进程
+  ipcMain.handle('books:getFileData', (_event, id: number) => {
+    const book = db.getBookById(id) as { file_path: string } | undefined;
+    if (!book) throw new Error('书籍不存在');
+    if (!fs.existsSync(book.file_path)) throw new Error('书籍文件已丢失：' + book.file_path);
+    const buffer = fs.readFileSync(book.file_path);
+    return buffer.toString('base64');
+  });
+
   // ============ Sources ============
 
   ipcMain.handle('sources:getAll', () => {
@@ -76,26 +103,93 @@ export function registerIpcHandlers() {
     db.deleteSource(id);
   });
 
-  ipcMain.handle('sources:search', async (_event, sourceId: number, _keyword: string) => {
+  ipcMain.handle('sources:search', async (_event, sourceId: number, keyword: string) => {
     const source = db.getSourceById(sourceId) as any;
-    if (!source) return [];
-    // TODO: 实现书源搜索
-    return [];
+    if (!source) throw new Error('书源不存在');
+    const crawler = buildCrawlerFromRow(source);
+    if (!crawler) throw new Error('该书源缺少抓取规则，请编辑补充选择器');
+    return crawler.search(keyword);
   });
 
-  ipcMain.handle('sources:chapters', async (_event, sourceId: number, _url: string) => {
+  ipcMain.handle('sources:chapters', async (_event, sourceId: number, detailUrl: string) => {
     const source = db.getSourceById(sourceId) as any;
-    if (!source) return [];
-    // TODO: 实现章节列表获取
-    return [];
+    if (!source) throw new Error('书源不存在');
+    const crawler = buildCrawlerFromRow(source);
+    if (!crawler) throw new Error('该书源缺少抓取规则，请编辑补充选择器');
+    return crawler.getChapters(detailUrl);
   });
 
-  ipcMain.handle('sources:content', async (_event, sourceId: number, _url: string) => {
-    const source = db.getSourceById(sourceId) as any;
-    if (!source) return '';
-    // TODO: 实现章节内容获取
-    return '';
-  });
+  ipcMain.handle(
+    'sources:content',
+    async (
+      _event,
+      sourceId: number,
+      book: { url: string; title: string },
+      chapter: { url: string; title: string; idx: number },
+    ) => {
+      // 先读缓存
+      const cached = db.getCachedChapter(chapter.url) as { content: string } | undefined;
+      if (cached?.content) return cached.content;
+
+      const source = db.getSourceById(sourceId) as any;
+      if (!source) throw new Error('书源不存在');
+      const crawler = buildCrawlerFromRow(source);
+      if (!crawler) throw new Error('该书源缺少抓取规则，请编辑补充选择器');
+      const content = await crawler.getContent(chapter.url);
+      if (content) {
+        db.saveCachedChapter({
+          source_id: sourceId,
+          book_url: book.url,
+          chapter_url: chapter.url,
+          title: chapter.title,
+          content,
+          idx: chapter.idx,
+        });
+      }
+      return content;
+    },
+  );
+
+  // 整本缓存并导出 TXT
+  ipcMain.handle(
+    'sources:exportTxt',
+    async (event, sourceId: number, book: { url: string; title: string }, chapters: { name: string; url: string }[]) => {
+      const win = BrowserWindow.fromWebContents(event.sender) ?? undefined;
+      const { canceled, filePath } = await dialog.showSaveDialog(win!, {
+        title: '导出 TXT',
+        defaultPath: `${book.title.replace(/[\\/:*?"<>|]/g, '_')}.txt`,
+        filters: [{ name: '文本文件', extensions: ['txt'] }],
+      });
+      if (canceled || !filePath) return null;
+
+      const source = db.getSourceById(sourceId) as any;
+      if (!source) throw new Error('书源不存在');
+      const crawler = buildCrawlerFromRow(source);
+      if (!crawler) throw new Error('该书源缺少抓取规则，请编辑补充选择器');
+
+      const parts: string[] = [book.title, ''];
+      for (let i = 0; i < chapters.length; i++) {
+        const ch = chapters[i];
+        let content = (db.getCachedChapter(ch.url) as any)?.content as string | undefined;
+        if (!content) {
+          content = await crawler.getContent(ch.url);
+          if (content) {
+            db.saveCachedChapter({
+              source_id: sourceId,
+              book_url: book.url,
+              chapter_url: ch.url,
+              title: ch.name,
+              content,
+              idx: i,
+            });
+          }
+        }
+        parts.push(`\n${ch.name}\n\n${content || '（本章获取失败）'}\n`);
+      }
+      fs.writeFileSync(filePath, parts.join('\n'), 'utf-8');
+      return filePath;
+    },
+  );
 
   // ============ Bookmarks ============
 
@@ -123,6 +217,170 @@ export function registerIpcHandlers() {
 
   ipcMain.handle('notes:delete', (_event, id: number) => {
     db.deleteNote(id);
+  });
+
+  // 笔记+书签导出 Markdown（不传 bookId 则导出全部书）
+  ipcMain.handle('notes:export', async (event, bookId?: number) => {
+    const books = (
+      bookId ? [db.getBookById(bookId)] : db.getAllBooks()
+    ).filter(Boolean) as any[];
+    if (books.length === 0) throw new Error('没有可导出的书籍');
+
+    const lines: string[] = [`# 阅读笔记导出`, `> 导出时间：${new Date().toLocaleString()}`, ''];
+    for (const b of books) {
+      const notes = db.getNotesByBookId(b.id) as any[];
+      const marks = db.getBookmarksByBookId(b.id) as any[];
+      if (notes.length === 0 && marks.length === 0) continue;
+      lines.push(`## 《${b.title}》${b.author ? ` —— ${b.author}` : ''}`, '');
+      for (const n of notes) {
+        if (n.selected_text) lines.push(`> ${n.selected_text}`, '');
+        if (n.note) lines.push(n.note, '');
+        lines.push(`- ${n.created_at}`, '');
+      }
+      for (const m of marks) {
+        if (m.text) lines.push(`- 📌 ${m.text}`, '');
+      }
+      lines.push('---', '');
+    }
+    if (lines.length <= 3) throw new Error('所选书籍暂无笔记或书签');
+
+    const win = BrowserWindow.fromWebContents(event.sender) ?? undefined;
+    const { canceled, filePath } = await dialog.showSaveDialog(win!, {
+      title: '导出笔记',
+      defaultPath: bookId ? '我的笔记.md' : '全部笔记.md',
+      filters: [{ name: 'Markdown', extensions: ['md'] }],
+    });
+    if (canceled || !filePath) return null;
+    fs.writeFileSync(filePath, lines.join('\n'), 'utf-8');
+    return filePath;
+  });
+
+  // ============ 阅读计时 ============
+
+  ipcMain.handle('stats:recordTime', (_event, bookId: number, seconds: number) => {
+    db.recordReadingTime(bookId, seconds);
+  });
+
+  ipcMain.handle('stats:readingTime', () => {
+    return db.getReadingTimeStats();
+  });
+
+  // ============ WebDAV 同步 ============
+  // 同步内容：进度、书签、笔记、书源、设置（不含书籍文件，跨设备需各自导入同名书籍）
+
+  function getSyncClient() {
+    const url = db.getSetting('webdavUrl');
+    const user = db.getSetting('webdavUser');
+    const pass = db.getSetting('webdavPass');
+    if (!url) throw new Error('请先在设置页配置 WebDAV 服务器地址');
+    // webdav 包为 ESM，用动态导入兼容 CJS 主进程
+    return { url, user: user || '', pass: pass || '' };
+  }
+
+  ipcMain.handle('sync:backup', async () => {
+    const { url, user, pass } = getSyncClient();
+    const { createClient } = await import('webdav');
+    const client = createClient(url, { username: user, password: pass });
+
+    const books = db.getAllBooks() as any[];
+    const payload = {
+      version: 1,
+      exportedAt: new Date().toISOString(),
+      books: books.map(b => ({
+        title: b.title,
+        author: b.author,
+        file_type: b.file_type,
+        progress: b.progress,
+        last_read_at: b.last_read_at,
+      })),
+      bookmarks: books.flatMap(b =>
+        (db.getBookmarksByBookId(b.id) as any[]).map(m => ({ book: b.title, position: m.position, text: m.text })),
+      ),
+      notes: books.flatMap(b =>
+        (db.getNotesByBookId(b.id) as any[]).map(n => ({
+          book: b.title,
+          position: n.position,
+          selected_text: n.selected_text,
+          note: n.note,
+        })),
+      ),
+      sources: db.getAllSources(),
+      settings: ['fontSize', 'lineHeight', 'theme', 'aiProvider', 'aiBaseUrl', 'aiModel'].map(k => ({
+        key: k,
+        value: db.getSetting(k),
+      })),
+    };
+    await client.putFileContents('/book-reader-backup.json', JSON.stringify(payload, null, 2), {
+      overwrite: true,
+    });
+    db.setSetting('lastSyncAt', new Date().toLocaleString());
+    return true;
+  });
+
+  ipcMain.handle('sync:restore', async () => {
+    const { url, user, pass } = getSyncClient();
+    const { createClient } = await import('webdav');
+    const client = createClient(url, { username: user, password: pass });
+
+    const raw = (await client.getFileContents('/book-reader-backup.json', { format: 'text' })) as string;
+    const data = JSON.parse(raw as string);
+    if (!data || data.version !== 1) throw new Error('备份文件格式不正确');
+
+    const localBooks = db.getAllBooks() as any[];
+    const findLocal = (title: string) => localBooks.find(b => b.title === title);
+    let restored = 0;
+
+    // 进度：远端更新则覆盖
+    for (const rb of data.books || []) {
+      const local = findLocal(rb.title);
+      if (!local) continue;
+      if ((rb.last_read_at || '') > (local.last_read_at || '')) {
+        db.updateBookProgress(local.id, rb.progress ?? 0);
+        restored++;
+      }
+    }
+    // 书签笔记：按书名匹配、position 去重插入
+    for (const m of data.bookmarks || []) {
+      const local = findLocal(m.book);
+      if (!local) continue;
+      const exists = (db.getBookmarksByBookId(local.id) as any[]).some(x => x.position === m.position);
+      if (!exists) {
+        db.insertBookmark({ book_id: local.id, position: m.position, text: m.text });
+        restored++;
+      }
+    }
+    for (const n of data.notes || []) {
+      const local = findLocal(n.book);
+      if (!local) continue;
+      const exists = (db.getNotesByBookId(local.id) as any[]).some(
+        x => x.position === n.position && x.note === n.note,
+      );
+      if (!exists) {
+        db.insertNote({ book_id: local.id, position: n.position, selected_text: n.selected_text, note: n.note });
+        restored++;
+      }
+    }
+    // 书源：按 name+url 去重
+    const localSources = db.getAllSources() as any[];
+    for (const s of data.sources || []) {
+      if (!localSources.some(x => x.name === s.name && x.url === s.url)) {
+        db.insertSource({
+          name: s.name,
+          url: s.url,
+          search_url: s.search_url || '',
+          chapters_url: s.chapters_url || '',
+          content_url: s.content_url || '',
+          rules: s.rules || '',
+        });
+        restored++;
+      }
+    }
+    // 阅读偏好设置
+    for (const s of data.settings || []) {
+      if (s.value != null) db.setSetting(s.key, String(s.value));
+    }
+    db.setSetting('lastSyncAt', new Date().toLocaleString());
+    return restored;
   });
 
   // ============ Settings ============
