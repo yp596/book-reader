@@ -50,6 +50,8 @@ contextBridge.exposeInMainWorld('electronAPI', {
   getBookmarks: (bookId: number) => ipcRenderer.invoke('bookmarks:get', bookId),
   addBookmark: (bookmark: any) => ipcRenderer.invoke('bookmarks:add', bookmark),
   deleteBookmark: (id: number) => ipcRenderer.invoke('bookmarks:delete', id),
+  updateBookmark: (id: number, text: string) =>
+    ipcRenderer.invoke('bookmarks:update', id, text),
   getNotes: (bookId: number) => ipcRenderer.invoke('notes:get', bookId),
   addNote: (note: any) => ipcRenderer.invoke('notes:add', note),
   deleteNote: (id: number) => ipcRenderer.invoke('notes:delete', id),
@@ -64,8 +66,14 @@ contextBridge.exposeInMainWorld('electronAPI', {
   recordReadingTime: (bookId: number, seconds: number) =>
     ipcRenderer.invoke('stats:recordTime', bookId, seconds),
   getReadingTimeStats: () => ipcRenderer.invoke('stats:readingTime'),
+  getWeeklyStats: (days: number) => ipcRenderer.invoke('stats:weekly', days),
   syncBackup: () => ipcRenderer.invoke('sync:backup'),
   syncRestore: () => ipcRenderer.invoke('sync:restore'),
+
+  // Vocab
+  getAllWords: () => ipcRenderer.invoke('words:list'),
+  addWord: (word: any) => ipcRenderer.invoke('words:add', word),
+  deleteWord: (id: number) => ipcRenderer.invoke('words:delete', id),
 
   // AI
   aiSummarize: (text: string) => ipcRenderer.invoke('ai:summarize', text),

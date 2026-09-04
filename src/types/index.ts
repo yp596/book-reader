@@ -18,6 +18,16 @@ export interface TocEntry {
   page?: number;
 }
 
+export interface WordEntry {
+  id: number;
+  book_id?: number | null;
+  book_title?: string;
+  word: string;
+  definition: string;
+  context?: string;
+  created_at: string;
+}
+
 export interface BookSource {
   id: number;
   name: string;
@@ -112,6 +122,7 @@ declare global {
       getBookmarks: (bookId: number) => Promise<Bookmark[]>;
       addBookmark: (bookmark: Omit<Bookmark, 'id' | 'created_at'>) => Promise<any>;
       deleteBookmark: (id: number) => Promise<void>;
+      updateBookmark: (id: number, text: string) => Promise<void>;
       getNotes: (bookId: number) => Promise<Note[]>;
       addNote: (note: Omit<Note, 'id' | 'created_at'>) => Promise<any>;
       deleteNote: (id: number) => Promise<void>;
@@ -120,6 +131,10 @@ declare global {
       exportNotes: (bookId?: number) => Promise<string | null>;
       recordReadingTime: (bookId: number, seconds: number) => Promise<void>;
       getReadingTimeStats: () => Promise<{ today: number; total: number }>;
+      getWeeklyStats: (days: number) => Promise<{ date: string; duration: number }[]>;
+      getAllWords: () => Promise<WordEntry[]>;
+      addWord: (word: { book_id?: number | null; word: string; definition: string; context?: string }) => Promise<any>;
+      deleteWord: (id: number) => Promise<void>;
       syncBackup: () => Promise<boolean>;
       syncRestore: () => Promise<number>;
       aiSummarize: (text: string) => Promise<string>;

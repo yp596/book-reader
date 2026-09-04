@@ -90,6 +90,8 @@ export function Reader({ book, onBack, initialTarget }: ReaderProps) {
   const [aiLoading, setAiLoading] = useState(false);
   const [aiQuestion, setAiQuestion] = useState('');
   const [aiContext, setAiContext] = useState('');
+  /** 查词模式：答案可存入生词本 */
+  const [aiWord, setAiWord] = useState('');
 
   /** AI 调用统一入口（含未配置提示） */
   const runAi = async (fn: () => Promise<string>) => {
@@ -141,21 +143,42 @@ export function Reader({ book, onBack, initialTarget }: ReaderProps) {
     await runAi(() => api.aiExplain(text, aiQuestion.trim()));
   };
 
-  /** 选中文本送去 AI：一键短解释 / 一键翻译（适配 1B 小模型，短问短答） */
-  const handleAiQuick = async (kind: 'explain' | 'translate') => {
+  /** 选中文本送去 AI：一键短解释 / 一键翻译 / 查词（适配 1B 小模型，短问短答） */
+  const handleAiQuick = async (kind: 'explain' | 'translate' | 'define') => {
     if (!sel) return;
     const api = window.electronAPI;
     if (!api) return;
-    const text = sel.text.slice(0, 1000);
+    const text = sel.text.slice(0, 200);
     setSel(null);
     clearEpubSelection();
     setAiContext(text);
     setAiQuestion('');
+    setAiWord(kind === 'define' ? text : '');
     setPanel('ai');
     if (kind === 'translate') {
       await runAi(() => api.aiTranslate(text));
+    } else if (kind === 'define') {
+      await runAi(() => api.aiExplain(text, '请简短解释这个词语的意思、词性和一个例句，不要长篇大论'));
     } else {
       await runAi(() => api.aiExplain(text, '请用一两句话简短解释这段文字的意思'));
+    }
+  };
+
+  /** 查词结果存入生词本 */
+  const handleSaveWord = async () => {
+    const api = window.electronAPI;
+    if (!api || !aiWord.trim() || !aiAnswer.trim()) return;
+    try {
+      await api.addWord({
+        book_id: book.id,
+        word: aiWord.trim().slice(0, 100),
+        definition: aiAnswer.trim().slice(0, 2000),
+        context: aiContext.slice(0, 500),
+      });
+      alert('已加入生词本');
+      setAiWord('');
+    } catch (err) {
+      alert(err instanceof Error ? err.message : '保存失败');
     }
   };
 
@@ -391,6 +414,20 @@ export function Reader({ book, onBack, initialTarget }: ReaderProps) {
     setSel(null);
     await refreshMarks();
     setPanel('notes');
+  };
+
+  const handleRenameBookmark = async (b: Bookmark) => {
+    const api = window.electronAPI;
+    if (!api) return;
+    const next = prompt('修改书签名称：', b.text || '');
+    if (next !== null && next.trim() && next.trim() !== (b.text || '')) {
+      try {
+        await api.updateBookmark(b.id, next.trim());
+        await refreshMarks();
+      } catch (err) {
+        alert(err instanceof Error ? err.message : '修改失败');
+      }
+    }
   };
 
   const handleDeleteBookmark = async (b: Bookmark) => {
@@ -1030,6 +1067,7 @@ export function Reader({ book, onBack, initialTarget }: ReaderProps) {
                   <p className="mark-quote">{b.text}</p>
                   <div className="mark-actions">
                     <button onClick={() => jumpToMark(b.position)}>跳转</button>
+                    <button onClick={() => handleRenameBookmark(b)}>改名</button>
                     <button className="danger" onClick={() => handleDeleteBookmark(b)}>删除</button>
                   </div>
                 </div>
@@ -1072,6 +1110,11 @@ export function Reader({ book, onBack, initialTarget }: ReaderProps) {
             {!aiLoading && aiAnswer && (
               <div className="mark-item">
                 <p className="mark-note" style={{ whiteSpace: 'pre-wrap' }}>{aiAnswer}</p>
+                {aiWord && (
+                  <div className="mark-actions">
+                    <button onClick={handleSaveWord}>存入生词本</button>
+                  </div>
+                )}
               </div>
             )}
           </div>
@@ -1199,6 +1242,9 @@ export function Reader({ book, onBack, initialTarget }: ReaderProps) {
           </button>
           <button onClick={() => handleAiQuick('translate')} title="AI 一键翻译">
             🌐 翻译
+          </button>
+          <button onClick={() => handleAiQuick('define')} title="查词并可存入生词本">
+            📖 查词
           </button>
           <button
             onClick={async () => {

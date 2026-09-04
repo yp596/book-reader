@@ -1,6 +1,7 @@
 import { useState, useEffect } from 'react';
 import { Book } from '../types';
 import { formatMinutes } from '../utils/text';
+import { buildWeekSeries, DayStat } from '../utils/stats';
 
 interface StatsData {
   totalBooks: number;
@@ -20,6 +21,7 @@ export function Statistics() {
     todayMinutes: 0,
     totalMinutes: 0,
   });
+  const [weekSeries, setWeekSeries] = useState<DayStat[]>([]);
 
   useEffect(() => { loadStats(); }, []);
 
@@ -43,6 +45,8 @@ export function Statistics() {
       todayMinutes: time.today,
       totalMinutes: time.total,
     });
+    const week = await api.getWeeklyStats(7);
+    setWeekSeries(buildWeekSeries(week as { date: string; duration: number }[]));
   };
 
   const handleExportAll = async () => {
@@ -97,6 +101,30 @@ export function Statistics() {
           <div className="stats-label">累计阅读</div>
         </div>
       </div>
+
+      <section className="stats-section">
+        <h2>近 7 天阅读趋势（分钟）</h2>
+        {weekSeries.length === 0 ? (
+          <p className="empty-text">暂无数据</p>
+        ) : (
+          <div className="week-chart">
+            {weekSeries.map(d => {
+              const max = Math.max(...weekSeries.map(x => x.minutes), 1);
+              return (
+                <div key={d.fullDate} className="week-bar-wrap" title={`${d.fullDate}：${d.minutes} 分钟`}>
+                  <div className="week-bar-track">
+                    <div
+                      className={`week-bar ${d.isToday ? 'today' : ''}`}
+                      style={{ height: `${Math.max(4, (d.minutes / max) * 100)}%` }}
+                    />
+                  </div>
+                  <span className="week-label">{d.date.slice(5)}</span>
+                </div>
+              );
+            })}
+          </div>
+        )}
+      </section>
 
       <section className="stats-section">
         <h2>最近阅读</h2>

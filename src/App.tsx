@@ -5,10 +5,11 @@ import { BookDetail } from './components/BookDetail';
 import { Reader } from './components/Reader';
 import { Sidebar } from './components/Sidebar';
 import { SourceManager } from './components/SourceManager';
+import { Vocab } from './components/Vocab';
 import { Settings } from './components/Settings';
 import { Statistics } from './components/Statistics';
 
-type View = 'library' | 'detail' | 'reader' | 'sources' | 'settings' | 'stats';
+type View = 'library' | 'detail' | 'reader' | 'sources' | 'vocab' | 'settings' | 'stats';
 
 // 安全获取 electronAPI，preload 未就绪时返回空实现
 const api = window.electronAPI ?? {
@@ -110,6 +111,8 @@ function App() {
         ) : null;
       case 'sources':
         return <SourceManager />;
+      case 'vocab':
+        return <Vocab />;
       case 'settings':
         return <Settings />;
       case 'stats':

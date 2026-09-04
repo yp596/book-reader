@@ -125,6 +125,15 @@ export class DatabaseService {
         cached_at DATETIME DEFAULT CURRENT_TIMESTAMP
       )`,
       `CREATE INDEX IF NOT EXISTS idx_cached_book ON cached_chapters(book_url)`,
+      // 生词本
+      `CREATE TABLE IF NOT EXISTS words (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        book_id INTEGER,
+        word TEXT NOT NULL,
+        definition TEXT NOT NULL DEFAULT '',
+        context TEXT DEFAULT '',
+        created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+      )`,
     ];
     for (const sql of tables) this.db.run(sql);
     // 存量库迁移：书源表加规则列
@@ -322,6 +331,43 @@ export class DatabaseService {
 
   deleteBookmark(id: number) {
     this.run('DELETE FROM bookmarks WHERE id = ?', [id]);
+  }
+
+  // ============ 生词本 ============
+
+  getAllWords() {
+    return this.all('SELECT w.*, b.title as book_title FROM words w LEFT JOIN books b ON b.id = w.book_id ORDER BY w.created_at DESC');
+  }
+
+  insertWord(w: { book_id?: number | null; word: string; definition: string; context?: string }) {
+    this.run('INSERT INTO words (book_id, word, definition, context) VALUES (?, ?, ?, ?)', [
+      w.book_id ?? null,
+      w.word.trim(),
+      w.definition,
+      w.context ?? null,
+    ]);
+    const row = this.get('SELECT last_insert_rowid() as id');
+    return row?.id;
+  }
+
+  deleteWord(id: number) {
+    this.run('DELETE FROM words WHERE id = ?', [id]);
+  }
+
+  // ============ 书签改名 ============
+
+  updateBookmarkText(id: number, text: string) {
+    this.run('UPDATE bookmarks SET text = ? WHERE id = ?', [text.trim(), id]);
+  }
+
+  // ============ 按日阅读时长（周统计用） ============
+
+  getDailyDurations(days: number): { date: string; duration: number }[] {
+    return this.all(
+      `SELECT date, SUM(duration) as duration FROM reading_stats
+       WHERE date >= date('now', 'localtime', ?) GROUP BY date`,
+      [`-${days - 1} days`],
+    );
   }
 
   // ============ 阅读计时 ============

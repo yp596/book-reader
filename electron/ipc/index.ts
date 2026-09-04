@@ -364,6 +364,31 @@ export function registerIpcHandlers() {
     return db.getReadingTimeStats();
   });
 
+  ipcMain.handle('stats:weekly', (_event, days: number) => {
+    return db.getDailyDurations(Math.min(Math.max(days || 7, 1), 30));
+  });
+
+  // ============ 生词本 ============
+
+  ipcMain.handle('words:list', () => {
+    return db.getAllWords();
+  });
+
+  ipcMain.handle('words:add', (_event, word: any) => {
+    if (!word?.word?.trim()) throw new Error('词语不能为空');
+    return db.insertWord(word);
+  });
+
+  ipcMain.handle('words:delete', (_event, id: number) => {
+    db.deleteWord(id);
+  });
+
+  // 书签改名
+  ipcMain.handle('bookmarks:update', (_event, id: number, text: string) => {
+    if (!text?.trim()) throw new Error('书签内容不能为空');
+    db.updateBookmarkText(id, text);
+  });
+
   // ============ AI 阅读助手 ============
   // 配置来自设置页（aiBaseUrl/aiModel/aiApiKey），支持 Ollama / OpenAI / 兼容接口
 
