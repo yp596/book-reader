@@ -101,6 +101,21 @@ export class BookSourceCrawler {
   }
 }
 
+/** 文本净化：按顺序应用全局正则替换，非法规则跳过 */
+export function applyTextFilters(
+  text: string,
+  rules: { pattern: string; replacement: string }[],
+): string {
+  let out = text;
+  for (const r of rules) {
+    try {
+      out = out.replace(new RegExp(r.pattern, 'g'), r.replacement ?? '');
+    } catch {
+      /* 非法规则跳过 */
+    }
+  }
+  return out;
+}
 /** 从数据库行构造爬虫：优先 rules JSON，否则返回 null（规则不完整） */
 export function buildCrawlerFromRow(source: any): BookSourceCrawler | null {
   try {

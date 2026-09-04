@@ -17,6 +17,7 @@ export function OnlineReader({ source, book, onBack }: OnlineReaderProps) {
   const [caching, setCaching] = useState(false);
   const [cacheProgress, setCacheProgress] = useState('');
   const [exporting, setExporting] = useState(false);
+  const [following, setFollowing] = useState(false);
 
   useEffect(() => {
     loadChapters();
@@ -79,21 +80,34 @@ export function OnlineReader({ source, book, onBack }: OnlineReaderProps) {
     }
   };
 
-  const handleExport = async () => {
+  const handleExport = async (kind: 'txt' | 'epub') => {
     const api = window.electronAPI;
     if (!api || chapters.length === 0) return;
     setExporting(true);
     try {
-      const filePath = await api.exportBookTxt(
-        source.id,
-        { url: book.detail, title: book.name },
-        chapters,
-      );
+      const filePath =
+        kind === 'txt'
+          ? await api.exportBookTxt(source.id, { url: book.detail, title: book.name }, chapters)
+          : await api.exportBookEpub(source.id, { url: book.detail, title: book.name }, chapters);
       if (filePath) alert(`已导出到：${filePath}`);
     } catch (err) {
       alert(`导出失败：${err instanceof Error ? err.message : '未知错误'}`);
     } finally {
       setExporting(false);
+    }
+  };
+
+  const handleFollow = async () => {
+    const api = window.electronAPI;
+    if (!api) return;
+    setFollowing(true);
+    try {
+      await api.followBook({ source_id: source.id, book_url: book.detail, title: book.name });
+      alert('已加入追更，下次检查更新会提醒你');
+    } catch (err) {
+      alert(err instanceof Error ? err.message : '追更失败');
+    } finally {
+      setFollowing(false);
     }
   };
 
@@ -142,11 +156,17 @@ export function OnlineReader({ source, book, onBack }: OnlineReaderProps) {
       <div className="source-header">
         <button className="back-btn" onClick={onBack}>← 返回搜索</button>
         <div className="source-actions">
+          <button className="btn-secondary" onClick={handleFollow} disabled={following}>
+            {following ? '追更中...' : '📌 追更'}
+          </button>
           <button className="btn-secondary" onClick={handleCacheAll} disabled={caching || chapters.length === 0}>
             {caching ? '缓存中...' : '缓存整本'}
           </button>
-          <button className="btn-secondary" onClick={handleExport} disabled={exporting || chapters.length === 0}>
+          <button className="btn-secondary" onClick={() => handleExport('txt')} disabled={exporting || chapters.length === 0}>
             {exporting ? '导出中...' : '导出 TXT'}
+          </button>
+          <button className="btn-secondary" onClick={() => handleExport('epub')} disabled={exporting || chapters.length === 0}>
+            {exporting ? '导出中...' : '导出 EPUB'}
           </button>
         </div>
       </div>

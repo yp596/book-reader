@@ -28,6 +28,26 @@ export interface WordEntry {
   created_at: string;
 }
 
+export interface TextFilter {
+  id: number;
+  name: string;
+  pattern: string;
+  replacement: string;
+  enabled: number;
+  created_at: string;
+}
+
+export interface FollowedBook {
+  id: number;
+  source_id: number;
+  book_url: string;
+  title: string;
+  last_chapter: string;
+  last_count: number;
+  last_check?: string;
+  has_update: number;
+}
+
 export interface BookSource {
   id: number;
   name: string;
@@ -119,6 +139,20 @@ declare global {
         book: { url: string; title: string },
         chapters: OnlineChapter[],
       ) => Promise<string | null>;
+      exportBookEpub: (
+        sourceId: number,
+        book: { url: string; title: string },
+        chapters: OnlineChapter[],
+      ) => Promise<string | null>;
+      getFilters: () => Promise<TextFilter[]>;
+      addFilter: (filter: { name: string; pattern: string; replacement: string }) => Promise<any>;
+      toggleFilter: (id: number, enabled: number) => Promise<void>;
+      deleteFilter: (id: number) => Promise<void>;
+      getFollows: () => Promise<FollowedBook[]>;
+      followBook: (follow: { source_id: number; book_url: string; title: string }) => Promise<void>;
+      unfollowBook: (id: number) => Promise<void>;
+      clearFollowUpdate: (id: number) => Promise<void>;
+      checkUpdates: (ids?: number[]) => Promise<{ id: number; title: string; newCount: number }[]>;
       getBookmarks: (bookId: number) => Promise<Bookmark[]>;
       addBookmark: (bookmark: Omit<Bookmark, 'id' | 'created_at'>) => Promise<any>;
       deleteBookmark: (id: number) => Promise<void>;

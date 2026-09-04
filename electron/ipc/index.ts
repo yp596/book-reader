@@ -1,10 +1,44 @@
-import { ipcMain, dialog, BrowserWindow, app, shell } from 'electron';
+import { ipcMain, dialog, BrowserWindow, app, shell, Notification } from 'electron';
 import fs from 'fs';
 import path from 'path';
 import { DatabaseService } from '../services/db.service';
 import { extractMetadata, extractToc } from '../services/metadata';
-import { buildCrawlerFromRow } from '../services/book-source';
+import { buildCrawlerFromRow, applyTextFilters } from '../services/book-source';
+import { buildEpub } from '../services/epub-export';
 import { AiService } from '../services/ai-service';
+
+const sanitizeFileName = (name: string) => name.replace(/[\\/:*?"<>|]/g, '_');
+
+/** 章节内容统一入口：缓存 → 抓取 → 净化 → 回写缓存 */
+async function fetchChapterContent(
+  db: DatabaseService,
+  sourceId: number,
+  book: { url: string; title: string },
+  chapter: { url: string; title: string; idx: number },
+): Promise<string> {
+  const cached = db.getCachedChapter(chapter.url) as { content: string } | undefined;
+  // 缓存也过一遍当前规则（后加的规则对旧缓存生效）
+  if (cached?.content) return applyTextFilters(cached.content, db.getEnabledFilters());
+
+  const source = db.getSourceById(sourceId) as any;
+  if (!source) throw new Error('书源不存在');
+  const crawler = buildCrawlerFromRow(source);
+  if (!crawler) throw new Error('该书源缺少抓取规则，请编辑补充选择器');
+  let content = await crawler.getContent(chapter.url);
+  if (content) {
+    // 全局净化规则
+    content = applyTextFilters(content, db.getEnabledFilters());
+    db.saveCachedChapter({
+      source_id: sourceId,
+      book_url: book.url,
+      chapter_url: chapter.url,
+      title: chapter.title,
+      content,
+      idx: chapter.idx,
+    });
+  }
+  return content;
+}
 
 /** 单文件导入复用逻辑（对话框/拖拽共用） */
 async function importOneFile(db: DatabaseService, filePath: string) {
@@ -226,26 +260,7 @@ export function registerIpcHandlers() {
       book: { url: string; title: string },
       chapter: { url: string; title: string; idx: number },
     ) => {
-      // 先读缓存
-      const cached = db.getCachedChapter(chapter.url) as { content: string } | undefined;
-      if (cached?.content) return cached.content;
-
-      const source = db.getSourceById(sourceId) as any;
-      if (!source) throw new Error('书源不存在');
-      const crawler = buildCrawlerFromRow(source);
-      if (!crawler) throw new Error('该书源缺少抓取规则，请编辑补充选择器');
-      const content = await crawler.getContent(chapter.url);
-      if (content) {
-        db.saveCachedChapter({
-          source_id: sourceId,
-          book_url: book.url,
-          chapter_url: chapter.url,
-          title: chapter.title,
-          content,
-          idx: chapter.idx,
-        });
-      }
-      return content;
+      return fetchChapterContent(db, sourceId, book, chapter);
     },
   );
 
@@ -256,39 +271,124 @@ export function registerIpcHandlers() {
       const win = BrowserWindow.fromWebContents(event.sender) ?? undefined;
       const { canceled, filePath } = await dialog.showSaveDialog(win!, {
         title: '导出 TXT',
-        defaultPath: `${book.title.replace(/[\\/:*?"<>|]/g, '_')}.txt`,
+        defaultPath: `${sanitizeFileName(book.title)}.txt`,
         filters: [{ name: '文本文件', extensions: ['txt'] }],
       });
       if (canceled || !filePath) return null;
 
-      const source = db.getSourceById(sourceId) as any;
-      if (!source) throw new Error('书源不存在');
-      const crawler = buildCrawlerFromRow(source);
-      if (!crawler) throw new Error('该书源缺少抓取规则，请编辑补充选择器');
-
       const parts: string[] = [book.title, ''];
       for (let i = 0; i < chapters.length; i++) {
         const ch = chapters[i];
-        let content = (db.getCachedChapter(ch.url) as any)?.content as string | undefined;
-        if (!content) {
-          content = await crawler.getContent(ch.url);
-          if (content) {
-            db.saveCachedChapter({
-              source_id: sourceId,
-              book_url: book.url,
-              chapter_url: ch.url,
-              title: ch.name,
-              content,
-              idx: i,
-            });
-          }
-        }
+        const content = await fetchChapterContent(db, sourceId, book, {
+          url: ch.url,
+          title: ch.name,
+          idx: i,
+        });
         parts.push(`\n${ch.name}\n\n${content || '（本章获取失败）'}\n`);
       }
       fs.writeFileSync(filePath, parts.join('\n'), 'utf-8');
       return filePath;
     },
   );
+
+  // 整本缓存并导出 EPUB
+  ipcMain.handle(
+    'sources:exportEpub',
+    async (event, sourceId: number, book: { url: string; title: string }, chapters: { name: string; url: string }[]) => {
+      const win = BrowserWindow.fromWebContents(event.sender) ?? undefined;
+      const { canceled, filePath } = await dialog.showSaveDialog(win!, {
+        title: '导出 EPUB',
+        defaultPath: `${sanitizeFileName(book.title)}.epub`,
+        filters: [{ name: 'EPUB 电子书', extensions: ['epub'] }],
+      });
+      if (canceled || !filePath) return null;
+
+      const contents: { title: string; content: string }[] = [];
+      for (let i = 0; i < chapters.length; i++) {
+        const ch = chapters[i];
+        const content = await fetchChapterContent(db, sourceId, book, {
+          url: ch.url,
+          title: ch.name,
+          idx: i,
+        });
+        contents.push({ title: ch.name, content: content || '（本章获取失败）' });
+      }
+      const buf = await buildEpub(book.title, contents);
+      fs.writeFileSync(filePath, buf);
+      return filePath;
+    },
+  );
+
+  // ============ 文本净化规则 ============
+
+  ipcMain.handle('filters:list', () => {
+    return db.getAllFilters();
+  });
+
+  ipcMain.handle('filters:add', (_event, filter: any) => {
+    try {
+      return db.insertFilter(filter);
+    } catch {
+      throw new Error('正则表达式非法，请检查');
+    }
+  });
+
+  ipcMain.handle('filters:toggle', (_event, id: number, enabled: number) => {
+    db.toggleFilter(id, enabled);
+  });
+
+  ipcMain.handle('filters:delete', (_event, id: number) => {
+    db.deleteFilter(id);
+  });
+
+  // ============ 追更订阅 ============
+
+  ipcMain.handle('follows:list', () => {
+    return db.getFollowedBooks();
+  });
+
+  ipcMain.handle('follows:add', (_event, follow: any) => {
+    db.followBook(follow);
+  });
+
+  ipcMain.handle('follows:remove', (_event, id: number) => {
+    db.unfollowBook(id);
+  });
+
+  ipcMain.handle('follows:clearUpdate', (_event, id: number) => {
+    db.clearFollowUpdate(id);
+  });
+
+  // 检查指定/全部订阅更新，有新章节弹系统通知
+  ipcMain.handle('follows:check', async (_event, ids?: number[]) => {
+    const all = db.getFollowedBooks() as any[];
+    const targets = ids?.length ? all.filter(f => ids.includes(f.id)) : all;
+    const updated: { id: string | number; title: string; newCount: number }[] = [];
+    for (const f of targets) {
+      try {
+        const source = db.getSourceById(f.source_id) as any;
+        if (!source) continue;
+        const crawler = buildCrawlerFromRow(source);
+        if (!crawler) continue;
+        const chapters = await crawler.getChapters(f.book_url);
+        if (chapters.length === 0) continue;
+        const lastName = chapters[chapters.length - 1].name;
+        const isNew =
+          chapters.length > (f.last_count ?? 0) || (lastName && lastName !== (f.last_chapter ?? ''));
+        db.updateFollowResult(f.id, lastName, chapters.length, !!isNew);
+        if (isNew) updated.push({ id: f.id, title: f.title, newCount: chapters.length });
+      } catch (err) {
+        console.error(`检查更新失败 [${f.title}]:`, err);
+      }
+    }
+    if (updated.length > 0 && Notification.isSupported()) {
+      new Notification({
+        title: '追更提醒',
+        body: updated.map(u => `《${u.title}》有更新（共 ${u.newCount} 章）`).join('\n'),
+      }).show();
+    }
+    return updated;
+  });
 
   // ============ Bookmarks ============
 

@@ -45,6 +45,19 @@ contextBridge.exposeInMainWorld('electronAPI', {
     ipcRenderer.invoke('sources:content', sourceId, book, chapter),
   exportBookTxt: (sourceId: number, book: any, chapters: any[]) =>
     ipcRenderer.invoke('sources:exportTxt', sourceId, book, chapters),
+  exportBookEpub: (sourceId: number, book: any, chapters: any[]) =>
+    ipcRenderer.invoke('sources:exportEpub', sourceId, book, chapters),
+
+  // Filters & follows
+  getFilters: () => ipcRenderer.invoke('filters:list'),
+  addFilter: (filter: any) => ipcRenderer.invoke('filters:add', filter),
+  toggleFilter: (id: number, enabled: number) => ipcRenderer.invoke('filters:toggle', id, enabled),
+  deleteFilter: (id: number) => ipcRenderer.invoke('filters:delete', id),
+  getFollows: () => ipcRenderer.invoke('follows:list'),
+  followBook: (follow: any) => ipcRenderer.invoke('follows:add', follow),
+  unfollowBook: (id: number) => ipcRenderer.invoke('follows:remove', id),
+  clearFollowUpdate: (id: number) => ipcRenderer.invoke('follows:clearUpdate', id),
+  checkUpdates: (ids?: number[]) => ipcRenderer.invoke('follows:check', ids),
 
   // Bookmarks & Notes
   getBookmarks: (bookId: number) => ipcRenderer.invoke('bookmarks:get', bookId),

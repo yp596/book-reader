@@ -1,5 +1,5 @@
 import { useState, useEffect } from 'react';
-import { BookSource, OnlineBook } from '../types';
+import { BookSource, OnlineBook, TextFilter, FollowedBook } from '../types';
 import { OnlineReader } from './OnlineReader';
 
 const emptyForm = {
@@ -30,13 +30,86 @@ export function SourceManager() {
   // 在线阅读
   const [reading, setReading] = useState<{ source: BookSource; book: OnlineBook } | null>(null);
 
-  useEffect(() => { loadSources(); }, []);
+  // 追更
+  const [follows, setFollows] = useState<FollowedBook[]>([]);
+  const [checking, setChecking] = useState(false);
+
+  // 净化规则
+  const [filters, setFilters] = useState<TextFilter[]>([]);
+  const [showFilterForm, setShowFilterForm] = useState(false);
+  const [filterForm, setFilterForm] = useState({ name: '', pattern: '', replacement: '' });
+
+  useEffect(() => { loadSources(); loadFollows(); loadFilters(); }, []);
 
   const loadSources = async () => {
     const api = window.electronAPI;
     if (!api) return;
     const allSources = await api.getAllSources();
     setSources(allSources as BookSource[]);
+  };
+
+  const loadFollows = async () => {
+    const api = window.electronAPI;
+    if (!api) return;
+    setFollows(await api.getFollows());
+  };
+
+  const loadFilters = async () => {
+    const api = window.electronAPI;
+    if (!api) return;
+    setFilters(await api.getFilters());
+  };
+
+  const handleCheckUpdates = async () => {
+    const api = window.electronAPI;
+    if (!api) return;
+    setChecking(true);
+    try {
+      const updated = await api.checkUpdates();
+      await loadFollows();
+      alert(updated.length > 0 ? `发现 ${updated.length} 本更新：${updated.map(u => `《${u.title}》`).join('、')}` : '暂无更新');
+    } catch (err) {
+      alert(err instanceof Error ? err.message : '检查失败');
+    } finally {
+      setChecking(false);
+    }
+  };
+
+  const handleUnfollow = async (id: number) => {
+    if (!confirm('取消追更？')) return;
+    await window.electronAPI?.unfollowBook(id);
+    loadFollows();
+  };
+
+  const handleClearUpdate = async (f: FollowedBook) => {
+    await window.electronAPI?.clearFollowUpdate(f.id);
+    loadFollows();
+  };
+
+  const handleAddFilter = async () => {
+    if (!filterForm.name.trim() || !filterForm.pattern) {
+      alert('名称和正则不能为空');
+      return;
+    }
+    try {
+      await window.electronAPI?.addFilter(filterForm);
+      setFilterForm({ name: '', pattern: '', replacement: '' });
+      setShowFilterForm(false);
+      loadFilters();
+    } catch (err) {
+      alert(err instanceof Error ? err.message : '添加失败');
+    }
+  };
+
+  const handleToggleFilter = async (f: TextFilter) => {
+    await window.electronAPI?.toggleFilter(f.id, f.enabled ? 0 : 1);
+    loadFilters();
+  };
+
+  const handleDeleteFilter = async (id: number) => {
+    if (!confirm('删除这条规则？')) return;
+    await window.electronAPI?.deleteFilter(id);
+    loadFilters();
   };
 
   const set = (key: keyof typeof emptyForm, value: string) =>
@@ -247,6 +320,90 @@ export function SourceManager() {
         )}
         {!searching && keyword && results.length === 0 && !searchError && (
           <p className="empty-text">没有找到相关书籍</p>
+        )}
+      </section>
+
+      {/* 追更列表 */}
+      <section className="settings-section">
+        <div className="source-header" style={{ marginBottom: 12 }}>
+          <h2 style={{ marginBottom: 0 }}>追更（{follows.length}）</h2>
+          <button className="btn-secondary" onClick={handleCheckUpdates} disabled={checking || follows.length === 0}>
+            {checking ? '检查中...' : '🔄 检查更新'}
+          </button>
+        </div>
+        {follows.length === 0 ? (
+          <p className="empty-text">暂无追更，在书籍章节页点「📌 追更」订阅</p>
+        ) : (
+          <div className="source-list">
+            {follows.map(f => (
+              <div key={f.id} className="source-card">
+                <div className="source-info" style={{ border: 'none', margin: 0, padding: 0 }}>
+                  <h3>
+                    {f.has_update ? '🔴 ' : ''}{f.title}
+                  </h3>
+                  <p className="source-url">
+                    {f.last_chapter ? `最新：${f.last_chapter}（共 ${f.last_count} 章）` : '尚未检查'}
+                    {f.last_check ? ` · ${new Date(f.last_check).toLocaleString()}` : ''}
+                  </p>
+                </div>
+                <div className="source-actions" style={{ gap: 8, display: 'flex' }}>
+                  {f.has_update ? (
+                    <button className="btn-secondary small" onClick={() => handleClearUpdate(f)}>标为已读</button>
+                  ) : null}
+                  <button className="btn-danger small" onClick={() => handleUnfollow(f.id)}>取消</button>
+                </div>
+              </div>
+            ))}
+          </div>
+        )}
+      </section>
+
+      {/* 文本净化 */}
+      <section className="settings-section">
+        <div className="source-header" style={{ marginBottom: 12 }}>
+          <h2 style={{ marginBottom: 0 }}>文本净化（{filters.length}）</h2>
+          <button className="btn-secondary" onClick={() => setShowFilterForm(true)}>添加规则</button>
+        </div>
+        <p className="section-desc">正则替换在线章节里的广告、乱码（例： pattern 填 <code>.*?小说网</code>，replacement 留空即删除）。</p>
+        {showFilterForm && (
+          <div className="source-form" style={{ marginBottom: 16 }}>
+            <div className="form-row">
+              <label>规则名称</label>
+              <input value={filterForm.name} onChange={e => setFilterForm(s => ({ ...s, name: e.target.value }))} placeholder="去广告" />
+            </div>
+            <div className="form-row">
+              <label>正则表达式</label>
+              <input value={filterForm.pattern} onChange={e => setFilterForm(s => ({ ...s, pattern: e.target.value }))} placeholder="广告.*?\n" />
+            </div>
+            <div className="form-row">
+              <label>替换为（留空=删除）</label>
+              <input value={filterForm.replacement} onChange={e => setFilterForm(s => ({ ...s, replacement: e.target.value }))} placeholder="" />
+            </div>
+            <div className="form-actions">
+              <button className="btn-secondary" onClick={() => setShowFilterForm(false)}>取消</button>
+              <button className="btn-primary" onClick={handleAddFilter}>确定</button>
+            </div>
+          </div>
+        )}
+        {filters.length === 0 ? (
+          <p className="empty-text">暂无规则</p>
+        ) : (
+          <div className="source-list">
+            {filters.map(f => (
+              <div key={f.id} className="source-card">
+                <div className="source-info" style={{ border: 'none', margin: 0, padding: 0 }}>
+                  <h3 style={{ opacity: f.enabled ? 1 : 0.5 }}>{f.name}{f.enabled ? '' : '（已停用）'}</h3>
+                  <p className="source-url"><code>{f.pattern}</code> → {f.replacement ? <code>{f.replacement}</code> : '删除'}</p>
+                </div>
+                <div className="source-actions" style={{ gap: 8, display: 'flex' }}>
+                  <button className="btn-secondary small" onClick={() => handleToggleFilter(f)}>
+                    {f.enabled ? '停用' : '启用'}
+                  </button>
+                  <button className="btn-danger small" onClick={() => handleDeleteFilter(f.id)}>删除</button>
+                </div>
+              </div>
+            ))}
+          </div>
         )}
       </section>
 

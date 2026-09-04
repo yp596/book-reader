@@ -134,6 +134,26 @@ export class DatabaseService {
         context TEXT DEFAULT '',
         created_at DATETIME DEFAULT CURRENT_TIMESTAMP
       )`,
+      // 文本净化规则（全局正则替换）
+      `CREATE TABLE IF NOT EXISTS text_filters (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        name TEXT NOT NULL,
+        pattern TEXT NOT NULL,
+        replacement TEXT NOT NULL DEFAULT '',
+        enabled INTEGER DEFAULT 1,
+        created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+      )`,
+      // 追更订阅
+      `CREATE TABLE IF NOT EXISTS followed_books (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        source_id INTEGER NOT NULL,
+        book_url TEXT NOT NULL UNIQUE,
+        title TEXT NOT NULL,
+        last_chapter TEXT DEFAULT '',
+        last_count INTEGER DEFAULT 0,
+        last_check DATETIME,
+        has_update INTEGER DEFAULT 0
+      )`,
     ];
     for (const sql of tables) this.db.run(sql);
     // 存量库迁移：书源表加规则列
@@ -368,6 +388,64 @@ export class DatabaseService {
        WHERE date >= date('now', 'localtime', ?) GROUP BY date`,
       [`-${days - 1} days`],
     );
+  }
+
+  // ============ 文本净化 ============
+
+  getEnabledFilters(): { pattern: string; replacement: string }[] {
+    return this.all('SELECT pattern, replacement FROM text_filters WHERE enabled = 1 ORDER BY id');
+  }
+
+  getAllFilters() {
+    return this.all('SELECT * FROM text_filters ORDER BY id');
+  }
+
+  insertFilter(f: { name: string; pattern: string; replacement: string }) {
+    // 校验正则合法性
+    new RegExp(f.pattern);
+    this.run('INSERT INTO text_filters (name, pattern, replacement) VALUES (?, ?, ?)', [
+      f.name,
+      f.pattern,
+      f.replacement ?? '',
+    ]);
+    const row = this.get('SELECT last_insert_rowid() as id');
+    return row?.id;
+  }
+
+  toggleFilter(id: number, enabled: number) {
+    this.run('UPDATE text_filters SET enabled = ? WHERE id = ?', [enabled ? 1 : 0, id]);
+  }
+
+  deleteFilter(id: number) {
+    this.run('DELETE FROM text_filters WHERE id = ?', [id]);
+  }
+
+  // ============ 追更订阅 ============
+
+  getFollowedBooks() {
+    return this.all('SELECT * FROM followed_books ORDER BY has_update DESC, last_check DESC');
+  }
+
+  followBook(f: { source_id: number; book_url: string; title: string }) {
+    this.run(
+      'INSERT OR IGNORE INTO followed_books (source_id, book_url, title) VALUES (?, ?, ?)',
+      [f.source_id, f.book_url, f.title],
+    );
+  }
+
+  unfollowBook(id: number) {
+    this.run('DELETE FROM followed_books WHERE id = ?', [id]);
+  }
+
+  updateFollowResult(id: number, lastChapter: string, count: number, hasUpdate: boolean) {
+    this.run(
+      `UPDATE followed_books SET last_chapter = ?, last_count = ?, has_update = ?, last_check = CURRENT_TIMESTAMP WHERE id = ?`,
+      [lastChapter, count, hasUpdate ? 1 : 0, id],
+    );
+  }
+
+  clearFollowUpdate(id: number) {
+    this.run('UPDATE followed_books SET has_update = 0 WHERE id = ?', [id]);
   }
 
   // ============ 阅读计时 ============
