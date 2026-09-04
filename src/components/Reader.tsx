@@ -3,7 +3,7 @@ import ePub from 'epubjs';
 import * as pdfjsLib from 'pdfjs-dist';
 import PdfWorkerUrl from 'pdfjs-dist/build/pdf.worker.min.mjs?url';
 import { Book, Bookmark, Note } from '../types';
-import { escapeHtml, excerptAround } from '../utils/text';
+import { escapeHtml, excerptAround, clampPage } from '../utils/text';
 
 pdfjsLib.GlobalWorkerOptions.workerSrc = PdfWorkerUrl;
 
@@ -79,8 +79,20 @@ export function Reader({ book, onBack }: ReaderProps) {
   const [phoneMode, setPhoneMode] = useState(false);
   const [clock, setClock] = useState('');
 
+  // PDF 缩放 / 跳页 / 全屏 / 朗读变速
+  const [pdfScale, setPdfScale] = useState(1.5);
+  const pdfBaseWidthRef = useRef(0);
+  const pdfWrapRef = useRef<HTMLDivElement>(null);
+  const [jumpInput, setJumpInput] = useState('');
+  const [ttsRate, setTtsRate] = useState(1);
+
   useEffect(() => {
     readStartRef.current = Date.now();
+    // 载入朗读速度偏好
+    window.electronAPI?.getSetting('ttsRate').then(v => {
+      const r = Number(v);
+      if (!Number.isNaN(r) && r >= 0.5 && r <= 2) setTtsRate(r);
+    });
     loadBook();
     return () => {
       // 离开阅读器时上报本次阅读时长
@@ -361,6 +373,7 @@ export function Reader({ book, onBack }: ReaderProps) {
     window.speechSynthesis.cancel();
     const utter = new SpeechSynthesisUtterance(text.slice(0, 15000));
     utter.lang = 'zh-CN';
+    utter.rate = ttsRate;
     const voice = window.speechSynthesis.getVoices().find(v => v.lang.startsWith('zh'));
     if (voice) utter.voice = voice;
     utter.onend = () => setSpeaking(false);
@@ -429,10 +442,13 @@ export function Reader({ book, onBack }: ReaderProps) {
 
   // ---------- 翻页 ----------
 
-  const renderPdfPage = async (pdfDoc: any, pageNum: number) => {
+  const renderPdfPage = async (pdfDoc: any, pageNum: number, scale: number) => {
     if (!canvasRef.current) return;
     const page = await pdfDoc.getPage(pageNum);
-    const viewport = page.getViewport({ scale: 1.5 });
+    if (!pdfBaseWidthRef.current) {
+      pdfBaseWidthRef.current = page.getViewport({ scale: 1 }).width;
+    }
+    const viewport = page.getViewport({ scale });
     const canvas = canvasRef.current;
     canvas.height = viewport.height;
     canvas.width = viewport.width;
@@ -442,9 +458,29 @@ export function Reader({ book, onBack }: ReaderProps) {
 
   useEffect(() => {
     if (book.file_type === 'pdf' && pdfReady && pdfDocRef.current && !loading) {
-      renderPdfPage(pdfDocRef.current, pageIndex + 1);
+      renderPdfPage(pdfDocRef.current, pageIndex + 1, pdfScale);
     }
-  }, [pdfReady, pageIndex, loading]);
+  }, [pdfReady, pageIndex, loading, pdfScale]);
+
+  /** PDF 缩放档位 */
+  const changePdfScale = (delta: number) => {
+    setPdfScale(s => Math.min(3, Math.max(0.5, Math.round((s + delta) * 10) / 10)));
+  };
+
+  /** PDF 适应宽度 */
+  const fitPdfWidth = () => {
+    if (!pdfBaseWidthRef.current || !pdfWrapRef.current) return;
+    const avail = pdfWrapRef.current.clientWidth - 48;
+    setPdfScale(Math.min(3, Math.max(0.5, Math.round((avail / pdfBaseWidthRef.current) * 10) / 10)));
+  };
+
+  /** 跳到指定页（TXT / PDF） */
+  const jumpToPage = (raw: string) => {
+    const target = clampPage(Number(raw), totalPages);
+    setPageIndex(target - 1);
+    setJumpInput('');
+    window.electronAPI?.updateProgress(book.id, totalPages > 0 ? (target - 1) / totalPages : 0);
+  };
 
   useEffect(() => {
     if (book.file_type === 'epub' && renditionRef.current) {
@@ -490,6 +526,50 @@ export function Reader({ book, onBack }: ReaderProps) {
     renditionRef.current?.display(href);
     setPanel(null);
   };
+
+  const handleToggleFullscreen = async () => {
+    try {
+      await window.electronAPI?.toggleFullscreen();
+    } catch { /* 非 Electron 环境忽略 */ }
+  };
+
+  // 键盘快捷键：方向键/空格翻页，Home/End 跳转，F11 全屏
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => {
+      const tag = (e.target as HTMLElement)?.tagName;
+      if (tag === 'INPUT' || tag === 'TEXTAREA' || tag === 'SELECT') return;
+      switch (e.key) {
+        case 'ArrowRight':
+        case 'PageDown':
+        case ' ':
+          e.preventDefault();
+          handleNext();
+          break;
+        case 'ArrowLeft':
+        case 'PageUp':
+          e.preventDefault();
+          handlePrev();
+          break;
+        case 'Home':
+          e.preventDefault();
+          if (book.file_type === 'epub') renditionRef.current?.display();
+          else setPageIndex(0);
+          break;
+        case 'End':
+          e.preventDefault();
+          if (book.file_type !== 'epub' && totalPages > 0) setPageIndex(totalPages - 1);
+          break;
+        case 'F11':
+          e.preventDefault();
+          handleToggleFullscreen();
+          break;
+        default:
+          break;
+      }
+    };
+    window.addEventListener('keydown', onKey);
+    return () => window.removeEventListener('keydown', onKey);
+  });
 
   // ---------- 检索 ----------
 
@@ -575,6 +655,13 @@ export function Reader({ book, onBack }: ReaderProps) {
               <button onClick={() => togglePanel('toc')} className={panel === 'toc' ? 'active' : ''}>📑 目录</button>
             </>
           )}
+          {book.file_type === 'pdf' && (
+            <>
+              <button onClick={() => changePdfScale(-0.25)} title="缩小">🔍-</button>
+              <button onClick={() => changePdfScale(0.25)} title="放大">🔍+</button>
+              <button onClick={fitPdfWidth} title="适应宽度">↔</button>
+            </>
+          )}
           <button onClick={() => togglePanel('notes')} className={panel === 'notes' ? 'active' : ''} title="笔记">
             📝{notes.length > 0 ? ` ${notes.length}` : ''}
           </button>
@@ -592,6 +679,9 @@ export function Reader({ book, onBack }: ReaderProps) {
             title="手机模式"
           >
             📱
+          </button>
+          <button onClick={handleToggleFullscreen} title="全屏 (F11)">
+            ⛶
           </button>
         </div>
       </div>
@@ -710,7 +800,7 @@ export function Reader({ book, onBack }: ReaderProps) {
             </div>
           )}
           {!loading && !error && book.file_type === 'pdf' && (
-            <div className="pdf-page">
+            <div className="pdf-page" ref={pdfWrapRef}>
               <canvas ref={canvasRef} />
             </div>
           )}
@@ -720,7 +810,19 @@ export function Reader({ book, onBack }: ReaderProps) {
       <div className="reader-footer">
         <button className="nav-btn" onClick={handlePrev}>上一页</button>
         {book.file_type !== 'epub' && totalPages > 0 && (
-          <span className="page-indicator">{pageIndex + 1} / {totalPages}</span>
+          <>
+            <span className="page-indicator">{pageIndex + 1} / {totalPages}</span>
+            <input
+              className="jump-input"
+              value={jumpInput}
+              onChange={e => setJumpInput(e.target.value)}
+              onKeyDown={e => {
+                if (e.key === 'Enter') jumpToPage(jumpInput);
+              }}
+              placeholder="跳页"
+              title="输入页码回车跳转"
+            />
+          </>
         )}
         <button className="nav-btn" onClick={handleNext}>下一页</button>
       </div>

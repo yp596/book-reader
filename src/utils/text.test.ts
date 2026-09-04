@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { escapeHtml, excerptAround, formatMinutes } from './text';
+import { escapeHtml, excerptAround, formatMinutes, formatFileSize, clampPage } from './text';
 
 describe('escapeHtml', () => {
   it('转义尖括号和 &', () => {
@@ -39,5 +39,33 @@ describe('formatMinutes', () => {
 
   it('零秒显示 0 分钟', () => {
     expect(formatMinutes(0)).toBe('0 分钟');
+  });
+});
+
+describe('formatFileSize', () => {
+  it('B / KB / MB 进制正确', () => {
+    expect(formatFileSize(512)).toBe('512 B');
+    expect(formatFileSize(2048)).toBe('2.0 KB');
+    expect(formatFileSize(5 * 1024 * 1024)).toBe('5.0 MB');
+  });
+
+  it('GB 保留两位小数', () => {
+    expect(formatFileSize(2 * 1024 * 1024 * 1024)).toBe('2.00 GB');
+  });
+});
+
+describe('clampPage', () => {
+  it('范围内原样返回', () => {
+    expect(clampPage(3, 10)).toBe(3);
+  });
+
+  it('越界钳制到两端', () => {
+    expect(clampPage(0, 10)).toBe(1);
+    expect(clampPage(99, 10)).toBe(10);
+  });
+
+  it('非法输入回退第 1 页', () => {
+    expect(clampPage(NaN, 10)).toBe(1);
+    expect(clampPage(5, 0)).toBe(1);
   });
 });

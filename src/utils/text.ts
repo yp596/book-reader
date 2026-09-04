@@ -16,3 +16,18 @@ export const formatMinutes = (seconds: number) => {
   if (m < 60) return `${m} 分钟`;
   return `${Math.floor(m / 60)} 小时 ${m % 60} 分`;
 };
+
+/** 字节数转可读大小 */
+export const formatFileSize = (bytes: number) => {
+  if (bytes < 1024) return `${bytes} B`;
+  if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`;
+  if (bytes < 1024 * 1024 * 1024) return `${(bytes / 1024 / 1024).toFixed(1)} MB`;
+  return `${(bytes / 1024 / 1024 / 1024).toFixed(2)} GB`;
+};
+
+/** 页码钳制到 [1, total] */
+export const clampPage = (page: number, total: number) => {
+  if (total <= 0) return 1;
+  if (Number.isNaN(page)) return 1;
+  return Math.min(Math.max(1, Math.floor(page)), total);
+};

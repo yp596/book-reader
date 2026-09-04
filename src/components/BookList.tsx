@@ -1,5 +1,6 @@
 import { useState, useEffect } from 'react';
 import { Book } from '../types';
+import { formatFileSize } from '../utils/text';
 
 interface BookListProps {
   books: Book[];
@@ -72,6 +73,45 @@ export function BookList({ books, searchQuery, onSelectBook, onRefresh }: BookLi
     }
   };
 
+  const handleReveal = async () => {
+    if (contextMenu) {
+      const api = window.electronAPI;
+      if (api) {
+        try {
+          await api.revealBookFile(contextMenu.book.id);
+        } catch (err) {
+          alert(err instanceof Error ? err.message : '打开失败');
+        }
+      }
+      setContextMenu(null);
+    }
+  };
+
+  const handleFileInfo = async () => {
+    if (contextMenu) {
+      const api = window.electronAPI;
+      if (api) {
+        try {
+          const info = await api.getBookFileInfo(contextMenu.book.id);
+          alert(
+            `书名：${info.title}\n作者：${info.author}\n文件名：${info.fileName}\n格式：${info.fileType.toUpperCase()}\n大小：${formatFileSize(info.size)}\n修改时间：${info.mtime}\n进度：${Math.round(info.progress * 100)}%`,
+          );
+        } catch (err) {
+          alert(err instanceof Error ? err.message : '获取失败');
+        }
+      }
+      setContextMenu(null);
+    }
+  };
+
+  const handleClearHistory = async () => {
+    if (!confirm('确定清除全部阅读记录吗？书籍保留，进度归零。')) return;
+    const api = window.electronAPI;
+    if (!api) return;
+    await api.clearReadingHistory();
+    onRefresh();
+  };
+
   const handleRename = async () => {
     if (contextMenu) {
       const newName = prompt('输入新书名:', contextMenu.book.title);
@@ -87,6 +127,9 @@ export function BookList({ books, searchQuery, onSelectBook, onRefresh }: BookLi
       <div className="book-list-header">
         <h1>我的书架</h1>
         <div className="book-list-controls">
+          <button className="btn-secondary small" onClick={handleClearHistory} title="清除全部阅读进度">
+            清除记录
+          </button>
           <select value={sortBy} onChange={e => setSortBy(e.target.value as SortBy)}>
             <option value="recent">最近阅读</option>
             <option value="title">按书名</option>
@@ -178,6 +221,8 @@ export function BookList({ books, searchQuery, onSelectBook, onRefresh }: BookLi
         >
           <div className="context-menu-item" onClick={handleRename}>重命名</div>
           <div className="context-menu-item" onClick={handleRefreshMetadata}>重新识别标题</div>
+          <div className="context-menu-item" onClick={handleFileInfo}>属性</div>
+          <div className="context-menu-item" onClick={handleReveal}>打开所在位置</div>
           <div className="context-menu-item danger" onClick={handleDelete}>删除</div>
         </div>
       )}

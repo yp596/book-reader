@@ -65,6 +65,18 @@ declare global {
       deleteBook: (id: number) => Promise<void>;
       updateProgress: (id: number, progress: number) => Promise<void>;
       getBookFileData: (id: number) => Promise<string>;
+      getBookFileInfo: (id: number) => Promise<{
+        title: string;
+        author: string;
+        fileName: string;
+        fileType: string;
+        size: number;
+        mtime: string;
+        progress: number;
+      }>;
+      revealBookFile: (id: number) => Promise<void>;
+      clearReadingHistory: () => Promise<void>;
+      toggleFullscreen: () => Promise<boolean>;
       refreshBookMetadata: (id: number) => Promise<{ title: string; author?: string }>;
       getAllSources: () => Promise<BookSource[]>;
       addSource: (source: Omit<BookSource, 'id' | 'enabled' | 'created_at'>) => Promise<any>;

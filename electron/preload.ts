@@ -10,6 +10,14 @@ contextBridge.exposeInMainWorld('electronAPI', {
     ipcRenderer.invoke('books:updateProgress', id, progress),
   getBookFileData: (id: number): Promise<string> =>
     ipcRenderer.invoke('books:getFileData', id),
+  getBookFileInfo: (id: number) =>
+    ipcRenderer.invoke('books:fileInfo', id),
+  revealBookFile: (id: number) =>
+    ipcRenderer.invoke('books:reveal', id),
+  clearReadingHistory: () =>
+    ipcRenderer.invoke('books:clearHistory'),
+  toggleFullscreen: (): Promise<boolean> =>
+    ipcRenderer.invoke('window:toggleFullscreen'),
   refreshBookMetadata: (id: number) =>
     ipcRenderer.invoke('books:refreshMetadata', id),
 

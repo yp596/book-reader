@@ -11,6 +11,7 @@ interface SettingsData {
   fontSize: number;
   lineHeight: number;
   theme: 'dark' | 'light' | 'sepia';
+  ttsRate: number;
 }
 
 export function Settings() {
@@ -25,6 +26,7 @@ export function Settings() {
     fontSize: 18,
     lineHeight: 1.8,
     theme: 'dark',
+    ttsRate: 1,
   });
   const [saved, setSaved] = useState(false);
   const [syncing, setSyncing] = useState(false);
@@ -123,6 +125,17 @@ export function Settings() {
             <option value="light">浅色</option>
             <option value="sepia">护眼</option>
           </select>
+        </div>
+        <div className="form-row">
+          <label>朗读速度（{settings.ttsRate.toFixed(2)} 倍）</label>
+          <input
+            type="range"
+            value={settings.ttsRate}
+            onChange={e => handleChange('ttsRate', Number(e.target.value))}
+            min={0.5}
+            max={2}
+            step={0.25}
+          />
         </div>
       </section>
 

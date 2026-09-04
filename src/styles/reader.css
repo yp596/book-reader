@@ -474,6 +474,25 @@
   border-radius: 2px;
 }
 
+/* 跳页输入框 */
+.jump-input {
+  width: 64px;
+  padding: 10px 8px;
+  text-align: center;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  background: var(--bg-input);
+  color: var(--text-primary);
+  font-size: 13px;
+  outline: none;
+  transition: var(--transition);
+}
+
+.jump-input:focus {
+  border-color: var(--accent);
+  box-shadow: 0 0 0 3px var(--accent-glow);
+}
+
 /* ============ Reader Footer ============ */
 .reader-footer {
   display: flex;

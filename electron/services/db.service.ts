@@ -190,6 +190,11 @@ export class DatabaseService {
     this.run('DELETE FROM books WHERE id = ?', [id]);
   }
 
+  /** 清除全部阅读记录（保留书籍） */
+  clearReadingHistory() {
+    this.run('UPDATE books SET progress = 0, last_read_at = NULL');
+  }
+
   // ============ Sources ============
 
   getAllSources() {

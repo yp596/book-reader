@@ -1,4 +1,4 @@
-import { ipcMain, dialog, BrowserWindow, app } from 'electron';
+import { ipcMain, dialog, BrowserWindow, app, shell } from 'electron';
 import fs from 'fs';
 import path from 'path';
 import { DatabaseService } from '../services/db.service';
@@ -78,6 +78,44 @@ export function registerIpcHandlers() {
 
   ipcMain.handle('books:updateProgress', (_event, id: number, progress: number) => {
     db.updateBookProgress(id, progress);
+  });
+
+  // 文件属性（名称/大小/修改时间/类型）
+  ipcMain.handle('books:fileInfo', (_event, id: number) => {
+    const book = db.getBookById(id) as any;
+    if (!book) throw new Error('书籍不存在');
+    const stat = fs.existsSync(book.file_path) ? fs.statSync(book.file_path) : null;
+    return {
+      title: book.title,
+      author: book.author || '未知作者',
+      fileName: path.basename(book.file_path),
+      fileType: book.file_type,
+      size: stat ? stat.size : 0,
+      mtime: stat ? stat.mtime.toLocaleString() : '文件已丢失',
+      progress: book.progress ?? 0,
+    };
+  });
+
+  // 在文件管理器中显示
+  ipcMain.handle('books:reveal', (_event, id: number) => {
+    const book = db.getBookById(id) as any;
+    if (!book) throw new Error('书籍不存在');
+    if (!fs.existsSync(book.file_path)) throw new Error('书籍文件已丢失');
+    shell.showItemInFolder(book.file_path);
+  });
+
+  // 清除全部阅读记录
+  ipcMain.handle('books:clearHistory', () => {
+    db.clearReadingHistory();
+  });
+
+  // 全屏切换
+  ipcMain.handle('window:toggleFullscreen', (event) => {
+    const win = BrowserWindow.fromWebContents(event.sender);
+    if (!win) return false;
+    const next = !win.isFullScreen();
+    win.setFullScreen(next);
+    return next;
   });
 
   // 按 id 读取书籍文件内容（base64），渲染进程无文件访问权限，必须经主进程
