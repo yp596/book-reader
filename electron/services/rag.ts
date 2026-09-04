@@ -1,0 +1,75 @@
+/** RAG：文本切分 + embedding 调用 + 余弦检索（纯函数可单测） */
+
+export interface TextSection {
+  /** 章节名 */
+  label: string;
+  /** 跳转目标 JSON：{href?} 或 {page?} */
+  target: string;
+  text: string;
+}
+
+export interface TextChunk extends TextSection {
+  chunkIdx: number;
+}
+
+/** 按字切分，overlap 重叠防断句 */
+export function splitText(
+  section: TextSection,
+  size = 500,
+  overlap = 100,
+): Omit<TextChunk, 'chunkIdx'>[] {
+  const clean = section.text.replace(/\s+/g, ' ').trim();
+  if (!clean) return [];
+  if (clean.length <= size) {
+    return [{ label: section.label, target: section.target, text: clean }];
+  }
+  const out: Omit<TextChunk, 'chunkIdx'>[] = [];
+  let start = 0;
+  while (start < clean.length) {
+    out.push({
+      label: section.label,
+      target: section.target,
+      text: clean.slice(start, start + size),
+    });
+    if (start + size >= clean.length) break;
+    start += size - overlap;
+  }
+  return out;
+}
+
+/** 余弦相似度 */
+export function cosine(a: number[], b: number[]): number {
+  let dot = 0;
+  let na = 0;
+  let nb = 0;
+  const n = Math.min(a.length, b.length);
+  for (let i = 0; i < n; i++) {
+    dot += a[i] * b[i];
+    na += a[i] * a[i];
+    nb += b[i] * b[i];
+  }
+  if (na === 0 || nb === 0) return 0;
+  return dot / (Math.sqrt(na) * Math.sqrt(nb));
+}
+
+/** 批量 embedding（llama-server /v1/embeddings，兼容 Ollama） */
+export async function embedTexts(texts: string[], baseUrl: string): Promise<number[][]> {
+  const out: number[][] = [];
+  // 分批防超限
+  for (let i = 0; i < texts.length; i += 16) {
+    const batch = texts.slice(i, i + 16);
+    const response = await fetch(`${baseUrl.replace(/\/$/, '')}/v1/embeddings`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ model: 'nomic-embed', input: batch }),
+      signal: AbortSignal.timeout(120000),
+    });
+    if (!response.ok) throw new Error(`向量服务返回 ${response.status}`);
+    const data = await response.json();
+    const sorted = [...(data.data as { index: number; embedding: number[] }[])].sort(
+      (x, y) => x.index - y.index,
+    );
+    for (const item of sorted) out.push(item.embedding);
+  }
+  return out;
+}

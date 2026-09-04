@@ -154,6 +154,18 @@ export class DatabaseService {
         last_check DATETIME,
         has_update INTEGER DEFAULT 0
       )`,
+      // RAG 向量
+      `CREATE TABLE IF NOT EXISTS book_vectors (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        book_id INTEGER NOT NULL,
+        chunk_idx INTEGER NOT NULL,
+        chapter TEXT DEFAULT '',
+        target TEXT DEFAULT '',
+        text TEXT NOT NULL,
+        embedding TEXT NOT NULL,
+        created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+      )`,
+      `CREATE INDEX IF NOT EXISTS idx_vectors_book ON book_vectors(book_id)`,
     ];
     for (const sql of tables) this.db.run(sql);
     // 存量库迁移：书源表加规则列
@@ -446,6 +458,35 @@ export class DatabaseService {
 
   clearFollowUpdate(id: number) {
     this.run('UPDATE followed_books SET has_update = 0 WHERE id = ?', [id]);
+  }
+
+  // ============ RAG 向量 ============
+
+  clearBookVectors(bookId: number) {
+    this.run('DELETE FROM book_vectors WHERE book_id = ?', [bookId]);
+  }
+
+  saveVectors(
+    rows: { book_id: number; chunk_idx: number; chapter: string; target: string; text: string; embedding: string }[],
+  ) {
+    for (const r of rows) {
+      this.run(
+        'INSERT INTO book_vectors (book_id, chunk_idx, chapter, target, text, embedding) VALUES (?, ?, ?, ?, ?, ?)',
+        [r.book_id, r.chunk_idx, r.chapter, r.target, r.text, r.embedding],
+      );
+    }
+  }
+
+  getAllVectors(): { id: number; book_id: number; chapter: string; target: string; text: string; embedding: string }[] {
+    return this.all('SELECT id, book_id, chapter, target, text, embedding FROM book_vectors');
+  }
+
+  getVectorStats(): { book_id: number; title: string; chunks: number; updated_at: string }[] {
+    return this.all(`
+      SELECT v.book_id, b.title, COUNT(*) as chunks, MAX(v.created_at) as updated_at
+      FROM book_vectors v LEFT JOIN books b ON b.id = v.book_id
+      GROUP BY v.book_id ORDER BY updated_at DESC
+    `);
   }
 
   // ============ 阅读计时 ============

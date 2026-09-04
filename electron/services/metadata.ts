@@ -246,7 +246,6 @@ async function extractPdfToc(filePath: string): Promise<TocEntry[]> {
 }
 
 // ============ DOCX ============
-
 /** DOCX：读 core.xml 的标题作者 */
 async function extractDocxMetadata(filePath: string): Promise<BookMetadata | null> {
   const buffer = fs.readFileSync(filePath);
@@ -303,4 +302,131 @@ export async function docxToChapters(
     title: c.title || `第 ${i + 1} 节`,
     content: c.paras.join('\n'),
   }));
+}
+
+// ============ 全文抽取（RAG 索引用，带跳转目标） ============
+
+export interface BookSection {
+  label: string;
+  /** 跳转目标：EPUB {href}，TXT/PDF {page}（TXT 页从0起，PDF 从1起） */
+  target: string;
+  text: string;
+}
+
+export async function extractBookSections(
+  filePath: string,
+  ext: string,
+  tocJson?: string,
+): Promise<BookSection[]> {
+  switch (ext.toLowerCase()) {
+    case '.epub':
+      return extractEpubSections(filePath, tocJson);
+    case '.txt':
+      return extractTxtSections(filePath);
+    case '.pdf':
+      return extractPdfSections(filePath);
+    default:
+      return [];
+  }
+}
+
+async function extractEpubSections(filePath: string, tocJson?: string): Promise<BookSection[]> {
+  const buffer = fs.readFileSync(filePath);
+  const zip = await JSZip.loadAsync(buffer);
+  const containerFile = zip.file('META-INF/container.xml');
+  if (!containerFile) return [];
+  const containerXml = await containerFile.async('string');
+  const opfPath = /<rootfile[^>]*full-path="([^"]+)"/.exec(containerXml)?.[1];
+  if (!opfPath) return [];
+  const opfFile = zip.file(opfPath);
+  if (!opfFile) return [];
+  const opf = await opfFile.async('string');
+  const base = opfPath.includes('/') ? opfPath.slice(0, opfPath.lastIndexOf('/') + 1) : '';
+
+  // toc 匹配章节名
+  let toc: { label: string; href: string }[] = [];
+  try {
+    toc = tocJson ? JSON.parse(tocJson) : [];
+  } catch { /* 忽略 */ }
+
+  const spine = [
+    ...opf.matchAll(/<itemref[^>]*idref="([^"]+)"/g),
+  ].map(m => m[1]);
+  const manifest = new Map(
+    [...opf.matchAll(/<item[^>]*id="([^"]+)"[^>]*href="([^"]+)"/g)].map(m => [m[1], decodeXmlEntities(m[2])]),
+  );
+
+  const sections: BookSection[] = [];
+  for (const idref of spine) {
+    const href = manifest.get(idref);
+    if (!href) continue;
+    const file = zip.file(base + href);
+    if (!file) continue;
+    const html = await file.async('string');
+    const $ = cheerio.load(html);
+    $('script, style').remove();
+    const text = ($('body').length ? $('body').text() : $.root().text())
+      .replace(/\s+/g, ' ')
+      .trim();
+    if (!text) continue;
+    const label =
+      toc.find(t => t.href === href || href.endsWith(t.href) || t.href.endsWith(href))?.label ?? '';
+    sections.push({ label, target: JSON.stringify({ href }), text });
+  }
+  return sections;
+}
+
+function extractTxtSections(filePath: string): BookSection[] {
+  const stat = fs.statSync(filePath);
+  const text = readTextHead(filePath, Math.min(stat.size, 8 * 1024 * 1024));
+  const toc = parseTxtChapters(text);
+  if (toc.length === 0) {
+    return [{ label: '', target: JSON.stringify({ page: 0 }), text }];
+  }
+  // 按章节行切分正文
+  const lines = text.split('\n');
+  const sections: BookSection[] = [];
+  let current = { label: '', paras: [] as string[] };
+  const isTitle = (line: string) => toc.some(t => t.label === line.trim());
+  for (const raw of lines) {
+    const line = raw.trim();
+    if (line && isTitle(line)) {
+      if (current.label || current.paras.length > 0) {
+        sections.push({
+          label: current.label,
+          target: JSON.stringify({ page: Math.floor(sections.join(' ').length / 3000) }),
+          text: current.paras.join('\n'),
+        });
+      }
+      current = { label: line, paras: [] };
+    } else {
+      current.paras.push(raw);
+    }
+  }
+  if (current.label || current.paras.length > 0) {
+    sections.push({
+      label: current.label,
+      target: JSON.stringify({ page: Math.floor(sections.join(' ').length / 3000) }),
+      text: current.paras.join('\n'),
+    });
+  }
+  return sections.filter(s => s.text.trim());
+}
+
+async function extractPdfSections(filePath: string): Promise<BookSection[]> {
+  const buffer = fs.readFileSync(filePath);
+  const data = new Uint8Array(buffer).slice().buffer as ArrayBuffer;
+  const pdfDoc = await pdfjsLib.getDocument({ data }).promise;
+  try {
+    const sections: BookSection[] = [];
+    for (let i = 1; i <= pdfDoc.numPages; i++) {
+      const page = await pdfDoc.getPage(i);
+      const tc = await page.getTextContent();
+      const text = (tc.items as any[]).map(it => it.str ?? '').join(' ').replace(/\s+/g, ' ').trim();
+      if (text) sections.push({ label: `第 ${i} 页`, target: JSON.stringify({ page: i }), text });
+    }
+    return sections;
+  } finally {
+    await pdfDoc.destroy();
+  }
 }

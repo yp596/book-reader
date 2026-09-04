@@ -2,8 +2,9 @@ import { ipcMain, dialog, BrowserWindow, app, shell, Notification } from 'electr
 import fs from 'fs';
 import path from 'path';
 import { DatabaseService } from '../services/db.service';
-import { extractMetadata, extractToc, docxToChapters } from '../services/metadata';
+import { extractMetadata, extractToc, docxToChapters, extractBookSections } from '../services/metadata';
 import { buildCrawlerFromRow, applyTextFilters } from '../services/book-source';
+import { splitText, cosine, embedTexts } from '../services/rag';
 import { buildEpub } from '../services/epub-export';
 import { AiService } from '../services/ai-service';
 
@@ -508,6 +509,73 @@ export function registerIpcHandlers() {
     db.updateBookmarkText(id, text);
   });
 
+  // ============ RAG 语义检索 ============
+
+  function getEmbedBaseUrl(): string {
+    return db.getSetting('aiEmbedUrl') || 'http://localhost:8081';
+  }
+
+  ipcMain.handle('rag:status', () => {
+    return db.getVectorStats();
+  });
+
+  // 为一本书建索引（全量重建）：抽文本 → 切分 → embedding → 入库
+  ipcMain.handle('rag:build', async (_event, bookId: number) => {
+    const book = db.getBookById(bookId) as any;
+    if (!book) throw new Error('书籍不存在');
+    const sections = await extractBookSections(book.file_path, '.' + book.file_type, book.toc);
+    const chunks = sections.flatMap(s => splitText({ label: s.label, target: s.target, text: s.text }));
+    if (chunks.length === 0) throw new Error('未能提取正文，无法建索引');
+    const vectors = await embedTexts(
+      chunks.map(c => c.text),
+      getEmbedBaseUrl(),
+    );
+    db.clearBookVectors(bookId);
+    db.saveVectors(
+      chunks.map((c, i) => ({
+        book_id: bookId,
+        chunk_idx: i,
+        chapter: c.label,
+        target: c.target,
+        text: c.text,
+        embedding: JSON.stringify(vectors[i]),
+      })),
+    );
+    return { chunks: chunks.length };
+  });
+
+  ipcMain.handle('rag:clear', (_event, bookId: number) => {
+    db.clearBookVectors(bookId);
+  });
+
+  // 语义检索：问题向量化 → 余弦 TopK
+  ipcMain.handle('rag:search', async (_event, query: string, topK: number, bookId?: number) => {
+    if (!query?.trim()) throw new Error('请输入问题');
+    const all = db.getAllVectors() as any[];
+    const rows = bookId ? all.filter(v => v.book_id === bookId) : all;
+    if (rows.length === 0) throw new Error('还没有建立索引，先去语义检索页为书籍建索引');
+    const [qvec] = await embedTexts([query.trim().slice(0, 1000)], getEmbedBaseUrl());
+    const books = db.getAllBooks() as any[];
+    const titleOf = (id: number) => books.find(b => b.id === id)?.title ?? '';
+    return rows
+      .map(r => {
+        let embedding: number[] = [];
+        try {
+          embedding = JSON.parse(r.embedding);
+        } catch { /* 跳过坏向量 */ }
+        return {
+          book_id: r.book_id,
+          bookTitle: titleOf(r.book_id),
+          chapter: r.chapter,
+          target: r.target,
+          excerpt: r.text.slice(0, 300),
+          score: cosine(qvec, embedding),
+        };
+      })
+      .sort((a, b) => b.score - a.score)
+      .slice(0, Math.min(Math.max(topK || 8, 1), 20));
+  });
+
   // ============ AI 阅读助手 ============
   // 配置来自设置页（aiBaseUrl/aiModel/aiApiKey），支持 Ollama / OpenAI / 兼容接口
 
@@ -574,7 +642,7 @@ export function registerIpcHandlers() {
         })),
       ),
       sources: db.getAllSources(),
-      settings: ['fontSize', 'lineHeight', 'theme', 'aiProvider', 'aiBaseUrl', 'aiModel'].map(k => ({
+      settings: ['fontSize', 'lineHeight', 'theme', 'fontFamily', 'ttsRate', 'aiProvider', 'aiBaseUrl', 'aiModel', 'aiEmbedUrl'].map(k => ({
         key: k,
         value: db.getSetting(k),
       })),

@@ -93,6 +93,13 @@ contextBridge.exposeInMainWorld('electronAPI', {
   aiExplain: (text: string, question: string) => ipcRenderer.invoke('ai:explain', text, question),
   aiTranslate: (text: string) => ipcRenderer.invoke('ai:translate', text),
 
+  // RAG
+  getRagStatus: () => ipcRenderer.invoke('rag:status'),
+  buildRagIndex: (bookId: number) => ipcRenderer.invoke('rag:build', bookId),
+  clearRagIndex: (bookId: number) => ipcRenderer.invoke('rag:clear', bookId),
+  semanticSearch: (query: string, topK: number, bookId?: number) =>
+    ipcRenderer.invoke('rag:search', query, topK, bookId),
+
   // Events
   onOpenFile: (callback: () => void) =>
     ipcRenderer.on('menu:open-file', callback),

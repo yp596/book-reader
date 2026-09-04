@@ -8,6 +8,7 @@ interface SettingsData {
   webdavUrl: string;
   webdavUser: string;
   webdavPass: string;
+  aiEmbedUrl: string;
   fontSize: number;
   lineHeight: number;
   theme: 'dark' | 'light' | 'sepia';
@@ -24,6 +25,7 @@ export function Settings() {
     webdavUrl: '',
     webdavUser: '',
     webdavPass: '',
+    aiEmbedUrl: 'http://localhost:8081',
     fontSize: 18,
     lineHeight: 1.8,
     theme: 'dark',
@@ -176,6 +178,10 @@ export function Settings() {
             <input type="password" value={settings.aiApiKey} onChange={e => handleChange('aiApiKey', e.target.value)} placeholder="sk-..." />
           </div>
         )}
+        <div className="form-row">
+          <label>向量服务地址（语义检索用）</label>
+          <input value={settings.aiEmbedUrl} onChange={e => handleChange('aiEmbedUrl', e.target.value)} placeholder="http://localhost:8081" />
+        </div>
       </section>
 
       <section className="settings-section">
