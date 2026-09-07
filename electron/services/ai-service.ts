@@ -13,6 +13,12 @@ export class AiService {
   }
 
   async chat(messages: { role: string; content: string }[]): Promise<string> {
+    // 优先进程内推理，失败回退 HTTP 边车（Ollama / llama-server）
+    try {
+      const { chatViaLocal } = await import('./llama-engine');
+      const local = await chatViaLocal(messages);
+      if (local) return local;
+    } catch { /* 回退 HTTP */ }
     try {
       const response = await fetch(`${this.config.baseUrl}/v1/chat/completions`, {
         method: 'POST',

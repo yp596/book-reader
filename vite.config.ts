@@ -13,7 +13,8 @@ export default defineConfig({
           build: {
             outDir: 'dist-electron',
             rollupOptions: {
-              external: ['sql.js'],
+              // 主进程原生/外部依赖保持 require，不打进 bundle
+              external: ['sql.js', 'node-llama-cpp'],
             },
           },
         },

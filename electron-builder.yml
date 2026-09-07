@@ -5,6 +5,11 @@ directories:
 files:
   - dist/**/*
   - dist-electron/**/*
+  - node_modules/node-llama-cpp/**/*
+  - node_modules/@node-llama-cpp/**/*
+# 原生 .node 不能跑在 asar 包内，必须解包
+asarUnpack:
+  - "**/*.node"
 win:
   target:
     - target: nsis

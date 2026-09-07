@@ -52,8 +52,14 @@ export function cosine(a: number[], b: number[]): number {
   return dot / (Math.sqrt(na) * Math.sqrt(nb));
 }
 
-/** 批量 embedding（llama-server /v1/embeddings，兼容 Ollama） */
+/** 批量 embedding（优先进程内，失败回退 llama-server /v1/embeddings，兼容 Ollama） */
 export async function embedTexts(texts: string[], baseUrl: string): Promise<number[][]> {
+  // 优先进程内推理
+  try {
+    const { embedViaLocal } = await import('./llama-engine');
+    const local = await embedViaLocal(texts);
+    if (local) return local;
+  } catch { /* 回退 HTTP */ }
   const out: number[][] = [];
   // 分批防超限
   for (let i = 0; i < texts.length; i += 16) {

@@ -2,6 +2,7 @@ import { app, BrowserWindow, globalShortcut } from 'electron';
 import path from 'path';
 import { DatabaseService } from './services/db.service';
 import { ModelService } from './services/model-service';
+import { disposeEngine } from './services/llama-engine';
 import { registerIpcHandlers } from './ipc';
 
 let mainWindow: BrowserWindow | null = null;
@@ -55,13 +56,14 @@ app.whenReady().then(async () => {
   createWindow();
   registerIpcHandlers();
   registerShortcuts();
+  // 推理走进程内引擎（懒加载，首次 AI 调用时载入模型）；
+  // 边车仅作手动回退，不再开机自启，避免模型双份占内存
   if (mainWindow) {
     ModelService.getInstance().setWindow(mainWindow);
     mainWindow.on('closed', () => {
       ModelService.getInstance().setWindow(null);
     });
   }
-  ModelService.getInstance().autoStart();
 
   app.on('activate', () => {
     if (BrowserWindow.getAllWindows().length === 0) {
@@ -79,5 +81,6 @@ app.on('window-all-closed', () => {
 app.on('will-quit', () => {
   globalShortcut.unregisterAll();
   try { ModelService.getInstance().stopAll(); } catch {}
+  try { void disposeEngine(); } catch {}
   try { DatabaseService.getInstance().close(); } catch {}
 });
