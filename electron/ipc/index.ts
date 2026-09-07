@@ -7,6 +7,7 @@ import { buildCrawlerFromRow, applyTextFilters } from '../services/book-source';
 import { splitText, cosine, embedTexts } from '../services/rag';
 import { buildEpub } from '../services/epub-export';
 import { AiService } from '../services/ai-service';
+import { ModelService } from '../services/model-service';
 
 const sanitizeFileName = (name: string) => name.replace(/[\\/:*?"<>|]/g, '_');
 
@@ -579,6 +580,26 @@ export function registerIpcHandlers() {
       })
       .sort((a, b) => b.score - a.score)
       .slice(0, Math.min(Math.max(topK || 8, 1), 20));
+  });
+
+  // ============ 本地模型管理 ============
+
+  ipcMain.handle('models:status', () => {
+    return ModelService.getInstance().status();
+  });
+
+  ipcMain.handle('models:download', async (_event, id: string) => {
+    await ModelService.getInstance().downloadModel(id);
+    return true;
+  });
+
+  ipcMain.handle('models:start', async (_event, id: string) => {
+    await ModelService.getInstance().start(id);
+    return true;
+  });
+
+  ipcMain.handle('models:stop', (_event, id: string) => {
+    ModelService.getInstance().stop(id);
   });
 
   // ============ AI 阅读助手 ============

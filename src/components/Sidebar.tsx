@@ -1,4 +1,4 @@
-type View = 'library' | 'reader' | 'sources' | 'rag' | 'vocab' | 'settings' | 'stats';
+type View = 'library' | 'reader' | 'sources' | 'rag' | 'vocab' | 'models' | 'settings' | 'stats';
 
 interface SidebarProps {
   currentView: View;
@@ -57,6 +57,13 @@ export function Sidebar({ currentView, onNavigate, onOpenFile, onSearch }: Sideb
         >
           <span className="nav-icon">🧠</span>
           <span className="nav-label">语义检索</span>
+        </button>
+        <button
+          className={`nav-item ${currentView === 'models' ? 'active' : ''}`}
+          onClick={() => onNavigate('models')}
+        >
+          <span className="nav-icon">🤖</span>
+          <span className="nav-label">本地模型</span>
         </button>
         <button
           className={`nav-item ${currentView === 'settings' ? 'active' : ''}`}

@@ -90,6 +90,17 @@ contextBridge.exposeInMainWorld('electronAPI', {
   addWord: (word: any) => ipcRenderer.invoke('words:add', word),
   deleteWord: (id: number) => ipcRenderer.invoke('words:delete', id),
 
+  // Models
+  getModelStatus: () => ipcRenderer.invoke('models:status'),
+  downloadModel: (id: string) => ipcRenderer.invoke('models:download', id),
+  startModel: (id: string) => ipcRenderer.invoke('models:start', id),
+  stopModel: (id: string) => ipcRenderer.invoke('models:stop', id),
+  onModelProgress: (callback: (info: any) => void) => {
+    const listener = (_event: any, info: any) => callback(info);
+    ipcRenderer.on('models:progress', listener);
+    return () => ipcRenderer.removeListener('models:progress', listener);
+  },
+
   // AI
   aiSummarize: (text: string) => ipcRenderer.invoke('ai:summarize', text),
   aiExplain: (text: string, question: string) => ipcRenderer.invoke('ai:explain', text, question),

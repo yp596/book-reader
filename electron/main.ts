@@ -1,6 +1,7 @@
 import { app, BrowserWindow, globalShortcut } from 'electron';
 import path from 'path';
 import { DatabaseService } from './services/db.service';
+import { ModelService } from './services/model-service';
 import { registerIpcHandlers } from './ipc';
 
 let mainWindow: BrowserWindow | null = null;
@@ -54,6 +55,13 @@ app.whenReady().then(async () => {
   createWindow();
   registerIpcHandlers();
   registerShortcuts();
+  if (mainWindow) {
+    ModelService.getInstance().setWindow(mainWindow);
+    mainWindow.on('closed', () => {
+      ModelService.getInstance().setWindow(null);
+    });
+  }
+  ModelService.getInstance().autoStart();
 
   app.on('activate', () => {
     if (BrowserWindow.getAllWindows().length === 0) {
@@ -70,5 +78,6 @@ app.on('window-all-closed', () => {
 
 app.on('will-quit', () => {
   globalShortcut.unregisterAll();
+  try { ModelService.getInstance().stopAll(); } catch {}
   try { DatabaseService.getInstance().close(); } catch {}
 });

@@ -7,10 +7,11 @@ import { Sidebar } from './components/Sidebar';
 import { SourceManager } from './components/SourceManager';
 import { SemanticSearch } from './components/SemanticSearch';
 import { Vocab } from './components/Vocab';
+import { Models } from './components/Models';
 import { Settings } from './components/Settings';
 import { Statistics } from './components/Statistics';
 
-type View = 'library' | 'detail' | 'reader' | 'sources' | 'rag' | 'vocab' | 'settings' | 'stats';
+type View = 'library' | 'detail' | 'reader' | 'sources' | 'rag' | 'vocab' | 'models' | 'settings' | 'stats';
 
 // 安全获取 electronAPI，preload 未就绪时返回空实现
 const api = window.electronAPI ?? {
@@ -116,6 +117,8 @@ function App() {
         return <SemanticSearch books={books} onOpenBook={handleSelectBook} />;
       case 'vocab':
         return <Vocab />;
+      case 'models':
+        return <Models />;
       case 'settings':
         return <Settings />;
       case 'stats':

@@ -30,6 +30,25 @@ export interface WordEntry {
   created_at: string;
 }
 
+export interface ModelStatus {
+  id: string;
+  name: string;
+  desc: string;
+  sizeMB: number;
+  port: number;
+  downloaded: boolean;
+  running: boolean;
+  binReady: boolean;
+}
+
+export interface ModelProgressInfo {
+  id: string;
+  kind: 'download' | 'starting' | 'running' | 'stopped';
+  percent?: number;
+  done?: number;
+  total?: number;
+}
+
 export interface TextFilter {
   id: number;
   name: string;
@@ -195,6 +214,11 @@ declare global {
           score: number;
         }[]
       >;
+      getModelStatus: () => Promise<ModelStatus[]>;
+      downloadModel: (id: string) => Promise<boolean>;
+      startModel: (id: string) => Promise<boolean>;
+      stopModel: (id: string) => Promise<void>;
+      onModelProgress: (callback: (info: ModelProgressInfo) => void) => () => void;
       onOpenFile: (callback: () => void) => void;
     };
   }
