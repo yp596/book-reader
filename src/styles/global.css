@@ -1016,3 +1016,123 @@ body {
   font-size: 11px;
   color: var(--text-muted);
 }
+
+/* ============ 视觉打磨（纯表现层，可整体删除回滚） ============ */
+
+/* 页面入场 */
+@keyframes fadeUp {
+  from { opacity: 0; transform: translateY(14px); }
+  to { opacity: 1; transform: translateY(0); }
+}
+
+.main-content > * { animation: fadeUp 0.35s cubic-bezier(0.4, 0, 0.2, 1); }
+
+/* 卡片 stagger 入场（前 12 张） */
+.book-card, .source-card, .mark-item { animation: fadeUp 0.4s cubic-bezier(0.4, 0, 0.2, 1) backwards; }
+.book-card:nth-child(2), .source-card:nth-child(2) { animation-delay: 0.04s; }
+.book-card:nth-child(3), .source-card:nth-child(3) { animation-delay: 0.08s; }
+.book-card:nth-child(4), .source-card:nth-child(4) { animation-delay: 0.12s; }
+.book-card:nth-child(5), .source-card:nth-child(5) { animation-delay: 0.16s; }
+.book-card:nth-child(6), .source-card:nth-child(6) { animation-delay: 0.2s; }
+.book-card:nth-child(n+7), .source-card:nth-child(n+7) { animation-delay: 0.24s; }
+
+/* 按钮按压反馈与禁用态 */
+button:active:not(:disabled) { transform: scale(0.96); }
+button:disabled { opacity: 0.45; cursor: not-allowed; }
+button:focus-visible, input:focus-visible, select:focus-visible, textarea:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+}
+
+/* 封面悬浮光晕 + 流光扫过 */
+.book-cover { transition: var(--transition); }
+.book-card:hover .book-cover {
+  box-shadow: 0 12px 32px rgba(0, 0, 0, 0.5), 0 0 0 1px var(--border-light), 0 0 24px var(--accent-glow);
+}
+.book-cover::before {
+  content: '';
+  position: absolute;
+  inset: 0;
+  z-index: 1;
+  background: linear-gradient(105deg, transparent 40%, rgba(255, 255, 255, 0.14) 50%, transparent 60%);
+  transform: translateX(-120%);
+  transition: transform 0.7s ease;
+  pointer-events: none;
+}
+.book-card:hover .book-cover::before { transform: translateX(120%); }
+
+/* 占位封面：渐变 + 衬线标题 */
+.book-cover-placeholder {
+  background: linear-gradient(150deg, #2b2b52 0%, #1a1a2e 55%, #0f3460 130%);
+  font-family: 'Noto Serif SC', 'Songti SC', serif;
+  letter-spacing: 0.2em;
+  text-align: center;
+  padding: 0 16px;
+  position: relative;
+}
+.book-cover-placeholder::after {
+  content: '“';
+  position: absolute;
+  top: 8px;
+  left: 14px;
+  font-size: 44px;
+  color: rgba(162, 155, 254, 0.25);
+  font-family: serif;
+}
+
+/* 进度条：渐变 + 发光端点 */
+.progress-bar {
+  background: rgba(255, 255, 255, 0.08);
+  overflow: visible;
+}
+.progress-bar div {
+  position: relative;
+  transition: width 0.5s ease;
+}
+.progress-bar div::after {
+  content: '';
+  position: absolute;
+  right: -3px;
+  top: 50%;
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: var(--accent-light);
+  transform: translateY(-50%);
+  box-shadow: 0 0 8px var(--accent-light);
+}
+
+/* 空状态图标漂浮 */
+.empty-icon { animation: floaty 4s ease-in-out infinite; }
+@keyframes floaty {
+  0%, 100% { transform: translateY(0); }
+  50% { transform: translateY(-10px); }
+}
+
+/* 右键菜单弹出 */
+.context-menu {
+  animation: popIn 0.15s cubic-bezier(0.4, 0, 0.2, 1);
+  transform-origin: top left;
+}
+@keyframes popIn {
+  from { opacity: 0; transform: scale(0.95); }
+  to { opacity: 1; transform: scale(1); }
+}
+
+/* 侧栏激活项微光 */
+.nav-item.active {
+  box-shadow: inset 0 0 20px rgba(108, 92, 231, 0.12);
+}
+
+/* 输入框聚焦光晕统一 */
+.sidebar-search input:focus,
+.book-list-controls select:focus,
+.search-box input:focus {
+  border-color: var(--accent);
+  box-shadow: 0 0 0 3px var(--accent-glow);
+}
+
+/* 减少动态偏好兜底 */
+@media (prefers-reduced-motion: reduce) {
+  *, *::before, *::after { animation-duration: 0.01ms !important; transition-duration: 0.01ms !important; }
+}
