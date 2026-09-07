@@ -25,6 +25,13 @@ describe('AiService.chat', () => {
     expect(await makeService().chat([{ role: 'user', content: 'hi' }])).toBe('你好');
   });
 
+  it('带 onToken 时 HTTP 回退仍返回整包（无模型环境）', async () => {
+    stubChatReply('完整回答');
+    const onToken = vi.fn();
+    const result = await makeService().chat([{ role: 'user', content: 'hi' }], onToken);
+    expect(result).toBe('完整回答');
+  });
+
   it('请求携带模型与消息', async () => {
     stubChatReply('ok');
     await makeService().chat([{ role: 'user', content: 'hi' }]);

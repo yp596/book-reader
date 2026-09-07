@@ -180,17 +180,62 @@ export function Reader({ book, onBack, initialTarget }: ReaderProps) {
     return sub.length > 0 ? sub : [{ text: '生成失败，换一章试试', children: [] }];
   };
 
-  /** AI 调用统一入口（含未配置提示） */
-  const runAi = async (fn: () => Promise<string>) => {
+  /** 当前流式请求的 reqId（用于中断） */
+  const aiReqRef = useRef<string | null>(null);
+
+  const stopAi = () => {
+    if (aiReqRef.current) {
+      window.electronAPI?.aiAbort(aiReqRef.current);
+      aiReqRef.current = null;
+    }
+    setAiLoading(false);
+  };
+
+  /**
+   * AI 流式统一入口：进程内逐 token 回调追加显示，
+   * 回退 HTTP 时整包到达（一次性补齐）。返回完整文本。
+   */
+  const runAiStream = async (
+    kind: 'summarize' | 'explain' | 'translate' | 'mindmap',
+    text: string,
+    question?: string,
+  ): Promise<string> => {
     const api = window.electronAPI;
-    if (!api) return;
+    if (!api) return '';
+    // 互斥：新请求先停旧请求
+    if (aiReqRef.current) {
+      try { await api.aiAbort(aiReqRef.current); } catch { /* 忽略 */ }
+      aiReqRef.current = null;
+    }
     setAiLoading(true);
     setAiAnswer('');
+    let acc = '';
     try {
-      setAiAnswer(await fn());
+      const full: string = await new Promise((resolve, reject) => {
+        const reqId = api.aiStream(kind, text, question, {
+          onToken: chunk => {
+            acc += chunk;
+            setAiAnswer(acc);
+          },
+          onDone: f => resolve(f),
+          onError: m => reject(new Error(m)),
+        });
+        aiReqRef.current = reqId;
+      });
+      // HTTP 回退整包到达（无中间 token）：用 full 补齐
+      if (!acc && full) {
+        acc = full;
+        setAiAnswer(full);
+      }
+      return acc;
     } catch (err) {
-      setAiAnswer(`调用失败：${err instanceof Error ? err.message : '未知错误'}\n请检查设置页的 AI 服务地址与模型是否可用。`);
+      // 中断且已有部分输出：保留部分结果不报错
+      if (!acc) {
+        setAiAnswer(`调用失败：${err instanceof Error ? err.message : '未知错误'}\n请检查设置页的 AI 服务地址与模型是否可用。`);
+      }
+      return acc;
     } finally {
+      aiReqRef.current = null;
       setAiLoading(false);
     }
   };
@@ -204,7 +249,7 @@ export function Reader({ book, onBack, initialTarget }: ReaderProps) {
       return;
     }
     setPanel('ai');
-    await runAi(() => api.aiSummarize(text));
+    await runAiStream('summarize', text);
   };
 
   const handleAiTranslate = async () => {
@@ -216,7 +261,7 @@ export function Reader({ book, onBack, initialTarget }: ReaderProps) {
       return;
     }
     setPanel('ai');
-    await runAi(() => api.aiTranslate(text));
+    await runAiStream('translate', text);
   };
 
   const handleAiMindmap = async () => {
@@ -231,16 +276,15 @@ export function Reader({ book, onBack, initialTarget }: ReaderProps) {
     setPanel('ai');
     setAiLoading(true);
     try {
-      const outline = await api.aiMindmap(text);
+      const outline = await runAiStream('mindmap', text);
       const nodes = parseMindmap(outline);
       if (nodes.length === 0) {
-        setAiAnswer('导图生成失败，模型返回为空。');
+        if (!outline) setAiAnswer('导图生成失败，模型返回为空。');
         return;
       }
       setMindNodes(nodes);
-    } catch (err) {
-      setAiAnswer(`调用失败：${err instanceof Error ? err.message : '未知错误'}\n请检查设置页的 AI 服务地址与模型是否可用。`);
     } finally {
+      // runAiStream 内部已处理 loading，这里兜底
       setAiLoading(false);
     }
   };
@@ -253,7 +297,7 @@ export function Reader({ book, onBack, initialTarget }: ReaderProps) {
       setAiAnswer('当前页没有正文，无法结合上下文回答（PDF 暂不支持）。');
       return;
     }
-    await runAi(() => api.aiExplain(text, aiQuestion.trim()));
+    await runAiStream('explain', text, aiQuestion.trim());
   };
 
   /** 选中文本送去 AI：一键短解释 / 一键翻译 / 查词（适配 1B 小模型，短问短答） */
@@ -269,11 +313,11 @@ export function Reader({ book, onBack, initialTarget }: ReaderProps) {
     setAiWord(kind === 'define' ? text : '');
     setPanel('ai');
     if (kind === 'translate') {
-      await runAi(() => api.aiTranslate(text));
+      await runAiStream('translate', text);
     } else if (kind === 'define') {
-      await runAi(() => api.aiExplain(text, '请简短解释这个词语的意思、词性和一个例句，不要长篇大论'));
+      await runAiStream('explain', text, '请简短解释这个词语的意思、词性和一个例句，不要长篇大论');
     } else {
-      await runAi(() => api.aiExplain(text, '请用一两句话简短解释这段文字的意思'));
+      await runAiStream('explain', text, '请用一两句话简短解释这段文字的意思');
     }
   };
 
@@ -327,6 +371,10 @@ export function Reader({ book, onBack, initialTarget }: ReaderProps) {
     return () => {
       // 离开阅读器时上报本次阅读时长
       aliveRef.current.alive = false;
+      if (aiReqRef.current) {
+        window.electronAPI?.aiAbort(aiReqRef.current);
+        aiReqRef.current = null;
+      }
       const seconds = (Date.now() - readStartRef.current) / 1000;
       window.electronAPI?.recordReadingTime(book.id, seconds);
       stopSpeak();
@@ -1320,11 +1368,20 @@ export function Reader({ book, onBack, initialTarget }: ReaderProps) {
                 问
               </button>
             </div>
-            {aiLoading && <p className="empty-text">思考中...</p>}
-            {!aiLoading && aiAnswer && (
+            {aiLoading && (
+              <div style={{ display: 'flex', alignItems: 'center', gap: 12 }}>
+                <p className="empty-text" style={{ padding: 0 }}>
+                  {aiAnswer ? '生成中...' : '思考中...'}
+                </p>
+                <button className="btn-secondary small" onClick={stopAi}>
+                  ⏹ 停止
+                </button>
+              </div>
+            )}
+            {aiAnswer && (
               <div className="mark-item">
                 <p className="mark-note" style={{ whiteSpace: 'pre-wrap' }}>{aiAnswer}</p>
-                {aiWord && (
+                {!aiLoading && aiWord && (
                   <div className="mark-actions">
                     <button onClick={handleSaveWord}>存入生词本</button>
                   </div>

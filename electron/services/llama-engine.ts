@@ -117,16 +117,36 @@ async function ensureEmbedChain(): Promise<typeof _embedChain> {
   return _embedChain;
 }
 
-/** 进程内对话，返回 null 表示不可用（调用方回退 HTTP 边车） */
+/** 进程内对话（非流式），返回 null 表示不可用（调用方回退 HTTP 边车） */
 export async function chatViaLocal(messages: ChatMessage[]): Promise<string | null> {
+  return chatStreamViaLocal(messages, () => {});
+}
+
+/** 进程内对话（流式），token 经 onToken 实时回调；返回 null 表示不可用 */
+export async function chatStreamViaLocal(
+  messages: ChatMessage[],
+  onToken: (text: string) => void,
+  signal?: AbortSignal,
+): Promise<string | null> {
   try {
     const chain = await ensureChatChain();
     if (!chain) return null;
     const prompt = buildPromptText(messages);
-    const result = await runExclusive(() => chain.session.prompt(prompt) as Promise<string>);
-    return result || null;
+    let acc = '';
+    const result = await runExclusive(() =>
+      chain.session.prompt(prompt, {
+        onTextChunk: (t: string) => {
+          acc += t;
+          try {
+            onToken(t);
+          } catch { /* 回调异常不中断生成 */ }
+        },
+        ...(signal ? { signal, stopOnAbortSignal: true as const } : {}),
+      }) as Promise<string>,
+    );
+    return acc || result || null;
   } catch (err) {
-    console.error('进程内对话失败，回退边车:', err);
+    console.error('进程内流式对话失败，回退边车:', err);
     return null;
   }
 }

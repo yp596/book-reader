@@ -197,6 +197,17 @@ declare global {
       aiExplain: (text: string, question: string) => Promise<string>;
       aiTranslate: (text: string) => Promise<string>;
       aiMindmap: (text: string) => Promise<string>;
+      aiAbort: (reqId: string) => Promise<void>;
+      aiStream: (
+        kind: 'summarize' | 'explain' | 'translate' | 'mindmap',
+        text: string,
+        question: string | undefined,
+        callbacks: {
+          onToken: (chunk: string) => void;
+          onDone: (full: string) => void;
+          onError: (message: string) => void;
+        },
+      ) => string;
       getRagStatus: () => Promise<{ book_id: number; title: string; chunks: number; updated_at: string }[]>;
       buildRagIndex: (bookId: number) => Promise<{ chunks: number }>;
       clearRagIndex: (bookId: number) => Promise<void>;

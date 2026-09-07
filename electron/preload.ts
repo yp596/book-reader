@@ -106,6 +106,37 @@ contextBridge.exposeInMainWorld('electronAPI', {
   aiExplain: (text: string, question: string) => ipcRenderer.invoke('ai:explain', text, question),
   aiTranslate: (text: string) => ipcRenderer.invoke('ai:translate', text),
   aiMindmap: (text: string) => ipcRenderer.invoke('ai:mindmap', text),
+  aiAbort: (reqId: string) => ipcRenderer.invoke('ai:abort', reqId),
+  aiStream: (
+    kind: 'summarize' | 'explain' | 'translate' | 'mindmap',
+    text: string,
+    question: string | undefined,
+    callbacks: { onToken: (chunk: string) => void; onDone: (full: string) => void; onError: (message: string) => void },
+  ) => {
+    const reqId = `req-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+    const tokenListener = (_event: any, chunk: string) => callbacks.onToken(chunk);
+    const doneListener = (_event: any, full: string) => {
+      cleanup();
+      callbacks.onDone(full);
+    };
+    const errorListener = (_event: any, message: string) => {
+      cleanup();
+      callbacks.onError(message);
+    };
+    const cleanup = () => {
+      ipcRenderer.removeListener(`ai:token:${reqId}`, tokenListener);
+      ipcRenderer.removeListener(`ai:done:${reqId}`, doneListener);
+      ipcRenderer.removeListener(`ai:error:${reqId}`, errorListener);
+    };
+    ipcRenderer.on(`ai:token:${reqId}`, tokenListener);
+    ipcRenderer.on(`ai:done:${reqId}`, doneListener);
+    ipcRenderer.on(`ai:error:${reqId}`, errorListener);
+    ipcRenderer.invoke('ai:stream', { reqId, kind, text, question }).catch((err: Error) => {
+      cleanup();
+      callbacks.onError(err instanceof Error ? err.message : 'AI 调用失败');
+    });
+    return reqId;
+  },
 
   // RAG
   getRagStatus: () => ipcRenderer.invoke('rag:status'),

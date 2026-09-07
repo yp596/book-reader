@@ -12,11 +12,21 @@ export class AiService {
     this.config = config;
   }
 
-  async chat(messages: { role: string; content: string }[]): Promise<string> {
+  /**
+   * 对话统一入口：有 onToken 则走进程内流式（逐 token 回调），
+   * 否则走进程内整包；均不可用时回退 HTTP 边车。
+   */
+  async chat(
+    messages: { role: string; content: string }[],
+    onToken?: (text: string) => void,
+    signal?: AbortSignal,
+  ): Promise<string> {
     // 优先进程内推理，失败回退 HTTP 边车（Ollama / llama-server）
     try {
-      const { chatViaLocal } = await import('./llama-engine');
-      const local = await chatViaLocal(messages);
+      const engine = await import('./llama-engine');
+      const local = onToken
+        ? await engine.chatStreamViaLocal(messages, onToken, signal)
+        : await engine.chatViaLocal(messages);
       if (local) return local;
     } catch { /* 回退 HTTP */ }
     try {
@@ -43,7 +53,7 @@ export class AiService {
     }
   }
 
-  async summarize(text: string): Promise<string> {
+  async summarize(text: string, onToken?: (t: string) => void, signal?: AbortSignal): Promise<string> {
     return this.chat([
       {
         role: 'system',
@@ -53,10 +63,10 @@ export class AiService {
         role: 'user',
         content: `请总结以下内容：\n\n${text}`,
       },
-    ]);
+    ], onToken, signal);
   }
 
-  async explain(text: string, question: string): Promise<string> {
+  async explain(text: string, question: string, onToken?: (t: string) => void, signal?: AbortSignal): Promise<string> {
     return this.chat([
       {
         role: 'system',
@@ -66,10 +76,10 @@ export class AiService {
         role: 'user',
         content: `基于以下内容：\n\n${text}\n\n请回答：${question}`,
       },
-    ]);
+    ], onToken, signal);
   }
 
-  async translate(text: string, targetLang: string = 'zh-CN'): Promise<string> {
+  async translate(text: string, targetLang: string = 'zh-CN', onToken?: (t: string) => void, signal?: AbortSignal): Promise<string> {
     const target = targetLang === 'zh-CN' ? '中文' : '英文';
     return this.chat([
       {
@@ -81,10 +91,10 @@ export class AiService {
         role: 'user',
         content: text,
       },
-    ]);
+    ], onToken, signal);
   }
 
-  async generateNotes(text: string): Promise<string> {
+  async generateNotes(text: string, onToken?: (t: string) => void, signal?: AbortSignal): Promise<string> {
     return this.chat([
       {
         role: 'system',
@@ -94,10 +104,10 @@ export class AiService {
         role: 'user',
         content: text,
       },
-    ]);
+    ], onToken, signal);
   }
 
-  async generateMindmap(text: string): Promise<string> {
+  async generateMindmap(text: string, onToken?: (t: string) => void, signal?: AbortSignal): Promise<string> {
     return this.chat([
       {
         role: 'system',
@@ -109,6 +119,6 @@ export class AiService {
         role: 'user',
         content: text,
       },
-    ]);
+    ], onToken, signal);
   }
 }

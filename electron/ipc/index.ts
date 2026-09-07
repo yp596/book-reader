@@ -633,6 +633,68 @@ export function registerIpcHandlers() {
     return getAiService().generateMindmap(text.slice(0, 6000));
   });
 
+  // ============ AI 流式输出 ============
+  // 单通道 + per-request 事件：ai:token:${reqId} / ai:done:${reqId} / ai:error:${reqId}
+  // 进程内走逐 token 回调；回退 HTTP 时整包到达（一次性 done，无中间 token）
+
+  const aiAbortControllers = new Map<string, AbortController>();
+
+  type AiStreamKind = 'summarize' | 'explain' | 'translate' | 'mindmap';
+  const AI_STREAM_SLICE: Record<AiStreamKind, number> = {
+    summarize: 8000,
+    explain: 8000,
+    translate: 4000,
+    mindmap: 6000,
+  };
+
+  ipcMain.handle(
+    'ai:stream',
+    async (
+      event,
+      payload: { reqId: string; kind: AiStreamKind; text: string; question?: string },
+    ) => {
+      const { reqId, kind, text, question } = payload;
+      if (!reqId || !AI_STREAM_SLICE[kind]) throw new Error('非法流式请求');
+      if (!text?.trim()) throw new Error('没有可处理的内容');
+      if (kind === 'explain' && !question?.trim()) throw new Error('请输入问题');
+      const sender = event.sender;
+      const send = (channel: string, data: unknown) => {
+        try {
+          if (!sender.isDestroyed()) sender.send(channel, data);
+        } catch { /* 窗口已关则忽略 */ }
+      };
+      const controller = new AbortController();
+      aiAbortControllers.set(reqId, controller);
+      const onToken = (chunk: string) => send(`ai:token:${reqId}`, chunk);
+      try {
+        const svc = getAiService();
+        const input = text.slice(0, AI_STREAM_SLICE[kind]);
+        let full = '';
+        if (kind === 'summarize') full = await svc.summarize(input, onToken, controller.signal);
+        else if (kind === 'explain') full = await svc.explain(input, question!.trim(), onToken, controller.signal);
+        else if (kind === 'translate') full = await svc.translate(input, 'zh-CN', onToken, controller.signal);
+        else full = await svc.generateMindmap(input, onToken, controller.signal);
+        send(`ai:done:${reqId}`, full);
+        return full;
+      } catch (err) {
+        const message = err instanceof Error ? err.message : 'AI 调用失败';
+        // 主动中断不算错误静默收尾（已输出部分保留）
+        if (controller.signal.aborted) {
+          send(`ai:done:${reqId}`, '');
+          return '';
+        }
+        send(`ai:error:${reqId}`, message);
+        throw err instanceof Error ? err : new Error(message);
+      } finally {
+        aiAbortControllers.delete(reqId);
+      }
+    },
+  );
+
+  ipcMain.handle('ai:abort', (_event, reqId: string) => {
+    aiAbortControllers.get(reqId)?.abort();
+  });
+
   // ============ WebDAV 同步 ============
   // 同步内容：进度、书签、笔记、书源、设置（不含书籍文件，跨设备需各自导入同名书籍）
 
