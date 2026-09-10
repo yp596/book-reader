@@ -184,6 +184,8 @@ export class DatabaseService {
       `ALTER TABLE bookmarks ADD COLUMN updated_at DATETIME`,
       `ALTER TABLE notes ADD COLUMN updated_at DATETIME`,
       `ALTER TABLE words ADD COLUMN updated_at DATETIME`,
+      // 书籍锁定：防误删、防误改（仅保留阅读权限）
+      `ALTER TABLE books ADD COLUMN locked INTEGER DEFAULT 0`,
     ]) {
       try {
         this.db.run(ddl);
@@ -240,15 +242,44 @@ export class DatabaseService {
     this.run('UPDATE books SET progress = ?, last_read_at = CURRENT_TIMESTAMP WHERE id = ?', [progress, id]);
   }
 
+  // ============ 书籍锁定（防误删误改） ============
+
+  /**
+   * 锁定守卫：锁定的书籍拒绝一切编辑类写入。
+   * 仅拦截写操作，阅读（翻页/进度）不受影响。
+   */
+  private assertUnlocked(bookId: number, action: string) {
+    const row = this.get('SELECT locked FROM books WHERE id = ?', [bookId]) as
+      | { locked?: number }
+      | undefined;
+    if (row?.locked) {
+      throw new Error(`该书籍已锁定，无法${action}。请先在书架右键解锁。`);
+    }
+  }
+
+  /** 切换锁定状态，返回切换后的值（1=已锁定） */
+  toggleBookLock(id: number): number {
+    const row = this.get('SELECT locked FROM books WHERE id = ?', [id]) as
+      | { locked: number }
+      | undefined;
+    if (!row) throw new Error('书籍不存在');
+    const next = row.locked ? 0 : 1;
+    this.run('UPDATE books SET locked = ? WHERE id = ?', [next, id]);
+    return next;
+  }
+
   updateBookInfo(id: number, title: string, author: string | null) {
+    this.assertUnlocked(id, '修改书籍信息');
     this.run('UPDATE books SET title = ?, author = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?', [title, author, id]);
   }
 
   renameBook(id: number, title: string) {
+    this.assertUnlocked(id, '重命名');
     this.run('UPDATE books SET title = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?', [title.trim(), id]);
   }
 
   toggleFavorite(id: number): number {
+    this.assertUnlocked(id, '修改收藏');
     const row = this.get('SELECT favorite FROM books WHERE id = ?', [id]) as
       | { favorite: number }
       | undefined;
@@ -258,6 +289,7 @@ export class DatabaseService {
   }
 
   setCategory(id: number, category: string) {
+    this.assertUnlocked(id, '修改分类');
     this.run('UPDATE books SET category = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?', [category.trim(), id]);
   }
 
@@ -277,6 +309,7 @@ export class DatabaseService {
   }
 
   deleteBook(id: number) {
+    this.assertUnlocked(id, '删除');
     this.run('DELETE FROM books WHERE id = ?', [id]);
   }
 
@@ -346,6 +379,7 @@ export class DatabaseService {
   }
 
   insertNote(note: { book_id: number; position: string; selected_text?: string; note?: string }) {
+    this.assertUnlocked(note.book_id, '新增笔记');
     this.run(
       'INSERT INTO notes (book_id, position, selected_text, note) VALUES (?, ?, ?, ?)',
       [note.book_id, note.position, note.selected_text ?? null, note.note ?? null],
@@ -355,6 +389,8 @@ export class DatabaseService {
   }
 
   deleteNote(id: number) {
+    const row = this.get('SELECT book_id FROM notes WHERE id = ?', [id]) as { book_id: number } | undefined;
+    if (row) this.assertUnlocked(row.book_id, '删除笔记');
     this.run('DELETE FROM notes WHERE id = ?', [id]);
   }
 
@@ -365,6 +401,7 @@ export class DatabaseService {
   }
 
   insertBookmark(bookmark: { book_id: number; position: string; text?: string; color?: string }) {
+    this.assertUnlocked(bookmark.book_id, '新增书签');
     this.run(
       'INSERT INTO bookmarks (book_id, position, text, color) VALUES (?, ?, ?, ?)',
       [bookmark.book_id, bookmark.position, bookmark.text ?? null, bookmark.color ?? 'yellow'],
@@ -374,6 +411,8 @@ export class DatabaseService {
   }
 
   deleteBookmark(id: number) {
+    const row = this.get('SELECT book_id FROM bookmarks WHERE id = ?', [id]) as { book_id: number } | undefined;
+    if (row) this.assertUnlocked(row.book_id, '删除书签');
     this.run('DELETE FROM bookmarks WHERE id = ?', [id]);
   }
 
@@ -401,6 +440,8 @@ export class DatabaseService {
   // ============ 书签改名 ============
 
   updateBookmarkText(id: number, text: string) {
+    const row = this.get('SELECT book_id FROM bookmarks WHERE id = ?', [id]) as { book_id: number } | undefined;
+    if (row) this.assertUnlocked(row.book_id, '修改书签');
     this.run('UPDATE bookmarks SET text = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?', [text.trim(), id]);
   }
 

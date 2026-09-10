@@ -12,6 +12,7 @@ export interface Book {
   category?: string;
   toc?: string;
   locations?: string;
+  locked?: number;
 }
 
 export interface TocEntry {
@@ -124,6 +125,7 @@ declare global {
       getPathForFile: (file: File) => string;
       renameBook: (id: number, title: string) => Promise<void>;
       toggleFavorite: (id: number) => Promise<number>;
+      toggleBookLock: (id: number) => Promise<number>;
       setCategory: (id: number, category: string) => Promise<void>;
       getCategories: () => Promise<string[]>;
       getBookToc: (id: number) => Promise<TocEntry[]>;

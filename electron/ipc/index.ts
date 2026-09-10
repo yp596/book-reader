@@ -219,6 +219,11 @@ export function registerIpcHandlers() {
     return db.getCategories();
   });
 
+  // 书籍锁定：防误删误改（仅保留阅读）
+  ipcMain.handle('books:toggleLock', (_event, id: number) => {
+    return db.toggleBookLock(id);
+  });
+
   // 书籍目录（读导入时缓存，无缓存则实时解析）
   ipcMain.handle('books:toc', async (_event, id: number) => {
     const book = db.getBookById(id) as any;

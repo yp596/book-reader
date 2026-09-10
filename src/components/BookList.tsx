@@ -119,6 +119,21 @@ export function BookList({ books, searchQuery, onSelectBook, onShowDetail, onRef
     }
   };
 
+  const handleToggleLock = async () => {
+    if (contextMenu) {
+      try {
+        const locked = await window.electronAPI?.toggleBookLock(contextMenu.book.id);
+        if (locked) {
+          alert('已锁定：删除、改名、分类、收藏、批注等编辑操作将被阻止；阅读与进度保存不受影响。');
+        }
+      } catch (err) {
+        alert(err instanceof Error ? err.message : '操作失败');
+      }
+      closeMenu();
+      onRefresh();
+    }
+  };
+
   const handleSetCategory = async () => {
     if (contextMenu) {
       const hint = categories.length > 0 ? `（已有：${categories.join('、')}）` : '';
@@ -301,6 +316,7 @@ export function BookList({ books, searchQuery, onSelectBook, onShowDetail, onRef
                   </div>
                 )}
                 {book.favorite ? <span className="fav-badge">⭐</span> : null}
+                {book.locked ? <span className="lock-badge" title="已锁定">🔒</span> : null}
               </div>
               <div className="book-info">
                 <h3 className="book-title">{book.title}</h3>
@@ -353,6 +369,9 @@ export function BookList({ books, searchQuery, onSelectBook, onShowDetail, onRef
           <div className="context-menu-item" onClick={() => onShowDetail(contextMenu.book)}>详情</div>
           <div className="context-menu-item" onClick={handleToggleFavorite}>
             {contextMenu.book.favorite ? '取消收藏' : '⭐ 收藏'}
+          </div>
+          <div className="context-menu-item" onClick={handleToggleLock}>
+            {contextMenu.book.locked ? '🔓 解锁书籍' : '🔒 锁定书籍'}
           </div>
           <div className="context-menu-item" onClick={handleSetCategory}>设置分类</div>
           <div className="context-menu-item" onClick={handleRename}>重命名</div>
