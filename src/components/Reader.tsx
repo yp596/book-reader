@@ -140,6 +140,11 @@ export function Reader({ book, onBack, initialTarget, initialPosition }: ReaderP
   const [aiWord, setAiWord] = useState('');
   /** 多进度断点：本书已保存的阅读位置 */
   const [positions, setPositions] = useState<ReadingPosition[]>([]);
+  /** PDF 重排：抽取文字层后按流式排版渲染，适配窗口宽度 */
+  const [pdfReflow, setPdfReflow] = useState(false);
+  const [reflowPages, setReflowPages] = useState<string[]>([]);
+  const [reflowPage, setReflowPage] = useState(0);
+  const [reflowBusy, setReflowBusy] = useState(false);
   /** 全局强制统一字体：压过电子书自带的奇葩字体 */
   const forceFontRef = useRef(false);
   /** 批注只读：屏蔽新增/删除批注的操作入口 */
@@ -1482,10 +1487,10 @@ export function Reader({ book, onBack, initialTarget, initialPosition }: ReaderP
   };
 
   useEffect(() => {
-    if (book.file_type === 'pdf' && pdfReady && pdfDocRef.current && !loading) {
+    if (book.file_type === 'pdf' && pdfReady && pdfDocRef.current && !loading && !pdfReflow) {
       renderPdfPage(pdfDocRef.current, pageIndex + 1, pdfScale);
     }
-  }, [pdfReady, pageIndex, loading, pdfScale]);
+  }, [pdfReady, pageIndex, loading, pdfScale, pdfReflow]);
 
   // TXT / PDF：页码变化即记录阅读位置（加载完成前不写，避免覆盖上次位置）
   useEffect(() => {
@@ -1495,6 +1500,67 @@ export function Reader({ book, onBack, initialTarget, initialPosition }: ReaderP
   }, [pageIndex, loading, book.file_type]);
 
   /** PDF 缩放档位 */
+  /**
+   * 抽取 PDF 文字层并重排为流式页。
+   * 扫描版 PDF 没有文字层，这里会明确告知而不是给出一片空白。
+   */
+  const buildPdfReflow = async () => {
+    const doc = pdfDocRef.current;
+    if (!doc) return;
+    setReflowBusy(true);
+    try {
+      const pages: string[] = [];
+      let buf = '';
+      for (let i = 1; i <= doc.numPages; i++) {
+        const page = await doc.getPage(i);
+        const tc = await page.getTextContent();
+        let text = '';
+        for (const it of tc.items as any[]) {
+          if (typeof it.str === 'string') text += it.str;
+          if (it.hasEOL) text += '\n';
+        }
+        text = text.replace(/[ 	]+/g, ' ').trim();
+        if (!text) continue;
+        buf += text + '\n\n';
+        if (buf.length >= 3000) {
+          pages.push(buf);
+          buf = '';
+        }
+      }
+      if (buf) pages.push(buf);
+
+      if (pages.length === 0) {
+        alert(
+          '本书没有可提取的文字层，可能是扫描版 PDF。\n' +
+          '扫描版需要 OCR 才能重排，当前版本尚未支持。',
+        );
+        return;
+      }
+      setReflowPages(pages);
+      // 按原页码比例换算到重排后的位置，避免跳回开头
+      const ratio = doc.numPages > 0 ? pageIndex / doc.numPages : 0;
+      setReflowPage(Math.min(pages.length - 1, Math.floor(ratio * pages.length)));
+      setPdfReflow(true);
+    } catch (err) {
+      alert(`重排失败：${err instanceof Error ? err.message : '未知错误'}`);
+    } finally {
+      setReflowBusy(false);
+    }
+  };
+
+  const togglePdfReflow = async () => {
+    if (pdfReflow) {
+      setPdfReflow(false);
+      return;
+    }
+    // 已抽取过就直接切回，不重复解析
+    if (reflowPages.length > 0) {
+      setPdfReflow(true);
+      return;
+    }
+    await buildPdfReflow();
+  };
+
   const changePdfScale = (delta: number) => {
     setPdfScale(s => {
       const next = Math.min(3, Math.max(0.5, Math.round((s + delta) * 10) / 10));
@@ -1593,6 +1659,15 @@ export function Reader({ book, onBack, initialTarget, initialPosition }: ReaderP
       }
       renditionRef.current?.prev();
       return;
+    } else if (book.file_type === 'pdf' && pdfReflow) {
+      const next = reflowPage + dir;
+      if (next < 0 || next >= reflowPages.length) return;
+      setReflowPage(next);
+      setSearchMark('');
+      window.electronAPI?.updateProgress(
+        book.id,
+        reflowPages.length > 0 ? next / reflowPages.length : 0,
+      );
     } else if (dir > 0 && pageIndex < totalPages - 1) {
       const next = pageIndex + 1;
       setPageIndex(next);
@@ -1861,6 +1936,14 @@ export function Reader({ book, onBack, initialTarget, initialPosition }: ReaderP
               <button onClick={() => changePdfScale(-0.25)} title="缩小">🔍-</button>
               <button onClick={() => changePdfScale(0.25)} title="放大">🔍+</button>
               <button onClick={fitPdfWidth} title="适应宽度">↔</button>
+              <button
+                onClick={togglePdfReflow}
+                className={pdfReflow ? 'active' : ''}
+                disabled={reflowBusy}
+                title={pdfReflow ? '还原原始版式' : '重排为流式排版（适配窗口宽度，不改原文件）'}
+              >
+                {reflowBusy ? '重排中…' : '📄 重排'}
+              </button>
             </>
           )}
           <button onClick={() => togglePanel('notes')} className={panel === 'notes' ? 'active' : ''} title="笔记">
@@ -2235,9 +2318,17 @@ export function Reader({ book, onBack, initialTarget, initialPosition }: ReaderP
               )}
             </div>
           )}
-          {!loading && !error && book.file_type === 'pdf' && (
+          {!loading && !error && book.file_type === 'pdf' && !pdfReflow && (
             <div className="pdf-page" ref={pdfWrapRef}>
               <canvas ref={canvasRef} />
+            </div>
+          )}
+          {!loading && !error && book.file_type === 'pdf' && pdfReflow && reflowPages.length > 0 && (
+            <div
+              className="txt-page"
+              style={{ fontSize: settings.fontSize, lineHeight: settings.lineHeight }}
+            >
+              {reflowPages[reflowPage]}
             </div>
           )}
 
@@ -2284,7 +2375,12 @@ export function Reader({ book, onBack, initialTarget, initialPosition }: ReaderP
             第{chapterIdx + 1}章 · {chapterPage}/{chapterTotal}页 · {bookPercent}%
           </span>
         ) : null}
-        {book.file_type !== 'epub' && totalPages > 0 && (
+        {book.file_type !== 'epub' && pdfReflow && reflowPages.length > 0 && (
+          <span className="page-indicator">
+            {reflowPage + 1} / {reflowPages.length}
+          </span>
+        )}
+        {book.file_type !== 'epub' && !pdfReflow && totalPages > 0 && (
           <>
             <span className="page-indicator">{pageIndex + 1} / {totalPages}</span>
             <input
