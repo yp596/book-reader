@@ -250,6 +250,12 @@ declare global {
       deleteWord: (id: number) => Promise<void>;
       syncBackup: () => Promise<boolean>;
       syncRestore: () => Promise<number>;
+      getCacheStats: () => Promise<{
+        chapterCount: number;
+        snapshotBytes: number;
+        booksBytes: number;
+      }>;
+      clearCache: (opts: { snapshots?: boolean; chapterCache?: boolean }) => Promise<Record<string, number>>;
       getAppInfo: () => Promise<{
         version: string;
         electron: string;

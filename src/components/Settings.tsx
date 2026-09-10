@@ -1,6 +1,8 @@
 import { useState, useEffect } from 'react';
+import { formatFileSize } from '../utils/text';
 import { THEMES } from '../utils/reader-options';
 import { DEFAULT_AUTO_THEME, isDaytime } from '../utils/auto-theme';
+
 import { SHORTCUT_PRESETS, getPreset, DEFAULT_SHORTCUT_PRESET, ACTION_LABELS, keyLabel, type ShortcutAction } from '../utils/shortcuts';
 
 
@@ -82,7 +84,13 @@ export function Settings() {
   const [syncing, setSyncing] = useState(false);
   const [lastSync, setLastSync] = useState('');
 
-  useEffect(() => { loadSettings(); loadLastSync(); loadSnapshots(); loadLastBackup(); }, []);
+  useEffect(() => {
+    loadSettings();
+    loadLastSync();
+    loadSnapshots();
+    loadLastBackup();
+    loadCacheStats();
+  }, []);
 
   const loadLastSync = async () => {
     const api = window.electronAPI;
@@ -210,6 +218,43 @@ export function Settings() {
       alert(`回退失败：${err instanceof Error ? err.message : '未知错误'}`);
     } finally {
       setBackupBusy(false);
+    }
+  };
+
+  // ---------- 缓存管理 ----------
+
+  const [cacheStats, setCacheStats] = useState<{
+    chapterCount: number;
+    snapshotBytes: number;
+    booksBytes: number;
+  } | null>(null);
+  const [cacheBusy, setCacheBusy] = useState(false);
+
+  const loadCacheStats = async () => {
+    const api = window.electronAPI;
+    if (!api) return;
+    try {
+      setCacheStats(await api.getCacheStats());
+    } catch { /* 统计失败不阻塞页面 */ }
+  };
+
+  const handleClearCache = async (opts: { snapshots?: boolean; chapterCache?: boolean }) => {
+    const api = window.electronAPI;
+    if (!api) return;
+    if (!confirm('确定清理所选缓存？此操作不可撤销。')) return;
+    setCacheBusy(true);
+    try {
+      const r = await api.clearCache(opts);
+      await loadCacheStats();
+      await loadSnapshots();
+      const parts: string[] = [];
+      if (r.snapshots) parts.push(`快照 ${r.snapshots} 份`);
+      if (r.chapterCache) parts.push(`章节缓存 ${r.chapterCache} 条`);
+      alert(`已清理：${parts.length > 0 ? parts.join('、') : '没有需要清理的内容'}`);
+    } catch (err) {
+      alert(`清理失败：${err instanceof Error ? err.message : '未知错误'}`);
+    } finally {
+      setCacheBusy(false);
     }
   };
 
@@ -514,6 +559,50 @@ export function Settings() {
         <div className="form-row">
           <label>向量服务地址（语义检索用）</label>
           <input value={settings.aiEmbedUrl} onChange={e => handleChange('aiEmbedUrl', e.target.value)} placeholder="http://localhost:8081" />
+        </div>
+      </section>
+
+      <section className="settings-section">
+        <h2>缓存管理</h2>
+        <p className="section-desc">
+          缓存都是可再生的临时数据，清理不影响书籍、笔记与阅读进度。
+        </p>
+        <div className="info-table" style={{ marginBottom: 16 }}>
+          <div className="info-row">
+            <span style={{ width: 110 }}>书籍文件</span>
+            <span>{cacheStats ? formatFileSize(cacheStats.booksBytes) : '统计中...'}</span>
+          </div>
+          <div className="info-row">
+            <span style={{ width: 110 }}>本地快照</span>
+            <span>{cacheStats ? formatFileSize(cacheStats.snapshotBytes) : '统计中...'}</span>
+          </div>
+          <div className="info-row">
+            <span style={{ width: 110 }}>章节缓存</span>
+            <span>{cacheStats ? `${cacheStats.chapterCount} 条` : '统计中...'}</span>
+          </div>
+        </div>
+        <div className="form-actions" style={{ justifyContent: 'flex-start', gap: 10 }}>
+          <button
+            className="btn-secondary"
+            onClick={() => handleClearCache({ snapshots: true })}
+            disabled={cacheBusy}
+          >
+            清理快照
+          </button>
+          <button
+            className="btn-secondary"
+            onClick={() => handleClearCache({ chapterCache: true })}
+            disabled={cacheBusy}
+          >
+            清理章节缓存
+          </button>
+          <button
+            className="btn-secondary"
+            onClick={loadCacheStats}
+            disabled={cacheBusy}
+          >
+            重新统计
+          </button>
         </div>
       </section>
 

@@ -21,8 +21,18 @@ export const chapterToXhtml = (title: string, text: string): string => {
     .filter(Boolean)
     .map(p => `    <p>${escapeXml(p)}</p>`)
     .join('\n');
-  return `<?xml version="1.0" encoding="utf-8"?>\n<!DOCTYPE html>\n<html xmlns="http://www.w3.org/1999/xhtml">\n<head><title>${escapeXml(title)}</title></head>\n<body>\n  <h2>${escapeXml(title)}</h2>\n${paras}\n</body>\n</html>\n`;
+  return wrapChapter(title, paras);
 };
+
+/**
+ * 已是 XHTML 片段的章节正文直接包成文档。
+ * 调用方负责片段的转义与合法性（EPUB 章节是 XML，未自闭合的空元素会导致解析失败）。
+ */
+export const htmlToChapterXhtml = (title: string, innerHtml: string): string =>
+  wrapChapter(title, innerHtml);
+
+const wrapChapter = (title: string, inner: string): string =>
+  `<?xml version="1.0" encoding="utf-8"?>\n<!DOCTYPE html>\n<html xmlns="http://www.w3.org/1999/xhtml">\n<head><title>${escapeXml(title)}</title></head>\n<body>\n  <h2>${escapeXml(title)}</h2>\n${inner}\n</body>\n</html>\n`;
 
 /** OPF 元数据+清单+脊骨 */
 export const buildOpf = (bookTitle: string, chapterIds: string[]): string => {
@@ -49,14 +59,17 @@ const CONTAINER_XML =
 /** 组装完整 EPUB（返回 Buffer） */
 export async function buildEpub(
   bookTitle: string,
-  chapters: { title: string; content: string }[],
+  chapters: { title: string; content: string; html?: string }[],
 ): Promise<Buffer> {
   const zip = new JSZip();
   zip.file('mimetype', 'application/epub+zip', { compression: 'STORE' });
   zip.file('META-INF/container.xml', CONTAINER_XML);
   const ids = chapters.map((_, i) => `ch${i + 1}`);
   chapters.forEach((ch, i) => {
-    zip.file(`OEBPS/Text/${ids[i]}.xhtml`, chapterToXhtml(ch.title, ch.content));
+    zip.file(
+      `OEBPS/Text/${ids[i]}.xhtml`,
+      ch.html ? htmlToChapterXhtml(ch.title, ch.html) : chapterToXhtml(ch.title, ch.content),
+    );
   });
   zip.file(
     'OEBPS/content.opf',

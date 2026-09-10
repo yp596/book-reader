@@ -119,6 +119,11 @@ contextBridge.exposeInMainWorld('electronAPI', {
   syncBackup: () => ipcRenderer.invoke('sync:backup'),
   syncRestore: () => ipcRenderer.invoke('sync:restore'),
 
+  // 缓存管理
+  getCacheStats: () => ipcRenderer.invoke('cache:stats'),
+  clearCache: (opts: { snapshots?: boolean; chapterCache?: boolean }) =>
+    ipcRenderer.invoke('cache:clear', opts),
+
   // 应用信息
   getAppInfo: () => ipcRenderer.invoke('app:info'),
 

@@ -3,6 +3,7 @@ import JSZip from 'jszip';
 import * as pdfjsLib from 'pdfjs-dist';
 import mammoth from 'mammoth';
 import * as cheerio from 'cheerio/slim';
+import { marked } from 'marked';
 import { TXT_TOC_RULES, type TxtTocRule } from './txt-toc-rules';
 
 export interface BookMetadata {
@@ -32,6 +33,8 @@ export async function extractMetadata(filePath: string, ext: string): Promise<Bo
         return extractTxtMetadata(filePath);
       case '.docx':
         return await extractDocxMetadata(filePath);
+      case '.md':
+        return extractMdMetadata(filePath);
       default:
         return null;
     }
@@ -470,6 +473,59 @@ export async function docxToChapters(
     title: c.title || `第 ${i + 1} 节`,
     content: c.paras.join('\n'),
   }));
+}
+
+/** Markdown 里的空元素必须自闭合：EPUB 章节按 XML 解析，`<br>` / `<img>` 未闭合会整章解析失败 */
+const VOID_TAGS = ['br', 'hr', 'img', 'input', 'col', 'meta', 'link', 'source'];
+const toXhtmlFragment = (html: string) =>
+  html.replace(
+    new RegExp(`<(${VOID_TAGS.join('|')})((?:[^>"']|"[^"]*"|'[^']*')*?)\\s*/?>`, 'gi'),
+    (_m, tag: string, attrs: string) => `<${tag}${attrs.trimEnd()}/>`,
+  );
+
+/**
+ * Markdown 转章节：一级 / 二级标题另起一章，其余内容保留为 HTML，
+ * 以留住加粗、列表、代码块等排版。转出的 EPUB 走与 DOCX 相同的后续链路。
+ */
+export async function mdToChapters(
+  filePath: string,
+): Promise<{ title: string; content: string; html: string }[]> {
+  const text = fs.readFileSync(filePath, 'utf-8');
+  const tokens = marked.lexer(text);
+  const chapters: { title: string; html: string[] }[] = [];
+  let current: { title: string; html: string[] } = { title: '', html: [] };
+  const flush = () => {
+    if (current.title || current.html.length > 0) chapters.push(current);
+    current = { title: '', html: [] };
+  };
+
+  for (const token of tokens) {
+    if (token.type === 'heading' && (token.depth === 1 || token.depth === 2)) {
+      flush();
+      current = { title: token.text.trim().slice(0, 100), html: [] };
+    } else {
+      current.html.push(marked.parser([token]));
+    }
+  }
+  flush();
+
+  if (chapters.length === 0) return [];
+  // 无标题文档：合成单章
+  if (chapters.length === 1 && !chapters[0].title) {
+    return [{ title: '正文', content: text, html: toXhtmlFragment(chapters[0].html.join('')) }];
+  }
+  return chapters.map((c, i) => ({
+    title: c.title || `第 ${i + 1} 节`,
+    content: '',
+    html: toXhtmlFragment(c.html.join('')),
+  }));
+}
+
+/** Markdown 元数据：取首个一级标题当书名，没有则返回 null 交给调用方回退文件名 */
+function extractMdMetadata(filePath: string): BookMetadata | null {
+  const head = readTextHead(filePath, 65536);
+  const title = /^#\s+(.+)$/m.exec(head)?.[1]?.trim();
+  return title ? { title } : null;
 }
 
 // ============ 全文抽取（RAG 索引用，带跳转目标） ============

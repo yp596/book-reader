@@ -3,7 +3,7 @@ import fs from 'fs';
 import os from 'os';
 import path from 'path';
 import JSZip from 'jszip';
-import { extractMetadata, extractToc, parseTxtChapters, docxToChapters } from './metadata';
+import { extractMetadata, extractToc, parseTxtChapters, docxToChapters, mdToChapters } from './metadata';
 
 let tmpDir: string;
 
@@ -256,6 +256,52 @@ describe('TXT 目录提取', () => {
     expect(toc.length).toBeGreaterThan(0);
     expect(toc[0].label).toContain('第1章');
     expect(toc[toc.length - 1].label).toContain('第九九九九章');
+  });
+});
+
+describe('Markdown', () => {
+  const write = (name: string, text: string) => {
+    const p = path.join(tmpDir, name);
+    fs.writeFileSync(p, text, 'utf-8');
+    return p;
+  };
+
+  it('按一级 / 二级标题分章', async () => {
+    const p = write('a.md', '# 第一章 开始\n正文一\n\n## 第二节\n正文二\n');
+    const chapters = await mdToChapters(p);
+    expect(chapters.map(c => c.title)).toEqual(['第一章 开始', '第二节']);
+  });
+
+  it('保留加粗与列表，空元素转为自闭合', async () => {
+    const p = write('b.md', '# 章\n**粗体**\n\n- 项目一\n- 项目二\n\n换行<br>结束\n');
+    const html = (await mdToChapters(p))[0].html;
+    expect(html).toContain('<strong>粗体</strong>');
+    expect(html).toContain('<li>项目一</li>');
+    // EPUB 章节按 XML 解析，未闭合的 <br> 会让整章解析失败
+    expect(html).toMatch(/<br\s*\/>/);
+    expect(html).not.toMatch(/<br>/);
+  });
+
+  it('图片等空元素同样自闭合', async () => {
+    const p = write('c.md', '# 章\n![图](a.png)\n');
+    const html = (await mdToChapters(p))[0].html;
+    expect(html).toMatch(/<img[^>]*\/>/);
+  });
+
+  it('无标题文档合成单章', async () => {
+    const p = write('d.md', '只有正文，没有标题。\n');
+    const chapters = await mdToChapters(p);
+    expect(chapters).toHaveLength(1);
+    expect(chapters[0].title).toBe('正文');
+  });
+
+  it('空文件返回空数组', async () => {
+    expect(await mdToChapters(write('e.md', ''))).toEqual([]);
+  });
+
+  it('元数据取首个一级标题（二级标题不算）', async () => {
+    const p = write('f.md', '## 二级先出现\n# 真正的书名\n');
+    expect(await extractMetadata(p, '.md')).toEqual({ title: '真正的书名', author: undefined });
   });
 });
 

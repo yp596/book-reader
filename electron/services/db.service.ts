@@ -812,6 +812,12 @@ export class DatabaseService {
     return Number(row?.c ?? 0);
   }
 
+  /** 章节缓存条数（缓存管理页展示用） */
+  countCachedChapters(): number {
+    const row = this.get('SELECT COUNT(*) AS c FROM cached_chapters') as { c?: number } | undefined;
+    return Number(row?.c ?? 0);
+  }
+
   /** 清空在线书源章节缓存：属于临时数据，需要时可重新抓取。返回清理条数。 */
   clearChapterCache(): number {
     const row = this.get('SELECT COUNT(*) AS c FROM cached_chapters') as { c?: number } | undefined;

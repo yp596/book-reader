@@ -1,6 +1,10 @@
 import fs from 'fs';
 import path from 'path';
+import { pathToFileURL } from 'url';
+import { Worker } from 'worker_threads';
+import { app } from 'electron';
 import JSZip from 'jszip';
+import { Archive } from 'libarchive.js/dist/libarchive-node.mjs';
 
 /** 漫画包内视为页面图片的扩展名 */
 const COMIC_IMAGE_EXTS = ['.jpg', '.jpeg', '.png', '.gif', '.webp', '.bmp', '.avif'];
@@ -14,6 +18,9 @@ const MIME_BY_EXT: Record<string, string> = {
   '.bmp': 'image/bmp',
   '.avif': 'image/avif',
 };
+
+/** 容器格式：CBZ=zip、CBR=rar、CB7=7z、CBT=tar */
+export type ArchiveKind = 'zip' | 'rar' | '7z' | 'tar' | 'unknown';
 
 /**
  * 自然序比较：把字符串切成数字段与非数字段逐段比较，
@@ -51,27 +58,88 @@ export function isComicPage(name: string): boolean {
   return COMIC_IMAGE_EXTS.includes(path.extname(base));
 }
 
-/**
- * 单条缓存：一次只读一本书，避免每翻一页都重读整个压缩包。
- * 漫画包常有上百 MB，多条缓存会迅速吃满内存。
- */
-let cache: { archivePath: string; mtimeMs: number; zip: JSZip } | null = null;
+/** 按魔数判定容器格式：后缀写错的文件也能正确打开 */
+export function detectArchiveKind(head: Buffer): ArchiveKind {
+  const startsWith = (sig: number[]) =>
+    sig.length <= head.length && sig.every((b, i) => head[i] === b);
+  if (startsWith([0x50, 0x4b])) return 'zip';
+  if (startsWith([0x52, 0x61, 0x72, 0x21, 0x1a, 0x07])) return 'rar'; // Rar!
+  if (startsWith([0x37, 0x7a, 0xbc, 0xaf, 0x27, 0x1c])) return '7z';
+  // tar 的 'ustar' 标记固定出现在偏移 257
+  if (head.length >= 262 && head.subarray(257, 262).toString('latin1') === 'ustar') return 'tar';
+  return 'unknown';
+}
+
+function readHead(filePath: string, bytes = 512): Buffer {
+  const fd = fs.openSync(filePath, 'r');
+  try {
+    const buf = Buffer.alloc(bytes);
+    const read = fs.readSync(fd, buf, 0, bytes, 0);
+    return buf.subarray(0, read);
+  } finally {
+    fs.closeSync(fd);
+  }
+}
+
+// ---- 缓存：一次只开一本书，避免每翻一页重开压缩包（漫画包常有上百 MB） ----
+
+let zipCache: { path: string; mtimeMs: number; zip: JSZip } | null = null;
+let archiveCache: { path: string; mtimeMs: number; archive: any } | null = null;
 
 async function loadZip(archivePath: string): Promise<JSZip> {
   const stat = fs.statSync(archivePath);
-  if (cache && cache.archivePath === archivePath && cache.mtimeMs === stat.mtimeMs) {
-    return cache.zip;
+  if (zipCache && zipCache.path === archivePath && zipCache.mtimeMs === stat.mtimeMs) {
+    return zipCache.zip;
   }
   const zip = await JSZip.loadAsync(fs.readFileSync(archivePath));
-  cache = { archivePath, mtimeMs: stat.mtimeMs, zip };
+  archiveCache = null;
+  zipCache = { path: archivePath, mtimeMs: stat.mtimeMs, zip };
   return zip;
+}
+
+/**
+ * libarchive 的 Node 入口自己按模块位置拼 worker 路径，在 Windows 上会拼成
+ * `D:\D:\%E6%A1%8C...`（盘符重复且未解码），worker 起不来。
+ * 这里用官方提供的 getWorker 扩展点，改成我们解析出的绝对路径。
+ */
+let libarchiveReady: Promise<void> | null = null;
+async function ensureLibarchive(): Promise<void> {
+  if (!libarchiveReady) {
+    libarchiveReady = (async () => {
+      const distDir = path.join(app.getAppPath(), 'node_modules', 'libarchive.js', 'dist');
+      const workerUrl = pathToFileURL(path.join(distDir, 'worker-bundle-node.mjs')).href;
+      Archive.init({ getWorker: () => new Worker(workerUrl) });
+    })();
+  }
+  return libarchiveReady;
+}
+
+async function loadArchive(archivePath: string): Promise<any> {
+  const stat = fs.statSync(archivePath);
+  if (archiveCache && archiveCache.path === archivePath && archiveCache.mtimeMs === stat.mtimeMs) {
+    return archiveCache.archive;
+  }
+  await ensureLibarchive();
+  const archive = await (Archive as any).open(archivePath);
+  zipCache = null;
+  archiveCache = { path: archivePath, mtimeMs: stat.mtimeMs, archive };
+  return archive;
 }
 
 /** 列出漫画包内的页面条目名，按自然序排列 */
 export async function listComicPages(archivePath: string): Promise<string[]> {
-  const zip = await loadZip(archivePath);
-  return Object.keys(zip.files)
-    .filter(name => !zip.files[name].dir && isComicPage(name))
+  const kind = detectArchiveKind(readHead(archivePath));
+  if (kind === 'zip') {
+    const zip = await loadZip(archivePath);
+    return Object.keys(zip.files)
+      .filter(name => !zip.files[name].dir && isComicPage(name))
+      .sort(naturalCompare);
+  }
+  const archive = await loadArchive(archivePath);
+  const entries = await archive.getFilesArray();
+  return entries
+    .map((entry: any) => entry.path as string)
+    .filter(isComicPage)
     .sort(naturalCompare);
 }
 
@@ -80,16 +148,26 @@ export async function readComicPage(
   archivePath: string,
   name: string,
 ): Promise<{ data: string; mime: string } | null> {
-  const zip = await loadZip(archivePath);
-  const file = zip.file(name);
-  if (!file) return null;
-  return {
-    data: await file.async('base64'),
-    mime: MIME_BY_EXT[path.extname(name).toLowerCase()] ?? 'image/jpeg',
-  };
+  const mime = MIME_BY_EXT[path.extname(name).toLowerCase()] ?? 'image/jpeg';
+  const kind = detectArchiveKind(readHead(archivePath));
+  if (kind === 'zip') {
+    const zip = await loadZip(archivePath);
+    const file = zip.file(name);
+    if (!file) return null;
+    return { data: await file.async('base64'), mime };
+  }
+  const archive = await loadArchive(archivePath);
+  const entries = await archive.getFilesArray();
+  const entry = entries.find((e: any) => e.path === name);
+  if (!entry) return null;
+  const extracted = await entry.file.extract();
+  const buffer = Buffer.from(await extracted.arrayBuffer());
+  return { data: buffer.toString('base64'), mime };
 }
 
 /** 清理缓存（关闭书籍时调用，及时释放内存） */
 export function clearComicCache() {
-  cache = null;
+  zipCache = null;
+  archiveCache = null;
+  libarchiveReady = null;
 }

@@ -3,7 +3,7 @@ import fs from 'fs';
 import os from 'os';
 import path from 'path';
 import JSZip from 'jszip';
-import { naturalCompare, isComicPage, listComicPages, readComicPage, clearComicCache } from './comic';
+import { naturalCompare, isComicPage, detectArchiveKind, listComicPages, readComicPage, clearComicCache } from './comic';
 
 let tmpDir: string;
 
@@ -77,6 +77,27 @@ describe('isComicPage', () => {
 
   it('多层目录下的图片仍视为页面', () => {
     expect(isComicPage('第01卷/005.jpg')).toBe(true);
+  });
+});
+
+describe('容器格式判定', () => {
+  const head = (bytes: number[], tail = '') => {
+    const buf = Buffer.alloc(512);
+    Buffer.from(bytes).copy(buf);
+    if (tail) buf.write(tail, 257, 'latin1');
+    return buf;
+  };
+
+  it('按魔数识别 zip / rar / 7z / tar', () => {
+    expect(detectArchiveKind(head([0x50, 0x4b, 0x03, 0x04]))).toBe('zip');
+    expect(detectArchiveKind(head([0x52, 0x61, 0x72, 0x21, 0x1a, 0x07, 0x00]))).toBe('rar');
+    expect(detectArchiveKind(head([0x37, 0x7a, 0xbc, 0xaf, 0x27, 0x1c]))).toBe('7z');
+    expect(detectArchiveKind(head([], 'ustar'))).toBe('tar');
+  });
+
+  it('无法识别返回 unknown，交给上层按格式报错', () => {
+    expect(detectArchiveKind(head([0x00, 0x01, 0x02]))).toBe('unknown');
+    expect(detectArchiveKind(Buffer.alloc(0))).toBe('unknown');
   });
 });
 
