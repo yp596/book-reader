@@ -54,8 +54,13 @@ function App() {
   };
 
   const handleOpenFile = async () => {
-    await api.importBook();
+    const r = await api.importBook();
     await loadBooks();
+    // 明确告知哪些没导进来、为什么——静默跳过会让人以为成功了
+    if (r?.failed?.length) {
+      const lines = r.failed.map(f => `· ${f.name}：${f.reason}`);
+      alert(['以下文件未导入：', ...lines].join('\n'));
+    }
   };
 
   const handleSelectBook = (book: Book, target?: TocEntry) => {

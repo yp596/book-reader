@@ -200,6 +200,8 @@ export class DatabaseService {
       `ALTER TABLE books ADD COLUMN locked INTEGER DEFAULT 0`,
       // 笔记标签（逗号分隔存储，无需额外建表）
       `ALTER TABLE notes ADD COLUMN tags TEXT DEFAULT ''`,
+      // 内容指纹：导入查重
+      `ALTER TABLE books ADD COLUMN hash TEXT DEFAULT ''`,
       // 本书指定的 TXT 目录规则名，空串表示自动择优
       `ALTER TABLE books ADD COLUMN toc_rule TEXT DEFAULT ''`,
       // 目录来源：auto 自动解析 / manual 用户手动编辑
@@ -247,10 +249,17 @@ export class DatabaseService {
     return this.get('SELECT * FROM books WHERE id = ?', [id]);
   }
 
-  insertBook(book: { title: string; author?: string; cover_path?: string; file_path: string; file_type: string }) {
+  insertBook(book: {
+    title: string;
+    author?: string;
+    cover_path?: string;
+    file_path: string;
+    file_type: string;
+    hash?: string;
+  }) {
     this.run(
-      'INSERT INTO books (title, author, cover_path, file_path, file_type) VALUES (?, ?, ?, ?, ?)',
-      [book.title, book.author ?? null, book.cover_path ?? null, book.file_path, book.file_type],
+      'INSERT INTO books (title, author, cover_path, file_path, file_type, hash) VALUES (?, ?, ?, ?, ?, ?)',
+      [book.title, book.author ?? null, book.cover_path ?? null, book.file_path, book.file_type, book.hash ?? ''],
     );
     const row = this.get('SELECT last_insert_rowid() as id');
     return row?.id;
@@ -284,6 +293,17 @@ export class DatabaseService {
     const next = row.locked ? 0 : 1;
     this.run('UPDATE books SET locked = ? WHERE id = ?', [next, id]);
     return next;
+  }
+
+  /** 按内容指纹查重，命中返回已有书籍（用于导入时跳过重复） */
+  findBookByHash(hash: string) {
+    if (!hash) return undefined;
+    return this.get('SELECT id, title FROM books WHERE hash = ?', [hash]);
+  }
+
+  /** 补写指纹（存量书籍首次导入时可能为空） */
+  setBookHash(id: number, hash: string) {
+    this.run('UPDATE books SET hash = ? WHERE id = ?', [hash, id]);
   }
 
   /** 批量场景：显式设置锁定态（toggleBookLock 依赖当前值，不适合批量） */

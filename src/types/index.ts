@@ -141,8 +141,8 @@ export interface OnlineChapter {
 declare global {
   interface Window {
     electronAPI: {
-      importBook: () => Promise<any>;
-      importPaths: (paths: string[]) => Promise<any>;
+      importBook: () => Promise<{ imported: unknown[]; failed: { name: string; reason: string }[] }>;
+      importPaths: (paths: string[]) => Promise<{ imported: unknown[]; failed: { name: string; reason: string }[] }>;
       getPathForFile: (file: File) => string;
       renameBook: (id: number, title: string) => Promise<void>;
       toggleFavorite: (id: number) => Promise<number>;

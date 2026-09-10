@@ -140,6 +140,10 @@ export function Reader({ book, onBack, initialTarget, initialPosition }: ReaderP
   const [aiWord, setAiWord] = useState('');
   /** 多进度断点：本书已保存的阅读位置 */
   const [positions, setPositions] = useState<ReadingPosition[]>([]);
+  /** 全局强制统一字体：压过电子书自带的奇葩字体 */
+  const forceFontRef = useRef(false);
+  /** 批注只读：屏蔽新增/删除批注的操作入口 */
+  const readonlyMarksRef = useRef(false);
   /** 当前快捷键预设（从设置读取） */
   const presetRef = useRef(getPreset(DEFAULT_SHORTCUT_PRESET));
   /** TXT 规整：原文缓存 + 开关（非破坏性，原文与磁盘文件都不动） */
@@ -653,7 +657,7 @@ export function Reader({ book, onBack, initialTarget, initialPosition }: ReaderP
       return;
     }
     try {
-      const [tts, font, fontSize, lineHeight, theme, pos, autoOn, autoDayStart, autoNightStart, autoDay, autoNight, bookPrefsRaw, presetKey] = await Promise.all([
+      const [tts, font, fontSize, lineHeight, theme, pos, autoOn, autoDayStart, autoNightStart, autoDay, autoNight, bookPrefsRaw, presetKey, forceFont, readonly] = await Promise.all([
         api.getSetting('ttsRate'),
         api.getSetting('fontFamily'),
         api.getSetting('fontSize'),
@@ -667,7 +671,11 @@ export function Reader({ book, onBack, initialTarget, initialPosition }: ReaderP
         api.getSetting('autoThemeNight'),
         api.getSetting(bookPrefsKey(book.id)),
         api.getSetting('shortcutPreset'),
+        api.getSetting('forceFont'),
+        api.getSetting('annotationsReadonly'),
       ]);
+      forceFontRef.current = forceFont === 'true' || forceFont === '1';
+      readonlyMarksRef.current = readonly === 'true' || readonly === '1';
       if (presetKey) presetRef.current = getPreset(presetKey);
       const rate = Number(tts);
       if (!Number.isNaN(rate) && rate >= 0.5 && rate <= 2) setTtsRate(rate);
@@ -1085,7 +1093,15 @@ export function Reader({ book, onBack, initialTarget, initialPosition }: ReaderP
     clearEpubSelection();
   };
 
+  /** 批注只读检查：已拦截返回 true */
+  const blockedByReadonly = (action: string) => {
+    if (!readonlyMarksRef.current) return false;
+    alert(`已开启「批注只读」，无法${action}。可在设置页关闭该模式。`);
+    return true;
+  };
+
   const handleHighlight = async (colorKey: string = 'yellow') => {
+    if (blockedByReadonly('新增高亮')) return;
     if (!sel) return;
     const api = window.electronAPI;
     if (!api) return;
@@ -1110,6 +1126,7 @@ export function Reader({ book, onBack, initialTarget, initialPosition }: ReaderP
 
   const handleSaveNote = async () => {
     if (!noteDraft || !noteContent.trim()) return;
+    if (blockedByReadonly('新增笔记')) return;
     const api = window.electronAPI;
     if (!api) return;
     await api.addNote({
@@ -1127,6 +1144,7 @@ export function Reader({ book, onBack, initialTarget, initialPosition }: ReaderP
   };
 
   const handleRenameBookmark = async (b: Bookmark) => {
+    if (blockedByReadonly('修改书签')) return;
     const api = window.electronAPI;
     if (!api) return;
     const next = prompt('修改书签名称：', b.text || '');
@@ -1141,6 +1159,7 @@ export function Reader({ book, onBack, initialTarget, initialPosition }: ReaderP
   };
 
   const handleDeleteBookmark = async (b: Bookmark) => {
+    if (blockedByReadonly('删除书签')) return;
     const api = window.electronAPI;
     if (!api) return;
     if (book.file_type === 'epub' && renditionRef.current) {
@@ -1151,6 +1170,7 @@ export function Reader({ book, onBack, initialTarget, initialPosition }: ReaderP
   };
 
   const handleDeleteNote = async (id: number) => {
+    if (blockedByReadonly('删除笔记')) return;
     const api = window.electronAPI;
     if (!api) return;
     await api.deleteNote(id);
@@ -1339,13 +1359,20 @@ export function Reader({ book, onBack, initialTarget, initialPosition }: ReaderP
     };
     const { theme, fontSize, lineHeight } = cfgRef.current;
     const stack = fontStackOf(fontKeyRef.current);
+    const force = forceFontRef.current;
     rendition.themes.default({
       'body':
         themes[theme] +
         ` line-height: ${lineHeight} !important;` +
-        (stack ? ` font-family: ${stack};` : ''),
+        (stack ? ` font-family: ${stack}${force ? ' !important' : ''};` : ''),
       'p, div, span': { 'font-size': `${fontSize}px !important` },
     });
+    // 强制统一：连元素级 font-family 一并压过，解决异体字/缺字乱码
+    if (force && stack) {
+      rendition.themes.default({
+        '*, *::before, *::after': { 'font-family': `${stack} !important` },
+      });
+    }
   };
 
   const toggleFlow = () => {
@@ -2290,6 +2317,7 @@ export function Reader({ book, onBack, initialTarget, initialPosition }: ReaderP
       {/* 选中操作条 */}
       {sel && (
         <div className="select-popup" style={{ left: sel.x, top: sel.y }}>
+          {readonlyMarksRef.current ? null : (
           <div className="hl-colors">
             {HIGHLIGHT_COLORS.map(c => (
               <button
@@ -2301,12 +2329,14 @@ export function Reader({ book, onBack, initialTarget, initialPosition }: ReaderP
               />
             ))}
           </div>
+          )}
           <button
             onClick={() => {
               setNoteDraft({ text: sel.text, position: sel.position });
               setNoteContent('');
             }}
-            title="写笔记"
+            title={readonlyMarksRef.current ? '批注只读模式已开启' : '写笔记'}
+            disabled={readonlyMarksRef.current}
           >
             📝 笔记
           </button>

@@ -17,6 +17,7 @@ import {
   pruneSnapshots,
 } from '../services/local-backup';
 import { ModelService } from '../services/model-service';
+import { contentHash } from '../services/file-hash';
 
 const sanitizeFileName = (name: string) => name.replace(/[\\/:*?"<>|]/g, '_');
 
@@ -58,6 +59,12 @@ async function importOneFile(db: DatabaseService, filePath: string) {
     throw new Error(`不支持的格式：${ext || '(无后缀)'}`);
   }
   const fileName = path.basename(filePath, path.extname(filePath));
+
+  // 内容查重：同一本书重复导入会污染书架，这里按指纹直接跳过
+  const hash = contentHash(filePath);
+  const dup = db.findBookByHash(hash) as { title?: string } | undefined;
+  if (dup) throw new Error(`与《${dup.title ?? '已有书籍'}》内容相同，已跳过`);
+
   const booksDir = path.join(app.getPath('userData'), 'books');
   if (!fs.existsSync(booksDir)) {
     fs.mkdirSync(booksDir, { recursive: true });
@@ -90,6 +97,7 @@ async function importOneFile(db: DatabaseService, filePath: string) {
     author: meta?.author,
     file_path: storePath,
     file_type: storeExt.slice(1),
+    hash,
   });
   // 提取目录并缓存（DOCX 用转换时的章节，EPUB 读 NCX）
   try {
@@ -132,30 +140,38 @@ export function registerIpcHandlers() {
     if (result.canceled) return [];
 
     const imported = [];
+    const failed: { name: string; reason: string }[] = [];
     for (const filePath of result.filePaths) {
       try {
         imported.push(await importOneFile(db, filePath));
       } catch (err) {
-        console.error(`导入失败 [${filePath}]:`, err);
+        failed.push({
+          name: path.basename(filePath),
+          reason: err instanceof Error ? err.message : '导入失败',
+        });
       }
     }
 
-    return imported;
+    return { imported, failed };
   });
 
   // 拖拽导入（渲染进程传真实路径）
   ipcMain.handle('books:importPaths', async (_event, filePaths: string[]) => {
     const imported = [];
+    const failed: { name: string; reason: string }[] = [];
     for (const filePath of filePaths) {
       try {
         if (fs.existsSync(filePath) && fs.statSync(filePath).isFile()) {
           imported.push(await importOneFile(db, filePath));
         }
       } catch (err) {
-        console.error(`导入失败 [${filePath}]:`, err);
+        failed.push({
+          name: path.basename(filePath),
+          reason: err instanceof Error ? err.message : '导入失败',
+        });
       }
     }
-    return imported;
+    return { imported, failed };
   });
 
   // 已入库书籍：从内容重新识别书名作者

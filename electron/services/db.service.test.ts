@@ -238,3 +238,33 @@ describe('批量：显式设置锁定态', () => {
     expect(() => db.setCategory(id, '测试')).not.toThrow();
   });
 });
+
+describe('导入查重（内容指纹）', () => {
+  it('insertBook 存入指纹，findBookByHash 能命中', () => {
+    const id = db.insertBook({
+      title: '查重书A',
+      file_path: '/tmp/hash-a.epub',
+      file_type: 'epub',
+      hash: 'hash-aaa',
+    });
+    const hit = db.findBookByHash('hash-aaa');
+    expect(hit?.id).toBe(id);
+    expect(hit?.title).toBe('查重书A');
+  });
+
+  it('未登记的指纹查不到', () => {
+    expect(db.findBookByHash('hash-不存在')).toBeUndefined();
+  });
+
+  it('空指纹不参与查重（避免误判为一堆同库）', () => {
+    db.insertBook({ title: '无指纹书', file_path: '/tmp/no-hash.epub', file_type: 'epub' });
+    expect(db.findBookByHash('')).toBeUndefined();
+  });
+
+  it('setBookHash 可补写存量书籍的指纹', () => {
+    const id = db.insertBook({ title: '补指纹书', file_path: '/tmp/late.epub', file_type: 'epub' });
+    expect(db.findBookByHash('hash-late')).toBeUndefined();
+    db.setBookHash(id, 'hash-late');
+    expect(db.findBookByHash('hash-late')?.id).toBe(id);
+  });
+});

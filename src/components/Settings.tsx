@@ -45,6 +45,10 @@ interface SettingsData {
   privacyAutoClear: boolean;
   /** 当前快捷键预设 key */
   shortcutPreset: string;
+  /** 全局强制统一字体（压过电子书自带字体） */
+  forceFont: boolean;
+  /** 批注只读：禁止新增/删除批注 */
+  annotationsReadonly: boolean;
   /** TXT 目录解析方式：默认择优 / 关键字 / 自定义正则 */
   txtTocMode: 'default' | 'keyword' | 'regex';
   /** 关键字解析时的关键字，多个用 | 或换行分隔 */
@@ -75,6 +79,8 @@ export function Settings() {
     autoThemeNight: DEFAULT_AUTO_THEME.nightTheme,
     privacyAutoClear: false,
     shortcutPreset: DEFAULT_SHORTCUT_PRESET,
+    forceFont: false,
+    annotationsReadonly: false,
     txtTocMode: 'default',
     txtTocKeyword: '',
     txtTocRegex: '',
@@ -95,7 +101,7 @@ export function Settings() {
   const loadSettings = async () => {
     const api = window.electronAPI;
     if (!api) return;
-    const BOOL_KEYS: (keyof SettingsData)[] = ['autoTheme', 'privacyAutoClear'];
+    const BOOL_KEYS: (keyof SettingsData)[] = ['autoTheme', 'privacyAutoClear', 'forceFont', 'annotationsReadonly'];
     const NUM_KEYS: (keyof SettingsData)[] = [
       'fontSize', 'lineHeight', 'ttsRate', 'autoThemeDayStart', 'autoThemeNightStart',
     ];
@@ -380,6 +386,34 @@ export function Settings() {
             <option value="mono">等宽</option>
           </select>
         </div>
+        <div className="form-row" style={{ marginBottom: 8 }}>
+          <label className="checkbox-row">
+            <input
+              type="checkbox"
+              checked={settings.forceFont}
+              onChange={e => handleChange('forceFont', e.target.checked)}
+            />
+            <span>
+              全局强制统一字体
+              <em className="privacy-hint">覆盖电子书自带的异体字/缺字，全部使用上面选定的字体</em>
+            </span>
+          </label>
+        </div>
+
+        <div className="form-row">
+          <label className="checkbox-row">
+            <input
+              type="checkbox"
+              checked={settings.annotationsReadonly}
+              onChange={e => handleChange('annotationsReadonly', e.target.checked)}
+            />
+            <span>
+              批注只读模式
+              <em className="privacy-hint">禁止新增/删除高亮与笔记，防止误操作；已有批注照常显示</em>
+            </span>
+          </label>
+        </div>
+
         <div className="form-row">
           <label>朗读速度（{settings.ttsRate.toFixed(2)} 倍）</label>
           <input
