@@ -6,6 +6,7 @@ import { DatabaseService } from './services/db.service';
 import { ModelService } from './services/model-service';
 import { disposeEngine } from './services/llama-engine';
 import { registerIpcHandlers } from './ipc';
+import { folderWatcher } from './services/watch-folder';
 import { loadRenderer } from './renderer-window';
 import { LOCAL_FILE_SCHEME, filePathFromUrl, isInsideBooksDir } from './services/local-file';
 
@@ -75,6 +76,11 @@ app.whenReady().then(async () => {
   registerLocalFileProtocol();
   createWindow();
   registerIpcHandlers();
+  // 恢复上次的目录监视（须在 registerIpcHandlers 之后——回调在那里注册）
+  try {
+    const watchDir = DatabaseService.getInstance().getSetting('watchDir');
+    if (watchDir && fs.existsSync(watchDir)) folderWatcher().start(watchDir);
+  } catch { /* 目录已不存在则忽略 */ }
   registerShortcuts();
   // 推理走进程内引擎（懒加载，首次 AI 调用时载入模型）；
   // 边车仅作手动回退，不再开机自启，避免模型双份占内存
@@ -100,6 +106,7 @@ app.on('window-all-closed', () => {
 
 app.on('will-quit', () => {
   globalShortcut.unregisterAll();
+  try { folderWatcher().stop(); } catch { /* 忽略 */ }
   // 隐私模式：退出时清掉临时数据（章节缓存与剪贴板），不含用户笔记/书签
   try {
     const db = DatabaseService.getInstance();

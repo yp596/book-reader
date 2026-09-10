@@ -4,7 +4,22 @@ import { pathToFileURL } from 'url';
 import { Worker } from 'worker_threads';
 import { app } from 'electron';
 import JSZip from 'jszip';
-import { Archive } from 'libarchive.js/dist/libarchive-node.mjs';
+
+type LibarchiveModule = typeof import('libarchive.js/dist/libarchive-node.mjs');
+
+/**
+ * libarchive 必须运行时动态加载，不能被打进 bundle：
+ * 它顶层用 `new URL('.', import.meta.url)` 计算 worker 路径，打成 CJS 后
+ * import.meta 失效，会在模块加载阶段抛 Invalid URL，导致主进程启动即崩。
+ * vite 配置里已把它列为 external。
+ */
+let libarchiveModule: LibarchiveModule | null = null;
+async function loadLibarchive(): Promise<LibarchiveModule> {
+  if (!libarchiveModule) {
+    libarchiveModule = (await import('libarchive.js/dist/libarchive-node.mjs')) as LibarchiveModule;
+  }
+  return libarchiveModule;
+}
 
 /** 漫画包内视为页面图片的扩展名 */
 const COMIC_IMAGE_EXTS = ['.jpg', '.jpeg', '.png', '.gif', '.webp', '.bmp', '.avif'];
@@ -106,6 +121,7 @@ let libarchiveReady: Promise<void> | null = null;
 async function ensureLibarchive(): Promise<void> {
   if (!libarchiveReady) {
     libarchiveReady = (async () => {
+      const { Archive } = await loadLibarchive();
       const distDir = path.join(app.getAppPath(), 'node_modules', 'libarchive.js', 'dist');
       const workerUrl = pathToFileURL(path.join(distDir, 'worker-bundle-node.mjs')).href;
       Archive.init({ getWorker: () => new Worker(workerUrl) });
@@ -120,6 +136,7 @@ async function loadArchive(archivePath: string): Promise<any> {
     return archiveCache.archive;
   }
   await ensureLibarchive();
+  const { Archive } = await loadLibarchive();
   const archive = await (Archive as any).open(archivePath);
   zipCache = null;
   archiveCache = { path: archivePath, mtimeMs: stat.mtimeMs, archive };

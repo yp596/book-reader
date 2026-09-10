@@ -250,6 +250,11 @@ declare global {
       deleteWord: (id: number) => Promise<void>;
       syncBackup: () => Promise<boolean>;
       syncRestore: () => Promise<number>;
+      startWatch: (dir: string) => Promise<{ dir: string; ok: boolean }>;
+      stopWatch: () => Promise<boolean>;
+      watchStatus: () => Promise<{ watching: boolean; dir: string; savedDir: string }>;
+      pickWatchDir: () => Promise<string | null>;
+      onWatchImported: (cb: (name: string) => void) => () => void;
       getCacheStats: () => Promise<{
         chapterCount: number;
         snapshotBytes: number;

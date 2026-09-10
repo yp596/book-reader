@@ -119,6 +119,17 @@ contextBridge.exposeInMainWorld('electronAPI', {
   syncBackup: () => ipcRenderer.invoke('sync:backup'),
   syncRestore: () => ipcRenderer.invoke('sync:restore'),
 
+  // 文件夹监视
+  startWatch: (dir: string) => ipcRenderer.invoke('watch:start', dir),
+  stopWatch: () => ipcRenderer.invoke('watch:stop'),
+  watchStatus: () => ipcRenderer.invoke('watch:status'),
+  pickWatchDir: () => ipcRenderer.invoke('watch:pick'),
+  onWatchImported: (cb: (name: string) => void) => {
+    const listener = (_e: any, name: string) => cb(name);
+    ipcRenderer.on('watch:imported', listener);
+    return () => ipcRenderer.removeListener('watch:imported', listener);
+  },
+
   // 缓存管理
   getCacheStats: () => ipcRenderer.invoke('cache:stats'),
   clearCache: (opts: { snapshots?: boolean; chapterCache?: boolean }) =>

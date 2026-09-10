@@ -21,6 +21,7 @@ import { listComicPages, readComicPage } from '../services/comic';
 import { extractCover } from '../services/cover';
 import { contentHash } from '../services/file-hash';
 import { dirSize, clearSnapshots } from '../services/cache';
+import { folderWatcher } from '../services/watch-folder';
 import { loadRenderer } from '../renderer-window';
 import { buildBookListMarkdown, buildBookBackup, backupFileName, localDateStamp } from '../services/book-export';
 
@@ -1065,6 +1066,53 @@ export function registerIpcHandlers() {
       dataDir: app.getPath('userData'),
       booksDir: path.join(app.getPath('userData'), 'books'),
     };
+  });
+
+  // ============ 文件夹监视（自动入库） ============
+
+  const watcher = folderWatcher();
+  watcher.onReady = async (filePath: string) => {
+    try {
+      await importOneFile(db, filePath);
+      const win = BrowserWindow.getAllWindows()[0];
+      win?.webContents.send('watch:imported', path.basename(filePath));
+    } catch (err) {
+      // 目录里本来就有已入库的书，重复跳过属常态，不打扰用户
+      console.warn(`监视入库跳过 [${filePath}]:`, err instanceof Error ? err.message : err);
+    }
+  };
+
+  ipcMain.handle('watch:start', async (event, dir: string) => {
+    const win = BrowserWindow.fromWebContents(event.sender) ?? undefined;
+    watcher.start(dir);
+    db.setSetting('watchDir', dir);
+    return { dir: watcher.watchingDir(), ok: true, _win: !!win };
+  });
+
+  ipcMain.handle('watch:stop', () => {
+    watcher.stop();
+    db.setSetting('watchDir', '');
+    return true;
+  });
+
+  ipcMain.handle('watch:status', () => {
+    // 未在监视但设置里有目录 → 说明重启后还没恢复，交给调用方决定是否恢复
+    const saved = db.getSetting('watchDir') || '';
+    return {
+      watching: watcher.isWatching(),
+      dir: watcher.watchingDir(),
+      savedDir: saved,
+    };
+  });
+
+  ipcMain.handle('watch:pick', async (event) => {
+    const win = BrowserWindow.fromWebContents(event.sender) ?? undefined;
+    const { canceled, filePaths } = await dialog.showOpenDialog(win!, {
+      title: '选择要监视的文件夹',
+      properties: ['openDirectory'],
+    });
+    if (canceled || filePaths.length === 0) return null;
+    return filePaths[0];
   });
 
   // ============ 缓存管理（纯本地） ============

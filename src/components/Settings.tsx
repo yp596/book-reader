@@ -90,6 +90,7 @@ export function Settings() {
     loadSnapshots();
     loadLastBackup();
     loadCacheStats();
+    loadWatch();
   }, []);
 
   const loadLastSync = async () => {
@@ -218,6 +219,45 @@ export function Settings() {
       alert(`回退失败：${err instanceof Error ? err.message : '未知错误'}`);
     } finally {
       setBackupBusy(false);
+    }
+  };
+
+  // ---------- 文件夹监视 ----------
+
+  const [watch, setWatch] = useState({ watching: false, dir: '', savedDir: '' });
+  const [watchBusy, setWatchBusy] = useState(false);
+
+  const loadWatch = async () => {
+    const api = window.electronAPI;
+    if (!api) return;
+    try {
+      setWatch(await api.watchStatus());
+    } catch { /* 忽略 */ }
+  };
+
+  const handlePickWatch = async () => {
+    const api = window.electronAPI;
+    if (!api) return;
+    const dir = await api.pickWatchDir();
+    if (!dir) return;
+    setWatchBusy(true);
+    try {
+      await api.startWatch(dir);
+      await loadWatch();
+    } catch (err) {
+      alert(err instanceof Error ? err.message : '无法监视该目录');
+    } finally {
+      setWatchBusy(false);
+    }
+  };
+
+  const handleStopWatch = async () => {
+    setWatchBusy(true);
+    try {
+      await window.electronAPI?.stopWatch();
+      await loadWatch();
+    } finally {
+      setWatchBusy(false);
     }
   };
 
@@ -559,6 +599,32 @@ export function Settings() {
         <div className="form-row">
           <label>向量服务地址（语义检索用）</label>
           <input value={settings.aiEmbedUrl} onChange={e => handleChange('aiEmbedUrl', e.target.value)} placeholder="http://localhost:8081" />
+        </div>
+      </section>
+
+      <section className="settings-section">
+        <h2>文件夹监视</h2>
+        <p className="section-desc">
+          指定一个文件夹，往里放新的电子书会自动入库，不用每次手动导入。
+          重复的书会自动跳过；正在下载的半截文件不会被导入。
+        </p>
+        <div className="info-table" style={{ marginBottom: 16 }}>
+          <div className="info-row">
+            <span style={{ width: 90 }}>当前状态</span>
+            <span>
+              {watch.watching ? `监视中：${watch.dir}` : '未开启'}
+            </span>
+          </div>
+        </div>
+        <div className="form-actions" style={{ justifyContent: 'flex-start', gap: 10 }}>
+          <button className="btn-secondary" onClick={handlePickWatch} disabled={watchBusy}>
+            {watch.watching ? '更换目录' : '选择目录并开启'}
+          </button>
+          {watch.watching && (
+            <button className="btn-secondary" onClick={handleStopWatch} disabled={watchBusy}>
+              停止监视
+            </button>
+          )}
         </div>
       </section>
 

@@ -13,8 +13,10 @@ export default defineConfig({
           build: {
             outDir: 'dist-electron',
             rollupOptions: {
-              // 主进程原生/外部依赖保持 require，不打进 bundle
-              external: ['sql.js', 'node-llama-cpp'],
+              // 主进程原生/外部依赖保持 require，不打进 bundle。
+              // libarchive 必须外部：它顶层用 import.meta.url 算 worker 路径，
+              // 打成 CJS 后 import.meta 失效，会在模块加载阶段抛 Invalid URL。
+              external: ['sql.js', 'node-llama-cpp', 'libarchive.js/dist/libarchive-node.mjs'],
             },
           },
         },
