@@ -43,6 +43,12 @@ contextBridge.exposeInMainWorld('electronAPI', {
     ipcRenderer.invoke('books:categories'),
   getBookToc: (id: number) =>
     ipcRenderer.invoke('books:toc', id),
+  getTocRules: (id: number) =>
+    ipcRenderer.invoke('books:tocRules', id),
+  reparseToc: (id: number, ruleName?: string) =>
+    ipcRenderer.invoke('books:reparseToc', id, ruleName),
+  saveToc: (id: number, entries: unknown[]) =>
+    ipcRenderer.invoke('books:saveToc', id, entries),
 
   // Sources
   getAllSources: () => ipcRenderer.invoke('sources:getAll'),
@@ -95,6 +101,14 @@ contextBridge.exposeInMainWorld('electronAPI', {
   getWeeklyStats: (days: number) => ipcRenderer.invoke('stats:weekly', days),
   syncBackup: () => ipcRenderer.invoke('sync:backup'),
   syncRestore: () => ipcRenderer.invoke('sync:restore'),
+
+  // 隐私清理
+  clearPrivacy: (opts: {
+    positions?: boolean;
+    chapterCache?: boolean;
+    timestamps?: boolean;
+    clipboard?: boolean;
+  }) => ipcRenderer.invoke('privacy:clear', opts),
 
   // 本地备份（纯离线）
   exportBackup: (full?: boolean) => ipcRenderer.invoke('backup:export', full),

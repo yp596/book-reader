@@ -160,6 +160,9 @@ declare global {
       setCategory: (id: number, category: string) => Promise<void>;
       getCategories: () => Promise<string[]>;
       getBookToc: (id: number) => Promise<TocEntry[]>;
+      getTocRules: (id: number) => Promise<{ rules: string[]; current: string; source: string }>;
+      reparseToc: (id: number, ruleName?: string) => Promise<TocEntry[]>;
+      saveToc: (id: number, entries: TocEntry[]) => Promise<void>;
       getAllBooks: () => Promise<Book[]>;
       getBookById: (id: number) => Promise<Book>;
       deleteBook: (id: number) => Promise<void>;
@@ -229,6 +232,12 @@ declare global {
       deleteWord: (id: number) => Promise<void>;
       syncBackup: () => Promise<boolean>;
       syncRestore: () => Promise<number>;
+      clearPrivacy: (opts: {
+        positions?: boolean;
+        chapterCache?: boolean;
+        timestamps?: boolean;
+        clipboard?: boolean;
+      }) => Promise<Record<string, number | boolean>>;
       exportBackup: (full?: boolean) => Promise<{ filePath: string; kind: string; count: number } | null>;
       importBackup: () => Promise<{ restored: number; createdAt: string; kind: string } | null>;
       createSnapshot: () => Promise<{ file: string; pruned: number }>;

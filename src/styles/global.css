@@ -1474,3 +1474,24 @@ button:focus-visible, input:focus-visible, select:focus-visible, textarea:focus-
   color: var(--accent-light);
   background: var(--accent-glow);
 }
+
+/* 隐私清理区 */
+.privacy-opts {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  margin-top: 4px;
+}
+
+.privacy-opts .checkbox-row { align-items: flex-start; }
+.privacy-opts .checkbox-row input { margin-top: 3px; }
+
+.privacy-hint {
+  display: block;
+  margin-top: 3px;
+  font-style: normal;
+  font-size: 12px;
+  font-weight: 400;
+  color: var(--text-muted);
+  line-height: 1.5;
+}

@@ -1,8 +1,8 @@
-import { ipcMain, dialog, BrowserWindow, app, shell, Notification } from 'electron';
+import { ipcMain, dialog, BrowserWindow, app, shell, Notification, clipboard } from 'electron';
 import fs from 'fs';
 import path from 'path';
 import { DatabaseService } from '../services/db.service';
-import { extractMetadata, extractToc, docxToChapters, extractBookSections } from '../services/metadata';
+import { extractMetadata, extractToc, docxToChapters, extractBookSections, TXT_TOC_RULE_NAMES, type TxtTocOptions } from '../services/metadata';
 import { buildCrawlerFromRow, applyTextFilters } from '../services/book-source';
 import { splitText, cosine, embedTexts } from '../services/rag';
 import { buildEpub } from '../services/epub-export';
@@ -101,6 +101,20 @@ async function importOneFile(db: DatabaseService, filePath: string) {
 
 export function registerIpcHandlers() {
   const db = DatabaseService.getInstance();
+
+  /**
+   * 汇总某本书的 TXT 目录解析配置。
+   * 本书指定的规则优先；否则取设置页的全局三档配置（默认 / 关键字 / 正则）。
+   */
+  const txtTocOptionsFor = (bookId: number): TxtTocOptions => {
+    const ruleName = db.getBookTocRule(bookId);
+    if (ruleName) return { ruleName };
+    return {
+      mode: (db.getSetting('txtTocMode') as TxtTocOptions['mode']) || 'default',
+      keyword: db.getSetting('txtTocKeyword') ?? '',
+      regex: db.getSetting('txtTocRegex') ?? '',
+    };
+  };
 
   // ============ Books ============
 
@@ -258,9 +272,31 @@ export function registerIpcHandlers() {
         if (Array.isArray(cached) && cached.length > 0) return cached;
       } catch { /* 缓存损坏则重新解析 */ }
     }
-    const toc = await extractToc(book.file_path, '.' + book.file_type);
+    const toc = await extractToc(book.file_path, '.' + book.file_type, txtTocOptionsFor(id));
     if (toc.length > 0) db.setBookToc(id, JSON.stringify(toc));
     return toc;
+  });
+
+  // 可选的目录规则名 + 本书当前指定（空串为自动择优）+ 当前目录来源
+  ipcMain.handle('books:tocRules', (_event, id: number) => ({
+    rules: TXT_TOC_RULE_NAMES,
+    current: db.getBookTocRule(id),
+    source: db.getBookTocSource(id),
+  }));
+
+  // 按当前配置重新解析目录；传入 ruleName 则先切换本书规则（空串=恢复自动）
+  ipcMain.handle('books:reparseToc', async (_event, id: number, ruleName?: string) => {
+    const book = db.getBookById(id) as any;
+    if (!book) throw new Error('书籍不存在');
+    if (ruleName !== undefined) db.setBookTocRule(id, ruleName);
+    const toc = await extractToc(book.file_path, '.' + book.file_type, txtTocOptionsFor(id));
+    db.setBookToc(id, JSON.stringify(toc));
+    return toc;
+  });
+
+  // 保存手动编辑后的目录
+  ipcMain.handle('books:saveToc', (_event, id: number, entries: unknown[]) => {
+    db.setBookToc(id, JSON.stringify(Array.isArray(entries) ? entries : []), 'manual');
   });
 
   // 全屏切换
@@ -867,6 +903,26 @@ export function registerIpcHandlers() {
     db.setSetting('lastSyncAt', new Date().toLocaleString());
     return restored;
   });
+
+  // ============ 隐私清理（纯本地） ============
+
+  ipcMain.handle(
+    'privacy:clear',
+    (
+      _event,
+      opts: { positions?: boolean; chapterCache?: boolean; timestamps?: boolean; clipboard?: boolean },
+    ) => {
+      const result: Record<string, number | boolean> = {};
+      if (opts?.positions) result.positions = db.clearAutoPositions();
+      if (opts?.chapterCache) result.chapterCache = db.clearChapterCache();
+      if (opts?.timestamps) result.timestamps = db.clearReadingTimestamps();
+      if (opts?.clipboard) {
+        clipboard.clear();
+        result.clipboard = true;
+      }
+      return result;
+    },
+  );
 
   // ============ 本地备份（纯离线，不联网） ============
 

@@ -1,4 +1,4 @@
-import { app, BrowserWindow, globalShortcut } from 'electron';
+import { app, BrowserWindow, globalShortcut, clipboard } from 'electron';
 import path from 'path';
 import { DatabaseService } from './services/db.service';
 import { ModelService } from './services/model-service';
@@ -80,6 +80,14 @@ app.on('window-all-closed', () => {
 
 app.on('will-quit', () => {
   globalShortcut.unregisterAll();
+  // 隐私模式：退出时清掉临时数据（章节缓存与剪贴板），不含用户笔记/书签
+  try {
+    const db = DatabaseService.getInstance();
+    if (db.getSetting('privacyAutoClear') === 'true') {
+      db.clearChapterCache();
+      clipboard.clear();
+    }
+  } catch { /* 忽略 */ }
   try { ModelService.getInstance().stopAll(); } catch {}
   try { void disposeEngine(); } catch {}
   try { DatabaseService.getInstance().close(); } catch {}

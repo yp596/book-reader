@@ -26,6 +26,14 @@ interface SettingsData {
   autoThemeNightStart: number;
   autoThemeDay: 'dark' | 'light' | 'sepia';
   autoThemeNight: 'dark' | 'light' | 'sepia';
+  /** 退出软件时自动清理临时隐私数据 */
+  privacyAutoClear: boolean;
+  /** TXT 目录解析方式：默认择优 / 关键字 / 自定义正则 */
+  txtTocMode: 'default' | 'keyword' | 'regex';
+  /** 关键字解析时的关键字，多个用 | 或换行分隔 */
+  txtTocKeyword: string;
+  /** 自定义正则解析时的表达式 */
+  txtTocRegex: string;
 }
 
 export function Settings() {
@@ -48,6 +56,10 @@ export function Settings() {
     autoThemeNightStart: DEFAULT_AUTO_THEME.nightStart,
     autoThemeDay: DEFAULT_AUTO_THEME.dayTheme,
     autoThemeNight: DEFAULT_AUTO_THEME.nightTheme,
+    privacyAutoClear: false,
+    txtTocMode: 'default',
+    txtTocKeyword: '',
+    txtTocRegex: '',
   });
   const [saved, setSaved] = useState(false);
   const [syncing, setSyncing] = useState(false);
@@ -65,7 +77,7 @@ export function Settings() {
   const loadSettings = async () => {
     const api = window.electronAPI;
     if (!api) return;
-    const BOOL_KEYS: (keyof SettingsData)[] = ['autoTheme'];
+    const BOOL_KEYS: (keyof SettingsData)[] = ['autoTheme', 'privacyAutoClear'];
     const NUM_KEYS: (keyof SettingsData)[] = [
       'fontSize', 'lineHeight', 'ttsRate', 'autoThemeDayStart', 'autoThemeNightStart',
     ];
@@ -181,6 +193,40 @@ export function Settings() {
       alert(`回退失败：${err instanceof Error ? err.message : '未知错误'}`);
     } finally {
       setBackupBusy(false);
+    }
+  };
+
+  // ---------- 隐私清理 ----------
+
+  const [privacyOpts, setPrivacyOpts] = useState({
+    positions: true,
+    chapterCache: true,
+    timestamps: false,
+    clipboard: true,
+  });
+  const [privacyBusy, setPrivacyBusy] = useState(false);
+
+  const handlePrivacyClear = async () => {
+    const api = window.electronAPI;
+    if (!api) return;
+    if (!Object.values(privacyOpts).some(Boolean)) {
+      alert('请至少选择一项要清理的内容');
+      return;
+    }
+    if (!confirm('确定清理所选隐私数据？此操作不可撤销。')) return;
+    setPrivacyBusy(true);
+    try {
+      const r = await api.clearPrivacy(privacyOpts);
+      const parts: string[] = [];
+      if (r.positions) parts.push(`阅读位置记录 ${r.positions} 条`);
+      if (r.chapterCache) parts.push(`章节缓存 ${r.chapterCache} 条`);
+      if (r.timestamps) parts.push(`阅读时间戳 ${r.timestamps} 本`);
+      if (r.clipboard) parts.push('剪贴板已清空');
+      alert(`清理完成：${parts.length > 0 ? parts.join('、') : '没有需要清理的数据'}`);
+    } catch (err) {
+      alert(`清理失败：${err instanceof Error ? err.message : '未知错误'}`);
+    } finally {
+      setPrivacyBusy(false);
     }
   };
 
@@ -330,6 +376,52 @@ export function Settings() {
       </section>
 
       <section className="settings-section">
+        <h2>TXT 目录解析</h2>
+        <p className="section-desc">
+          决定 TXT 书籍如何识别章节标题。改动对之后导入的书生效；已导入的书可在书籍详情页重新解析。
+        </p>
+        <div className="form-row">
+          <label>解析方式</label>
+          <select
+            value={settings.txtTocMode}
+            onChange={e => handleChange('txtTocMode', e.target.value)}
+          >
+            <option value="default">默认（内置规则自动择优）</option>
+            <option value="keyword">关键字</option>
+            <option value="regex">正则表达式</option>
+          </select>
+        </div>
+
+        {settings.txtTocMode === 'keyword' && (
+          <>
+            <div className="form-row">
+              <label>关键字</label>
+              <input
+                value={settings.txtTocKeyword}
+                onChange={e => handleChange('txtTocKeyword', e.target.value)}
+                placeholder="章|节|卷　（多个用 | 或换行分隔）"
+              />
+            </div>
+            <p className="section-desc">行首命中任一关键字的行视为章节标题，标题长度不超过 30 字。</p>
+          </>
+        )}
+
+        {settings.txtTocMode === 'regex' && (
+          <>
+            <div className="form-row">
+              <label>正则表达式</label>
+              <input
+                value={settings.txtTocRegex}
+                onChange={e => handleChange('txtTocRegex', e.target.value)}
+                placeholder="^第[0-9]+章.*$"
+              />
+            </div>
+            <p className="section-desc">按多行模式匹配，命中位置即为章节起点；表达式非法时自动回退到默认方式。</p>
+          </>
+        )}
+      </section>
+
+      <section className="settings-section">
         <h2>AI 设置</h2>
         <p className="section-desc">配置本地 Ollama 或其他 AI 服务用于阅读辅助</p>
         <div className="form-row">
@@ -403,6 +495,54 @@ export function Settings() {
             ))}
           </div>
         )}
+      </section>
+
+      <section className="settings-section">
+        <h2>隐私清理（纯本地）</h2>
+        <p className="section-desc">
+          清除本机留下的使用痕迹。不涉及书籍文件、笔记与书签本身。
+        </p>
+
+        <div className="privacy-opts">
+          {([
+            ['positions', '阅读位置记录', '正常退出/异常退出自动留下的断点（手动标记的保留）'],
+            ['chapterCache', '在线章节缓存', '在线书源抓取的正文缓存，需要时可重新抓取'],
+            ['timestamps', '阅读时间戳', '抹掉「什么时候读过」，阅读进度不受影响'],
+            ['clipboard', '剪贴板', '清空系统剪贴板中的内容'],
+          ] as [keyof typeof privacyOpts, string, string][]).map(([key, label, hint]) => (
+            <label key={key} className="checkbox-row" title={hint}>
+              <input
+                type="checkbox"
+                checked={privacyOpts[key]}
+                onChange={e => setPrivacyOpts(p => ({ ...p, [key]: e.target.checked }))}
+              />
+              <span>
+                {label}
+                <em className="privacy-hint">{hint}</em>
+              </span>
+            </label>
+          ))}
+        </div>
+
+        <div className="form-actions" style={{ justifyContent: 'flex-start', marginTop: 16 }}>
+          <button className="btn-secondary" onClick={handlePrivacyClear} disabled={privacyBusy}>
+            {privacyBusy ? '清理中...' : '立即清理'}
+          </button>
+        </div>
+
+        <div className="form-row" style={{ marginTop: 18, marginBottom: 0 }}>
+          <label className="checkbox-row">
+            <input
+              type="checkbox"
+              checked={settings.privacyAutoClear}
+              onChange={e => handleChange('privacyAutoClear', e.target.checked)}
+            />
+            <span>
+              退出软件时自动清理
+              <em className="privacy-hint">仅清章节缓存与剪贴板；笔记、书签、进度一律保留</em>
+            </span>
+          </label>
+        </div>
       </section>
 
       <section className="settings-section">

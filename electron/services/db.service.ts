@@ -200,6 +200,10 @@ export class DatabaseService {
       `ALTER TABLE books ADD COLUMN locked INTEGER DEFAULT 0`,
       // 笔记标签（逗号分隔存储，无需额外建表）
       `ALTER TABLE notes ADD COLUMN tags TEXT DEFAULT ''`,
+      // 本书指定的 TXT 目录规则名，空串表示自动择优
+      `ALTER TABLE books ADD COLUMN toc_rule TEXT DEFAULT ''`,
+      // 目录来源：auto 自动解析 / manual 用户手动编辑
+      `ALTER TABLE books ADD COLUMN toc_source TEXT DEFAULT ''`,
     ]) {
       try {
         this.db.run(ddl);
@@ -319,8 +323,28 @@ export class DatabaseService {
     return rows.map(r => r.category as string);
   }
 
-  setBookToc(id: number, tocJson: string) {
-    this.run('UPDATE books SET toc = ? WHERE id = ?', [tocJson, id]);
+  setBookToc(id: number, tocJson: string, source: 'auto' | 'manual' = 'auto') {
+    this.run('UPDATE books SET toc = ?, toc_source = ? WHERE id = ?', [tocJson, source, id]);
+  }
+
+  /** 目录来源：auto 自动解析 / manual 用户手动编辑；空串表示尚未解析 */
+  getBookTocSource(id: number): string {
+    const row = this.get('SELECT toc_source FROM books WHERE id = ?', [id]) as
+      | { toc_source?: string }
+      | undefined;
+    return row?.toc_source ?? '';
+  }
+
+  /** 读取本书指定的目录规则名，空串表示自动择优 */
+  getBookTocRule(id: number): string {
+    const row = this.get('SELECT toc_rule FROM books WHERE id = ?', [id]) as
+      | { toc_rule?: string }
+      | undefined;
+    return row?.toc_rule ?? '';
+  }
+
+  setBookTocRule(id: number, ruleName: string) {
+    this.run('UPDATE books SET toc_rule = ? WHERE id = ?', [ruleName, id]);
   }
 
   setBookLocations(id: number, locationsJson: string) {
@@ -683,6 +707,37 @@ export class DatabaseService {
         [bookId, src, bookId, src, keepAuto],
       );
     }
+  }
+
+  // ============ 隐私清理 ============
+
+  /**
+   * 清理自动记录的阅读位置（正常退出/异常退出留下的），
+   * 手动标记的位置属于用户主动保存，一律保留。
+   * 返回清理条数。
+   */
+  clearAutoPositions(): number {
+    const row = this.get(
+      "SELECT COUNT(*) AS c FROM reading_positions WHERE source != 'manual'",
+    ) as { c?: number } | undefined;
+    this.run("DELETE FROM reading_positions WHERE source != 'manual'");
+    return Number(row?.c ?? 0);
+  }
+
+  /** 清空在线书源章节缓存：属于临时数据，需要时可重新抓取。返回清理条数。 */
+  clearChapterCache(): number {
+    const row = this.get('SELECT COUNT(*) AS c FROM cached_chapters') as { c?: number } | undefined;
+    this.run('DELETE FROM cached_chapters');
+    return Number(row?.c ?? 0);
+  }
+
+  /** 抹掉「什么时候读过」的记录，保留阅读进度本身。返回影响的书籍数。 */
+  clearReadingTimestamps(): number {
+    const row = this.get('SELECT COUNT(*) AS c FROM books WHERE last_read_at IS NOT NULL') as
+      | { c?: number }
+      | undefined;
+    this.run('UPDATE books SET last_read_at = NULL');
+    return Number(row?.c ?? 0);
   }
 
   // ============ 增量备份支持 ============
