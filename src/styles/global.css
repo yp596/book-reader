@@ -740,11 +740,16 @@ body {
   font-size: 22px;
 }
 
+/* 固定 3 列：6 张卡恰好 2 行，避免 auto-fit 在中等宽度下退化成 4+2 */
 .stats-grid {
   display: grid;
-  grid-template-columns: repeat(auto-fit, minmax(190px, 1fr));
+  grid-template-columns: repeat(3, 1fr);
   gap: 20px;
   margin-bottom: 36px;
+}
+
+@media (max-width: 1000px) {
+  .stats-grid { grid-template-columns: repeat(2, 1fr); }
 }
 
 .stats-card {
@@ -1196,4 +1201,54 @@ button:focus-visible, input:focus-visible, select:focus-visible, textarea:focus-
 .settings h1,
 .statistics h1 {
   letter-spacing: -0.6px;
+}
+
+/* ============ 表单视觉修正 ============ */
+
+/* 输入框不再拉伸满屏（宽窗口下表单更聚拢） */
+.settings .form-row input:not([type="range"]),
+.settings .form-row select {
+  max-width: 420px;
+}
+
+/* 滑块：覆盖通用 input 样式，避免原生白底与深色主题冲突 */
+.form-row input[type="range"] {
+  -webkit-appearance: none;
+  appearance: none;
+  width: 100%;
+  max-width: 420px;
+  height: 6px;
+  padding: 0;
+  border: none;
+  border-radius: 3px;
+  background: var(--bg-input);
+  box-shadow: inset 0 0 0 1px var(--border);
+  cursor: pointer;
+}
+
+.form-row input[type="range"]::-webkit-slider-thumb {
+  -webkit-appearance: none;
+  appearance: none;
+  width: 18px;
+  height: 18px;
+  border-radius: 50%;
+  background: var(--gradient);
+  border: 2px solid var(--bg-card);
+  box-shadow: 0 2px 8px var(--accent-glow);
+  transition: var(--transition);
+}
+
+.form-row input[type="range"]::-webkit-slider-thumb:hover {
+  transform: scale(1.15);
+  box-shadow: 0 0 0 6px var(--accent-glow);
+}
+
+.form-row input[type="range"]:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 4px;
+}
+
+/* 数字输入框去掉原生上下箭头占位（视觉更干净） */
+.settings .form-row input[type="number"]::-webkit-inner-spin-button {
+  opacity: 0.35;
 }
