@@ -8,13 +8,14 @@ interface BookListProps {
   onSelectBook: (book: Book) => void;
   onShowDetail: (book: Book) => void;
   onRefresh: () => void;
+  onImport: () => void;
 }
 
 type ViewMode = 'grid' | 'list';
 type SortBy = 'recent' | 'title' | 'author';
 type Filter = 'all' | 'reading' | 'finished' | 'favorite';
 
-export function BookList({ books, searchQuery, onSelectBook, onShowDetail, onRefresh }: BookListProps) {
+export function BookList({ books, searchQuery, onSelectBook, onShowDetail, onRefresh, onImport }: BookListProps) {
   const [viewMode, setViewMode] = useState<ViewMode>('grid');
   const [sortBy, setSortBy] = useState<SortBy>('recent');
   const [filter, setFilter] = useState<Filter>('all');
@@ -277,7 +278,10 @@ export function BookList({ books, searchQuery, onSelectBook, onShowDetail, onRef
         <div className="empty-state">
           <div className="empty-icon">📚</div>
           <h2>书架空空如也</h2>
-          <p>点击「导入书籍」或直接拖入 EPUB、TXT、PDF、DOCX 文件</p>
+          <p>支持 EPUB、TXT、PDF、DOCX，可直接拖入窗口</p>
+          <button className="btn-primary empty-cta" onClick={onImport}>
+            ＋ 导入第一本书
+          </button>
         </div>
       ) : viewMode === 'grid' ? (
         <div className="book-grid">

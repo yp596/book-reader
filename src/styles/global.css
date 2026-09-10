@@ -31,11 +31,28 @@
 * { margin: 0; padding: 0; box-sizing: border-box; }
 
 body {
-  font-family: -apple-system, BlinkMacSystemFont, 'SF Pro Display', 'Segoe UI', Roboto, 'Noto Sans SC', sans-serif;
+  font-family: -apple-system, BlinkMacSystemFont, 'SF Pro Display', 'Segoe UI', 'Microsoft YaHei',
+    'PingFang SC', 'Noto Sans SC', Roboto, sans-serif,
+    'Apple Color Emoji', 'Segoe UI Emoji', 'Segoe UI Symbol', 'Noto Color Emoji';
   background: var(--bg-primary);
   color: var(--text-primary);
   overflow: hidden;
   -webkit-font-smoothing: antialiased;
+  text-rendering: optimizeLegibility;
+}
+
+/* emoji 图标统一按彩色字形渲染，避免退化成方块 */
+.nav-icon,
+.empty-icon,
+.stats-icon,
+.app-title,
+.continue-icon,
+.source-header h1,
+.toc-panel h3,
+.reader-actions button,
+.import-btn .nav-icon {
+  font-family: 'Apple Color Emoji', 'Segoe UI Emoji', 'Noto Color Emoji', sans-serif;
+  font-variant-emoji: emoji;
 }
 
 ::selection {
@@ -725,7 +742,7 @@ body {
 
 .stats-grid {
   display: grid;
-  grid-template-columns: repeat(4, 1fr);
+  grid-template-columns: repeat(auto-fit, minmax(190px, 1fr));
   gap: 20px;
   margin-bottom: 36px;
 }
@@ -1135,4 +1152,48 @@ button:focus-visible, input:focus-visible, select:focus-visible, textarea:focus-
 /* 减少动态偏好兜底 */
 @media (prefers-reduced-motion: reduce) {
   *, *::before, *::after { animation-duration: 0.01ms !important; transition-duration: 0.01ms !important; }
+}
+
+/* 空状态引导按钮 */
+.empty-cta {
+  margin-top: 24px;
+  padding: 12px 32px;
+  font-size: 15px;
+}
+
+/* 侧栏图标列对齐 + emoji 视觉居中 */
+.nav-icon {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 17px;
+  line-height: 1;
+}
+
+/* 侧栏底部导入按钮强调 */
+.import-btn {
+  border-style: solid;
+  border-color: var(--border-light);
+  background: linear-gradient(180deg, rgba(108, 92, 231, 0.08), transparent);
+  color: var(--text-primary);
+  font-weight: 600;
+}
+.import-btn:hover {
+  background: var(--accent-glow);
+  box-shadow: 0 4px 16px rgba(108, 92, 231, 0.2);
+}
+
+/* 主内容区顶部渐隐，滚动时更有层次 */
+.main-content {
+  background:
+    radial-gradient(ellipse 80% 50% at 50% -10%, rgba(108, 92, 231, 0.06) 0%, transparent 70%),
+    var(--bg-primary);
+}
+
+/* 页标题字距与字重微调 */
+.book-list-header h1,
+.source-manager h1,
+.settings h1,
+.statistics h1 {
+  letter-spacing: -0.6px;
 }

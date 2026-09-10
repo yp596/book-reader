@@ -97,6 +97,7 @@ function App() {
             onSelectBook={handleSelectBook}
             onShowDetail={handleShowDetail}
             onRefresh={loadBooks}
+            onImport={handleOpenFile}
           />
         );
       case 'detail':
