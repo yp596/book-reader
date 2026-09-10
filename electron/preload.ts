@@ -77,6 +77,8 @@ contextBridge.exposeInMainWorld('electronAPI', {
   getNotes: (bookId: number) => ipcRenderer.invoke('notes:get', bookId),
   addNote: (note: any) => ipcRenderer.invoke('notes:add', note),
   deleteNote: (id: number) => ipcRenderer.invoke('notes:delete', id),
+  getAllNotes: () => ipcRenderer.invoke('notes:getAll'),
+  updateNoteTags: (id: number, tags: string) => ipcRenderer.invoke('notes:updateTags', id, tags),
 
   // Settings
   getSetting: (key: string) => ipcRenderer.invoke('settings:get', key),

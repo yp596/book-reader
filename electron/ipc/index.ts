@@ -485,6 +485,15 @@ export function registerIpcHandlers() {
     db.deleteNote(id);
   });
 
+  // 跨书籍笔记汇总（带书名）与标签更新
+  ipcMain.handle('notes:getAll', () => {
+    return db.getAllNotes();
+  });
+
+  ipcMain.handle('notes:updateTags', (_event, id: number, tags: string) => {
+    db.updateNoteTags(id, tags);
+  });
+
   // 笔记+书签导出 Markdown（不传 bookId 则导出全部书）
   ipcMain.handle('notes:export', async (event, bookId?: number) => {
     const books = (

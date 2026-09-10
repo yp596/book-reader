@@ -25,6 +25,8 @@ interface ReaderProps {
   onBack: () => void;
   /** 从详情页目录跳入的初始位置 */
   initialTarget?: TocEntry | null;
+  /** 从笔记跳入的原始位置串：EPUB 为 CFI，TXT 为 txt:页:起:止 */
+  initialPosition?: string | null;
 }
 
 type Panel = 'toc' | 'notes' | 'marks' | 'search' | 'ai' | 'positions' | null;
@@ -44,7 +46,7 @@ interface SearchHit {
   target: string | number;
 }
 
-export function Reader({ book, onBack, initialTarget }: ReaderProps) {
+export function Reader({ book, onBack, initialTarget, initialPosition }: ReaderProps) {
   const viewerRef = useRef<HTMLDivElement>(null);
   const bookRef = useRef<any>(null);
   const renditionRef = useRef<any>(null);
@@ -754,6 +756,13 @@ export function Reader({ book, onBack, initialTarget }: ReaderProps) {
     const savedCfi = savedPosRef.current?.cfi;
     if (initialTarget?.href) {
       await rendition.display(initialTarget.href);
+    } else if (initialPosition) {
+      // 笔记跳入：位置串即 CFI
+      try {
+        await rendition.display(initialPosition);
+      } catch {
+        await rendition.display();
+      }
     } else if (savedCfi) {
       try {
         await rendition.display(savedCfi);
@@ -898,6 +907,10 @@ export function Reader({ book, onBack, initialTarget }: ReaderProps) {
     setTxtPages(pages.length > 0 ? pages : ['（空文件）']);
     const total = pages.length || 1;
     const savedPage = savedPosRef.current?.page;
+    // 笔记跳入：TXT 的位置串形如 txt:页:起:止
+    const notePage = initialPosition?.startsWith('txt:')
+      ? Number(initialPosition.split(':')[1])
+      : null;
     // 目录跳转页码从 0 起，保存的页码同样从 0 起，clampPage 入参为 1 起
     // 章节行号优先：按字符数估算的页码会与实际分页产生累积偏差
     const startPage =
@@ -907,9 +920,11 @@ export function Reader({ book, onBack, initialTarget }: ReaderProps) {
           ? lineToPageIndex(pageStartLines, initialTarget.line)
           : initialTarget?.page != null
             ? clampPage(initialTarget.page + 1, total) - 1
-            : savedPage != null
-              ? clampPage(savedPage + 1, total) - 1
-              : 0;
+            : notePage != null && Number.isFinite(notePage)
+              ? clampPage(notePage + 1, total) - 1
+              : savedPage != null
+                ? clampPage(savedPage + 1, total) - 1
+                : 0;
     setPageIndex(startPage);
     setTotalPages(total);
   };

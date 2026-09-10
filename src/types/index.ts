@@ -110,7 +110,15 @@ export interface Note {
   position: string;
   selected_text?: string;
   note?: string;
+  /** 标签：逗号分隔存储 */
+  tags?: string;
   created_at: string;
+}
+
+/** 跨书籍笔记：附带书名，供汇总页展示与跳转 */
+export interface NoteWithBook extends Note {
+  book_title?: string;
+  book_type?: string;
 }
 
 export interface Chapter {
@@ -207,6 +215,8 @@ declare global {
       getNotes: (bookId: number) => Promise<Note[]>;
       addNote: (note: Omit<Note, 'id' | 'created_at'>) => Promise<any>;
       deleteNote: (id: number) => Promise<void>;
+      getAllNotes: () => Promise<NoteWithBook[]>;
+      updateNoteTags: (id: number, tags: string) => Promise<void>;
       getSetting: (key: string) => Promise<string | null>;
       setSetting: (key: string, value: string) => Promise<void>;
       exportNotes: (bookId?: number) => Promise<string | null>;

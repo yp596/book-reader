@@ -198,6 +198,8 @@ export class DatabaseService {
       `ALTER TABLE words ADD COLUMN updated_at DATETIME`,
       // 书籍锁定：防误删、防误改（仅保留阅读权限）
       `ALTER TABLE books ADD COLUMN locked INTEGER DEFAULT 0`,
+      // 笔记标签（逗号分隔存储，无需额外建表）
+      `ALTER TABLE notes ADD COLUMN tags TEXT DEFAULT ''`,
     ]) {
       try {
         this.db.run(ddl);
@@ -391,15 +393,34 @@ export class DatabaseService {
 
   // ============ Notes ============
 
+  /** 跨书籍笔记：带书名，供「我的笔记」页汇总与筛选 */
+  getAllNotes() {
+    return this.all(`
+      SELECT n.*, b.title AS book_title, b.file_type AS book_type,
+             COALESCE(n.tags, '') AS tags
+      FROM notes n LEFT JOIN books b ON b.id = n.book_id
+      ORDER BY n.created_at DESC
+    `);
+  }
+
+  /** 更新笔记标签（调用方传入已归一化的逗号分隔串） */
+  updateNoteTags(id: number, tags: string) {
+    const row = this.get('SELECT book_id FROM notes WHERE id = ?', [id]) as
+      | { book_id: number }
+      | undefined;
+    if (row) this.assertUnlocked(row.book_id, '修改笔记标签');
+    this.run('UPDATE notes SET tags = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?', [tags, id]);
+  }
+
   getNotesByBookId(bookId: number) {
     return this.all('SELECT * FROM notes WHERE book_id = ? ORDER BY created_at DESC', [bookId]);
   }
 
-  insertNote(note: { book_id: number; position: string; selected_text?: string; note?: string }) {
+  insertNote(note: { book_id: number; position: string; selected_text?: string; note?: string; tags?: string }) {
     this.assertUnlocked(note.book_id, '新增笔记');
     this.run(
-      'INSERT INTO notes (book_id, position, selected_text, note) VALUES (?, ?, ?, ?)',
-      [note.book_id, note.position, note.selected_text ?? null, note.note ?? null],
+      'INSERT INTO notes (book_id, position, selected_text, note, tags) VALUES (?, ?, ?, ?, ?)',
+      [note.book_id, note.position, note.selected_text ?? null, note.note ?? null, note.tags ?? ''],
     );
     const row = this.get('SELECT last_insert_rowid() as id');
     return row?.id;

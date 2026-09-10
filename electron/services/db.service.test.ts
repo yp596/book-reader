@@ -169,3 +169,52 @@ describe('多进度断点', () => {
     expect(db.getReadingPositions(tmpId)).toHaveLength(0);
   });
 });
+
+describe('跨书籍笔记与标签', () => {
+  let b1: number;
+  let b2: number;
+
+  beforeAll(() => {
+    b1 = db.insertBook({ title: '笔记书甲', file_path: '/tmp/n1.epub', file_type: 'epub' });
+    b2 = db.insertBook({ title: '笔记书乙', file_path: '/tmp/n2.epub', file_type: 'epub' });
+    db.insertNote({ book_id: b1, position: 'p1', note: '甲的笔记', tags: '小说,科幻' });
+    db.insertNote({ book_id: b2, position: 'p2', note: '乙的笔记', tags: '历史' });
+    db.insertNote({ book_id: b2, position: 'p3', note: '乙的另一条' });
+  });
+
+  it('getAllNotes 跨书汇总并带书名', () => {
+    const all = db.getAllNotes();
+    const mine = all.filter((n: any) => n.book_title === '笔记书甲' || n.book_title === '笔记书乙');
+    expect(mine).toHaveLength(3);
+    const jia = mine.find((n: any) => n.note === '甲的笔记');
+    expect(jia.book_title).toBe('笔记书甲');
+    expect(jia.tags).toBe('小说,科幻');
+  });
+
+  it('未设标签的笔记 tags 为空串（不是 null）', () => {
+    const all = db.getAllNotes();
+    const noTag = all.find((n: any) => n.note === '乙的另一条');
+    expect(noTag.tags).toBe('');
+  });
+
+  it('updateNoteTags 更新标签', () => {
+    const all = db.getAllNotes();
+    const target = all.find((n: any) => n.note === '乙的另一条');
+    db.updateNoteTags(target.id, '历史,待整理');
+    const after = db.getAllNotes().find((n: any) => n.id === target.id);
+    expect(after.tags).toBe('历史,待整理');
+  });
+
+  it('锁定的书籍拒绝改标签', () => {
+    const all = db.getAllNotes();
+    const target = all.find((n: any) => n.book_title === '笔记书甲');
+    db.toggleBookLock(b1); // 锁定
+    expect(() => db.updateNoteTags(target.id, 'x')).toThrow(/已锁定/);
+    db.toggleBookLock(b1); // 解锁
+  });
+
+  it('按书名筛选可用', () => {
+    const all = db.getAllNotes();
+    expect(all.filter((n: any) => n.book_title === '笔记书乙')).toHaveLength(2);
+  });
+});

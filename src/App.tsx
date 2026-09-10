@@ -7,11 +7,12 @@ import { Sidebar } from './components/Sidebar';
 import { SourceManager } from './components/SourceManager';
 import { SemanticSearch } from './components/SemanticSearch';
 import { Vocab } from './components/Vocab';
+import { Notes } from './components/Notes';
 import { Models } from './components/Models';
 import { Settings } from './components/Settings';
 import { Statistics } from './components/Statistics';
 
-type View = 'library' | 'detail' | 'reader' | 'sources' | 'rag' | 'vocab' | 'models' | 'settings' | 'stats';
+type View = 'library' | 'detail' | 'reader' | 'sources' | 'rag' | 'vocab' | 'notes' | 'models' | 'settings' | 'stats';
 
 // 安全获取 electronAPI，preload 未就绪时返回空实现
 const api = window.electronAPI ?? {
@@ -42,6 +43,8 @@ function App() {
   const [currentBook, setCurrentBook] = useState<Book | null>(null);
   const [detailBook, setDetailBook] = useState<Book | null>(null);
   const [readerTarget, setReaderTarget] = useState<TocEntry | null>(null);
+  /** 从笔记跳入时的原始位置串（EPUB 为 CFI，TXT 为 txt:页:起:止） */
+  const [readerPosition, setReaderPosition] = useState<string | null>(null);
   const [view, setView] = useState<View>('library');
   const [searchQuery, setSearchQuery] = useState('');
 
@@ -65,6 +68,19 @@ function App() {
     setView('reader');
   };
 
+  /** 笔记 → 原文：打开对应书籍并定位到批注位置 */
+  const handleOpenNote = async (bookId: number, position: string) => {
+    const api = window.electronAPI;
+    if (!api) return;
+    const b = (await api.getBookById(bookId)) as Book;
+    if (!b) return;
+    setReaderTarget(null);
+    setReaderPosition(position);
+    setCurrentBook(b);
+    setDetailBook(null);
+    setView('reader');
+  };
+
   const handleShowDetail = (book: Book) => {
     setDetailBook(book);
     setView('detail');
@@ -73,6 +89,7 @@ function App() {
   const handleBack = () => {
     setCurrentBook(null);
     setReaderTarget(null);
+    setReaderPosition(null);
     setDetailBook(null);
     setView('library');
     loadBooks();
@@ -110,7 +127,12 @@ function App() {
         ) : null;
       case 'reader':
         return currentBook ? (
-          <Reader book={currentBook} initialTarget={readerTarget} onBack={handleBack} />
+          <Reader
+            book={currentBook}
+            initialTarget={readerTarget}
+            initialPosition={readerPosition}
+            onBack={handleBack}
+          />
         ) : null;
       case 'sources':
         return <SourceManager />;
@@ -118,6 +140,8 @@ function App() {
         return <SemanticSearch books={books} onOpenBook={handleSelectBook} />;
       case 'vocab':
         return <Vocab />;
+      case 'notes':
+        return <Notes onOpenNote={handleOpenNote} />;
       case 'models':
         return <Models />;
       case 'settings':
