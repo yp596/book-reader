@@ -20,6 +20,10 @@ describe('parseBookPrefs', () => {
       pdfScale: 2,
       comicSpread: true,
       comicRtl: true,
+      bgColor: '#1a1a2e',
+      textColor: '#eaeaea',
+      pagePadding: 72,
+      paraSpacing: 1.2,
     };
     expect(parseBookPrefs(JSON.stringify(prefs))).toEqual(prefs);
   });
@@ -87,5 +91,32 @@ describe('bookPrefsKey', () => {
   it('按书 id 隔离', () => {
     expect(bookPrefsKey(1)).toBe('bookPrefs:1');
     expect(bookPrefsKey(2)).not.toBe(bookPrefsKey(1));
+  });
+});
+
+describe('排版自定义字段校验', () => {
+  it('合法十六进制颜色保留（3 位与 6 位都接受）', () => {
+    expect(parseBookPrefs(JSON.stringify({ bgColor: '#fff' }))).toEqual({ bgColor: '#fff' });
+    expect(parseBookPrefs(JSON.stringify({ textColor: '#1A1A2E' }))).toEqual({ textColor: '#1A1A2E' });
+  });
+
+  it('非法颜色一律丢弃（脏值会把阅读区搞花，宁可回退主题）', () => {
+    expect(parseBookPrefs(JSON.stringify({ bgColor: 'red' }))).toEqual({});
+    expect(parseBookPrefs(JSON.stringify({ bgColor: 'rgb(1,2,3)' }))).toEqual({});
+    expect(parseBookPrefs(JSON.stringify({ bgColor: '#12' }))).toEqual({});
+    expect(parseBookPrefs(JSON.stringify({ bgColor: 'url(x)' }))).toEqual({});
+    expect(parseBookPrefs(JSON.stringify({ bgColor: '' }))).toEqual({});
+  });
+
+  it('页面边距钳制在 0-200', () => {
+    expect(parseBookPrefs(JSON.stringify({ pagePadding: 80 }))).toEqual({ pagePadding: 80 });
+    expect(parseBookPrefs(JSON.stringify({ pagePadding: -5 }))).toEqual({});
+    expect(parseBookPrefs(JSON.stringify({ pagePadding: 999 }))).toEqual({});
+  });
+
+  it('段落间距钳制在 0-3', () => {
+    expect(parseBookPrefs(JSON.stringify({ paraSpacing: 0.8 }))).toEqual({ paraSpacing: 0.8 });
+    expect(parseBookPrefs(JSON.stringify({ paraSpacing: 0 }))).toEqual({ paraSpacing: 0 });
+    expect(parseBookPrefs(JSON.stringify({ paraSpacing: 9 }))).toEqual({});
   });
 });

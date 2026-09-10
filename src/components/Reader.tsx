@@ -30,7 +30,7 @@ interface ReaderProps {
   initialPosition?: string | null;
 }
 
-type Panel = 'toc' | 'notes' | 'marks' | 'search' | 'ai' | 'positions' | null;
+type Panel = 'toc' | 'notes' | 'marks' | 'search' | 'ai' | 'positions' | 'typo' | null;
 
 interface SelPopup {
   x: number;
@@ -154,6 +154,9 @@ export function Reader({ book, onBack, initialTarget, initialPosition }: ReaderP
   const [reflowPages, setReflowPages] = useState<string[]>([]);
   const [reflowPage, setReflowPage] = useState(0);
   const [reflowBusy, setReflowBusy] = useState(false);
+  /** 排版自定义：背景色 / 文字色 / 页边距 / 段间距 */
+  const [typo, setTypo] = useState({ bgColor: '', textColor: '', pagePadding: 56, paraSpacing: 0 });
+  const typoRef = useRef(typo);
   /** 显示/隐藏全部批注（只影响渲染，不删数据） */
   const [hideMarks, setHideMarks] = useState(false);
   /** 全局强制统一字体：压过电子书自带的奇葩字体 */
@@ -730,6 +733,14 @@ export function Reader({ book, onBack, initialTarget, initialPosition }: ReaderP
       setDualColumn(merged.dualColumn);
       setFlowMode(merged.flowMode);
       setPdfScale(merged.pdfScale);
+      const typoNext = {
+        bgColor: merged.bgColor,
+        textColor: merged.textColor,
+        pagePadding: merged.pagePadding,
+        paraSpacing: merged.paraSpacing,
+      };
+      typoRef.current = typoNext;
+      setTypo(typoNext);
       setComicSpread(merged.comicSpread);
       setComicRtl(merged.comicRtl);
       comicRtlRef.current = merged.comicRtl;
@@ -1416,21 +1427,30 @@ export function Reader({ book, onBack, initialTarget, initialPosition }: ReaderP
   // ---------- 版式 / 主题 ----------
 
   const applyTheme = (rendition: any) => {
-    const themes: Record<string, string> = {
-      dark: 'background: #1a1a2e; color: #eaeaea;',
-      light: 'background: #ffffff; color: #333333;',
-      sepia: 'background: #f4ecd8; color: #5b4636;',
+    const themes: Record<string, { bg: string; fg: string }> = {
+      dark: { bg: '#1a1a2e', fg: '#eaeaea' },
+      light: { bg: '#ffffff', fg: '#333333' },
+      sepia: { bg: '#f4ecd8', fg: '#5b4636' },
     };
     const { theme, fontSize, lineHeight } = cfgRef.current;
     const stack = fontStackOf(fontKeyRef.current);
     const force = forceFontRef.current;
+    const t = typoRef.current;
+    // 自定义颜色优先于主题预设；留空则跟随主题
+    const bg = t.bgColor || themes[theme].bg;
+    const fg = t.textColor || themes[theme].fg;
     rendition.themes.default({
       'body':
-        themes[theme] +
+        ` background: ${bg} !important; color: ${fg} !important;` +
         ` line-height: ${lineHeight} !important;` +
         (stack ? ` font-family: ${stack}${force ? ' !important' : ''};` : ''),
       'p, div, span': { 'font-size': `${fontSize}px !important` },
     });
+    if (t.paraSpacing > 0) {
+      rendition.themes.default({
+        'p': { 'margin-bottom': `${t.paraSpacing}em !important` },
+      });
+    }
     // 强制统一：连元素级 font-family 一并压过，解决异体字/缺字乱码
     if (force && stack) {
       rendition.themes.default({
@@ -1478,6 +1498,15 @@ export function Reader({ book, onBack, initialTarget, initialPosition }: ReaderP
   const cycleTheme = () => {    const order: ThemeName[] = ['dark', 'light', 'sepia'];
     const idx = order.indexOf(cfgRef.current.theme as ThemeName);
     changeTheme(order[(idx + 1) % order.length]);
+  };
+
+  /** 改排版并即时生效（同时写回本书偏好） */
+  const applyTypo = (patch: Partial<typeof typo>) => {
+    const next = { ...typoRef.current, ...patch };
+    typoRef.current = next;
+    setTypo(next);
+    queueSaveBookPrefs(patch);
+    if (renditionRef.current) applyTheme(renditionRef.current);
   };
 
   const changeTheme = (theme: 'dark' | 'light' | 'sepia') => {
@@ -2084,6 +2113,13 @@ export function Reader({ book, onBack, initialTarget, initialPosition }: ReaderP
               </button>
             </>
           )}
+          <button
+            onClick={() => togglePanel('typo')}
+            className={panel === 'typo' ? 'active' : ''}
+            title="排版自定义"
+          >
+            Aa
+          </button>
           <button onClick={() => togglePanel('notes')} className={panel === 'notes' ? 'active' : ''} title="笔记">
             📝{notes.length > 0 ? ` ${notes.length}` : ''}
           </button>
@@ -2255,6 +2291,69 @@ export function Reader({ book, onBack, initialTarget, initialPosition }: ReaderP
                 {ch.label}
               </div>
             ))}
+          </div>
+        )}
+
+        {panel === 'typo' && (
+          <div className="toc-panel">
+            <h3>排版自定义</h3>
+
+            <div className="form-row">
+              <label>背景色</label>
+              <div className="color-row">
+                <input
+                  type="color"
+                  value={typo.bgColor || '#1a1a2e'}
+                  onChange={e => applyTypo({ bgColor: e.target.value })}
+                />
+                {typo.bgColor && (
+                  <button className="link-btn" onClick={() => applyTypo({ bgColor: '' })}>跟随主题</button>
+                )}
+              </div>
+            </div>
+
+            <div className="form-row">
+              <label>文字色</label>
+              <div className="color-row">
+                <input
+                  type="color"
+                  value={typo.textColor || '#eaeaea'}
+                  onChange={e => applyTypo({ textColor: e.target.value })}
+                />
+                {typo.textColor && (
+                  <button className="link-btn" onClick={() => applyTypo({ textColor: '' })}>跟随主题</button>
+                )}
+              </div>
+            </div>
+
+            <div className="form-row">
+              <label>页边距 {typo.pagePadding} px</label>
+              <input
+                type="range"
+                min={0}
+                max={200}
+                step={4}
+                value={typo.pagePadding}
+                onChange={e => applyTypo({ pagePadding: Number(e.target.value) })}
+              />
+            </div>
+
+            <div className="form-row">
+              <label>段落间距 {typo.paraSpacing.toFixed(1)} 字</label>
+              <input
+                type="range"
+                min={0}
+                max={3}
+                step={0.1}
+                value={typo.paraSpacing}
+                onChange={e => applyTypo({ paraSpacing: Number(e.target.value) })}
+              />
+            </div>
+
+            <p className="section-desc" style={{ marginBottom: 0 }}>
+              段落间距对 EPUB 生效；TXT 以空行分段，不受此项影响。
+              设置按书记忆，下次打开自动还原。
+            </p>
           </div>
         )}
 
@@ -2496,6 +2595,10 @@ export function Reader({ book, onBack, initialTarget, initialPosition }: ReaderP
                 fontSize: settings.fontSize,
                 lineHeight: settings.lineHeight,
                 fontFamily: fontStackOf(fontKey) || undefined,
+                background: typo.bgColor || undefined,
+                color: typo.textColor || undefined,
+                paddingLeft: typo.pagePadding,
+                paddingRight: typo.pagePadding,
                 columnCount: dualColumn ? 2 : undefined,
                 columnGap: dualColumn ? '48px' : undefined,
               } as CSSProperties}

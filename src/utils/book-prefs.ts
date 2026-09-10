@@ -16,6 +16,14 @@ export interface ReaderPrefs {
   comicSpread: boolean;
   /** 漫画：右向左翻页（日漫阅读方向） */
   comicRtl: boolean;
+  /** 自定义背景色（空串=跟随主题） */
+  bgColor: string;
+  /** 自定义文字色（空串=跟随主题） */
+  textColor: string;
+  /** 页面左右边距（像素） */
+  pagePadding: number;
+  /** 段落间距（em） */
+  paraSpacing: number;
 }
 
 export const DEFAULT_READER_PREFS: ReaderPrefs = {
@@ -28,6 +36,10 @@ export const DEFAULT_READER_PREFS: ReaderPrefs = {
   pdfScale: 1.5,
   comicSpread: false,
   comicRtl: false,
+  bgColor: '',
+  textColor: '',
+  pagePadding: 56,
+  paraSpacing: 0,
 };
 
 /** 每本书的偏好存这个 key 下 */
@@ -38,6 +50,10 @@ const isTheme = (v: unknown): v is ThemeName =>
 
 const numIn = (v: unknown, min: number, max: number): v is number =>
   typeof v === 'number' && Number.isFinite(v) && v >= min && v <= max;
+
+/** 颜色白名单：只接受 3 位或 6 位十六进制 */
+export const isHexColor = (v: unknown): v is string =>
+  typeof v === 'string' && /^#([0-9a-f]{3}|[0-9a-f]{6})$/i.test(v);
 
 /**
  * 解析书籍专属偏好。坏数据 / 越界值一律丢弃，
@@ -63,6 +79,11 @@ export function parseBookPrefs(raw: string | null | undefined): Partial<ReaderPr
   if (numIn(parsed.pdfScale, 0.5, 3)) out.pdfScale = parsed.pdfScale;
   if (typeof parsed.comicSpread === 'boolean') out.comicSpread = parsed.comicSpread;
   if (typeof parsed.comicRtl === 'boolean') out.comicRtl = parsed.comicRtl;
+  // 颜色只接受 #rgb / #rrggbb：脏值会直接把阅读区搞花，宁可丢弃回退主题
+  if (isHexColor(parsed.bgColor)) out.bgColor = parsed.bgColor;
+  if (isHexColor(parsed.textColor)) out.textColor = parsed.textColor;
+  if (numIn(parsed.pagePadding, 0, 200)) out.pagePadding = parsed.pagePadding;
+  if (numIn(parsed.paraSpacing, 0, 3)) out.paraSpacing = parsed.paraSpacing;
   return out;
 }
 
