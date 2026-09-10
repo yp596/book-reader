@@ -20,6 +20,8 @@ contextBridge.exposeInMainWorld('electronAPI', {
     ipcRenderer.invoke('books:clearHistory'),
   toggleFullscreen: (): Promise<boolean> =>
     ipcRenderer.invoke('window:toggleFullscreen'),
+  setAlwaysOnTop: (flag: boolean): Promise<boolean> =>
+    ipcRenderer.invoke('window:setAlwaysOnTop', flag),
   setBookLocations: (id: number, locationsJson: string) =>
     ipcRenderer.invoke('books:setLocations', id, locationsJson),
   refreshBookMetadata: (id: number) =>
@@ -84,6 +86,13 @@ contextBridge.exposeInMainWorld('electronAPI', {
   getWeeklyStats: (days: number) => ipcRenderer.invoke('stats:weekly', days),
   syncBackup: () => ipcRenderer.invoke('sync:backup'),
   syncRestore: () => ipcRenderer.invoke('sync:restore'),
+
+  // 本地备份（纯离线）
+  exportBackup: (full?: boolean) => ipcRenderer.invoke('backup:export', full),
+  importBackup: () => ipcRenderer.invoke('backup:import'),
+  createSnapshot: () => ipcRenderer.invoke('backup:snapshot'),
+  listSnapshots: () => ipcRenderer.invoke('backup:snapshots'),
+  restoreSnapshot: (file: string) => ipcRenderer.invoke('backup:restoreSnapshot', file),
 
   // Vocab
   getAllWords: () => ipcRenderer.invoke('words:list'),

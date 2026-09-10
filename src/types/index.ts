@@ -144,6 +144,7 @@ declare global {
       revealBookFile: (id: number) => Promise<void>;
       clearReadingHistory: () => Promise<void>;
       toggleFullscreen: () => Promise<boolean>;
+      setAlwaysOnTop: (flag: boolean) => Promise<boolean>;
       setBookLocations: (id: number, locationsJson: string) => Promise<void>;
       refreshBookMetadata: (id: number) => Promise<{ title: string; author?: string }>;
       getAllSources: () => Promise<BookSource[]>;
@@ -193,6 +194,11 @@ declare global {
       deleteWord: (id: number) => Promise<void>;
       syncBackup: () => Promise<boolean>;
       syncRestore: () => Promise<number>;
+      exportBackup: (full?: boolean) => Promise<{ filePath: string; kind: string; count: number } | null>;
+      importBackup: () => Promise<{ restored: number; createdAt: string; kind: string } | null>;
+      createSnapshot: () => Promise<{ file: string; pruned: number }>;
+      listSnapshots: () => Promise<{ file: string; name: string; createdAt: string; sizeKB: number }[]>;
+      restoreSnapshot: (file: string) => Promise<{ restored: number; createdAt: string }>;
       aiSummarize: (text: string) => Promise<string>;
       aiExplain: (text: string, question: string) => Promise<string>;
       aiTranslate: (text: string) => Promise<string>;

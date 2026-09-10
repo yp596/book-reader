@@ -1,3 +1,12 @@
+/** 阅读主题：深色 / 浅色 / 护眼纸质 */
+export const THEMES = [
+  { key: 'dark', label: '深色' },
+  { key: 'light', label: '浅色' },
+  { key: 'sepia', label: '护眼' },
+] as const;
+
+export type ThemeName = (typeof THEMES)[number]['key'];
+
 /** 阅读字体选项 */
 export const FONT_OPTIONS = [
   { key: 'system', label: '系统默认', stack: '' },

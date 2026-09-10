@@ -179,6 +179,11 @@ export class DatabaseService {
       `ALTER TABLE books ADD COLUMN toc TEXT DEFAULT ''`,
       `ALTER TABLE bookmarks ADD COLUMN color TEXT DEFAULT 'yellow'`,
       `ALTER TABLE books ADD COLUMN locations TEXT DEFAULT ''`,
+      // 增量备份：变更时间戳（未更新过时回退 created_at）
+      `ALTER TABLE books ADD COLUMN updated_at DATETIME`,
+      `ALTER TABLE bookmarks ADD COLUMN updated_at DATETIME`,
+      `ALTER TABLE notes ADD COLUMN updated_at DATETIME`,
+      `ALTER TABLE words ADD COLUMN updated_at DATETIME`,
     ]) {
       try {
         this.db.run(ddl);
@@ -236,11 +241,11 @@ export class DatabaseService {
   }
 
   updateBookInfo(id: number, title: string, author: string | null) {
-    this.run('UPDATE books SET title = ?, author = ? WHERE id = ?', [title, author, id]);
+    this.run('UPDATE books SET title = ?, author = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?', [title, author, id]);
   }
 
   renameBook(id: number, title: string) {
-    this.run('UPDATE books SET title = ? WHERE id = ?', [title.trim(), id]);
+    this.run('UPDATE books SET title = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?', [title.trim(), id]);
   }
 
   toggleFavorite(id: number): number {
@@ -248,12 +253,12 @@ export class DatabaseService {
       | { favorite: number }
       | undefined;
     const next = row?.favorite ? 0 : 1;
-    this.run('UPDATE books SET favorite = ? WHERE id = ?', [next, id]);
+    this.run('UPDATE books SET favorite = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?', [next, id]);
     return next;
   }
 
   setCategory(id: number, category: string) {
-    this.run('UPDATE books SET category = ? WHERE id = ?', [category.trim(), id]);
+    this.run('UPDATE books SET category = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?', [category.trim(), id]);
   }
 
   getCategories(): string[] {
@@ -278,6 +283,8 @@ export class DatabaseService {
   /** 清除全部阅读记录（保留书籍） */
   clearReadingHistory() {
     this.run('UPDATE books SET progress = 0, last_read_at = NULL');
+    // 阅读位置存在 settings 表，一并清掉，否则重开仍会跳回上次位置
+    this.run("DELETE FROM settings WHERE key LIKE 'lastPos:%'");
   }
 
   // ============ Sources ============
@@ -394,7 +401,7 @@ export class DatabaseService {
   // ============ 书签改名 ============
 
   updateBookmarkText(id: number, text: string) {
-    this.run('UPDATE bookmarks SET text = ? WHERE id = ?', [text.trim(), id]);
+    this.run('UPDATE bookmarks SET text = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?', [text.trim(), id]);
   }
 
   // ============ 按日阅读时长（周统计用） ============
@@ -533,6 +540,31 @@ export class DatabaseService {
 
   setSetting(key: string, value: string) {
     this.run('INSERT OR REPLACE INTO settings (key, value) VALUES (?, ?)', [key, value]);
+  }
+
+  // ============ 增量备份支持 ============
+
+  /**
+   * 取指定表自 since 起有变更的行（since 为 null 时全量）。
+   * 表名来自内部白名单，不接受外部输入。
+   */
+  exportRowsSince(
+    table: 'books' | 'bookmarks' | 'notes' | 'words' | 'book_sources',
+    since: string | null,
+  ): any[] {
+    if (!since) return this.all(`SELECT * FROM ${table}`);
+    return this.all(
+      `SELECT * FROM ${table} WHERE COALESCE(updated_at, created_at) > ?`,
+      [since],
+    );
+  }
+
+  /** 各表最近一次变更时间（用于增量基线） */
+  latestChangeAt(table: 'books' | 'bookmarks' | 'notes' | 'words' | 'book_sources'): string | null {
+    const row = this.get(
+      `SELECT MAX(COALESCE(updated_at, created_at)) AS t FROM ${table}`,
+    ) as { t?: string } | undefined;
+    return row?.t ?? null;
   }
 
   // ============ Window ============

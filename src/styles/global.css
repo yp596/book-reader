@@ -1252,3 +1252,86 @@ button:focus-visible, input:focus-visible, select:focus-visible, textarea:focus-
 .settings .form-row input[type="number"]::-webkit-inner-spin-button {
   opacity: 0.35;
 }
+
+/* ============ 自动护眼设置 ============ */
+
+/* 复选行：与普通 form-row 的上下堆叠不同，标签与控件同行 */
+.checkbox-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  cursor: pointer;
+  font-size: 14px;
+  color: var(--text-primary);
+  font-weight: 500;
+}
+
+.checkbox-row input[type="checkbox"] {
+  width: 18px;
+  height: 18px;
+  accent-color: var(--accent);
+  cursor: pointer;
+  flex-shrink: 0;
+}
+
+.auto-theme-panel {
+  margin: 4px 0 8px;
+  padding: 18px 20px 14px;
+  border: 1px solid var(--border);
+  border-left: 3px solid var(--accent);
+  border-radius: var(--radius-sm);
+  background: rgba(108, 92, 231, 0.05);
+}
+
+.auto-theme-panel .form-row { margin-bottom: 14px; }
+
+.hour-range {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex-wrap: wrap;
+}
+
+.hour-range select {
+  padding: 10px 14px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  background: var(--bg-input);
+  color: var(--text-primary);
+  font-size: 14px;
+  cursor: pointer;
+  outline: none;
+}
+
+.range-sep {
+  font-size: 13px;
+  color: var(--text-muted);
+}
+
+/* ============ 本地备份 · 快照列表 ============ */
+.snapshot-list {
+  margin-top: 18px;
+  padding-top: 14px;
+  border-top: 1px solid var(--border);
+}
+
+.snapshot-title {
+  font-size: 12px;
+  color: var(--text-muted);
+  margin-bottom: 10px;
+  letter-spacing: 0.5px;
+}
+
+.snapshot-row {
+  display: flex;
+  align-items: center;
+  gap: 14px;
+  padding: 9px 0;
+  border-bottom: 1px dashed var(--border);
+  font-size: 13px;
+}
+
+.snapshot-row:last-child { border-bottom: none; }
+
+.snapshot-time { flex: 1; color: var(--text-secondary); }
+.snapshot-size { color: var(--text-muted); font-size: 12px; min-width: 60px; text-align: right; }

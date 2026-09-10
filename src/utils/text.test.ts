@@ -1,5 +1,13 @@
 import { describe, it, expect } from 'vitest';
-import { escapeHtml, excerptAround, formatMinutes, formatFileSize, clampPage } from './text';
+import {
+  escapeHtml,
+  excerptAround,
+  formatMinutes,
+  formatFileSize,
+  clampPage,
+  serializeSavedPosition,
+  parseSavedPosition,
+} from './text';
 
 describe('escapeHtml', () => {
   it('转义尖括号和 &', () => {
@@ -67,5 +75,32 @@ describe('clampPage', () => {
   it('非法输入回退第 1 页', () => {
     expect(clampPage(NaN, 10)).toBe(1);
     expect(clampPage(5, 0)).toBe(1);
+  });
+});
+
+describe('阅读位置序列化', () => {
+  it('CFI 往返一致', () => {
+    const pos = { cfi: 'epubcfi(/6/12!/4/2/2)' };
+    expect(parseSavedPosition(serializeSavedPosition(pos))).toEqual(pos);
+  });
+
+  it('页码往返一致', () => {
+    const pos = { page: 42 };
+    expect(parseSavedPosition(serializeSavedPosition(pos))).toEqual(pos);
+  });
+
+  it('空值与坏数据返回 null', () => {
+    expect(parseSavedPosition(null)).toBeNull();
+    expect(parseSavedPosition('')).toBeNull();
+    expect(parseSavedPosition('{ bad json')).toBeNull();
+    expect(parseSavedPosition('{}')).toBeNull();
+  });
+
+  it('丢弃非法字段', () => {
+    expect(parseSavedPosition(JSON.stringify({ cfi: '', page: -3 }))).toBeNull();
+    expect(parseSavedPosition(JSON.stringify({ cfi: 123, page: 1.5 }))).toBeNull();
+    expect(parseSavedPosition(JSON.stringify({ cfi: 'epubcfi(/6/4!)', page: -1 }))).toEqual({
+      cfi: 'epubcfi(/6/4!)',
+    });
   });
 });

@@ -3,8 +3,9 @@ import ePub from 'epubjs';
 import * as pdfjsLib from 'pdfjs-dist';
 import PdfWorkerUrl from 'pdfjs-dist/build/pdf.worker.min.mjs?url';
 import { Book, Bookmark, Note, TocEntry } from '../types';
-import { escapeHtml, excerptAround, clampPage } from '../utils/text';
-import { fontStackOf, highlightColorOf, HIGHLIGHT_COLORS } from '../utils/reader-options';
+import { escapeHtml, excerptAround, clampPage, parseSavedPosition, serializeSavedPosition, SavedPosition } from '../utils/text';
+import { fontStackOf, highlightColorOf, HIGHLIGHT_COLORS, type ThemeName } from '../utils/reader-options';
+import { resolveThemeByClock, type AutoThemeConfig } from '../utils/auto-theme';
 import { parseMindmap, MindNode } from '../utils/mindmap';
 import { MindmapView } from './Mindmap';
 
@@ -54,6 +55,17 @@ export function Reader({ book, onBack, initialTarget }: ReaderProps) {
     lineHeight: 1.8,
     theme: 'dark' as 'dark' | 'light' | 'sepia',
   });
+  /** 当前生效的阅读偏好，供 applyTheme 读取（避免异步读设置与首屏渲染的时序竞争） */
+  const cfgRef = useRef({ theme: 'dark' as 'dark' | 'light' | 'sepia', fontSize: 18, lineHeight: 1.8 });
+  /** 自动护眼配置（本次会话内有效） */
+  const autoThemeCfgRef = useRef<AutoThemeConfig | null>(null);
+  /** 用户本次阅读中手动改过主题：改过就不再被自动切换打扰 */
+  const themeUserOverrideRef = useRef(false);
+
+  // 上次阅读位置：savedPosRef 是打开时恢复用，lastPosRef 是本次阅读的最新位置
+  const savedPosRef = useRef<SavedPosition | null>(null);
+  const lastPosRef = useRef<SavedPosition | null>(null);
+  const savePosTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   // B 批：字体 / 双栏 / 自动翻页 / 检索词高亮
   const [fontKey, setFontKey] = useState('system');
   const fontKeyRef = useRef('system');
@@ -332,16 +344,54 @@ export function Reader({ book, onBack, initialTarget }: ReaderProps) {
         definition: aiAnswer.trim().slice(0, 2000),
         context: aiContext.slice(0, 500),
       });
-      alert('已加入生词本');
+      showToast('已加入生词本');
       setAiWord('');
     } catch (err) {
-      alert(err instanceof Error ? err.message : '保存失败');
+      showToast(err instanceof Error ? err.message : '保存失败');
     }
   };
 
   // 手机模式
   const [phoneMode, setPhoneMode] = useState(false);
   const [clock, setClock] = useState('');
+
+  // 阅读视图选项（会话级偏好，不写库）
+  const [view, setView] = useState({
+    pageShadow: true,
+    invert: false,
+    autoHideBar: false,
+    clickEdge: false,
+    edgeWidth: 10,
+    cursor: 'text' as 'text' | 'default',
+    alwaysOnTop: false,
+  });
+  const [showViewPanel, setShowViewPanel] = useState(false);
+  const [barVisible, setBarVisible] = useState(true);
+
+  // 轻量提示
+  const [toast, setToast] = useState('');
+  const toastTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+
+  const showToast = (message: string) => {
+    setToast(message);
+    if (toastTimerRef.current) clearTimeout(toastTimerRef.current);
+    toastTimerRef.current = setTimeout(() => setToast(''), 2000);
+  };
+
+  const updateView = (patch: Partial<typeof view>) => setView(v => ({ ...v, ...patch }));
+
+  /** 窗口置顶开关 */
+  const toggleAlwaysOnTop = async () => {
+    const api = window.electronAPI;
+    const next = !view.alwaysOnTop;
+    updateView({ alwaysOnTop: next });
+    try {
+      const actual = await api?.setAlwaysOnTop(next);
+      if (typeof actual === 'boolean') updateView({ alwaysOnTop: actual });
+    } catch {
+      showToast('当前环境不支持窗口置顶');
+    }
+  };
 
   // PDF 缩放 / 跳页 / 全屏 / 朗读变速
   const [pdfScale, setPdfScale] = useState(1.5);
@@ -352,25 +402,15 @@ export function Reader({ book, onBack, initialTarget }: ReaderProps) {
 
   useEffect(() => {
     readStartRef.current = Date.now();
-    // 载入朗读速度与字体偏好
-    window.electronAPI?.getSetting('ttsRate').then(v => {
-      const r = Number(v);
-      if (!Number.isNaN(r) && r >= 0.5 && r <= 2) setTtsRate(r);
-    });
-    window.electronAPI?.getSetting('fontFamily').then(v => {
-      if (v && fontStackOf(v)) {
-        fontKeyRef.current = v;
-        setFontKey(v);
-        // 首屏可能已按默认字体渲染，重新应用
-        if (renditionRef.current) {
-          applyTheme(renditionRef.current, 'dark', 18);
-        }
-      }
-    });
-    loadBook();
+    // 换书重置：本次会话的手动主题覆盖失效
+    themeUserOverrideRef.current = false;
+    // 先读设置与上次阅读位置，再加载书籍
+    initReader();
     return () => {
       // 离开阅读器时上报本次阅读时长
       aliveRef.current.alive = false;
+      // 落盘最后阅读位置（防抖可能还没触发）
+      flushPos();
       if (aiReqRef.current) {
         window.electronAPI?.aiAbort(aiReqRef.current);
         aiReqRef.current = null;
@@ -385,6 +425,198 @@ export function Reader({ book, onBack, initialTarget }: ReaderProps) {
       pdfDocRef.current = null;
     };
   }, [book.id]);
+
+  /**
+   * 自动护眼：长时间阅读时按时钟复查（默认每 5 分钟）。
+   * 用户手动改过主题则不再打扰；关闭开关时不生效。
+   */
+  useEffect(() => {
+    const timer = setInterval(() => {
+      const cfg = autoThemeCfgRef.current;
+      if (!cfg?.enabled || themeUserOverrideRef.current) return;
+      const want = resolveThemeByClock(new Date(), cfg);
+      if (want === cfgRef.current.theme) return;
+      cfgRef.current = { ...cfgRef.current, theme: want };
+      setSettings(s => ({ ...s, theme: want }));
+      if (renditionRef.current) applyTheme(renditionRef.current);
+    }, 5 * 60 * 1000);
+    return () => clearInterval(timer);
+  }, []);
+
+  // ---------- 阅读位置持久化 ----------
+
+  /** 立即落盘当前阅读位置（防抖收尾、离开阅读器时调用） */
+  const flushPos = () => {
+    if (savePosTimerRef.current) {
+      clearTimeout(savePosTimerRef.current);
+      savePosTimerRef.current = null;
+    }
+    const api = window.electronAPI;
+    if (!api || !lastPosRef.current) return;
+    api.setSetting(`lastPos:${book.id}`, serializeSavedPosition(lastPosRef.current)).catch(() => {
+      /* 写失败不影响阅读 */
+    });
+  };
+
+  /** 记录位置并延迟落盘，避免翻页/滚动时高频写库 */
+  const scheduleSavePos = (pos: SavedPosition) => {
+    lastPosRef.current = pos;
+    if (savePosTimerRef.current) clearTimeout(savePosTimerRef.current);
+    savePosTimerRef.current = setTimeout(flushPos, 800);
+  };
+
+  // ---------- 跳转历史（前进 / 后退） ----------
+
+  /** 当前位置（不落盘），用于入栈 */
+  const currentPosRef = useRef<SavedPosition | null>(null);
+  const histRef = useRef<{ stack: SavedPosition[]; idx: number }>({ stack: [], idx: -1 });
+  const [histState, setHistState] = useState({ canBack: false, canForward: false });
+
+  const syncHistState = () => {
+    const h = histRef.current;
+    setHistState({ canBack: h.idx > 0, canForward: h.idx < h.stack.length - 1 });
+  };
+
+  const samePos = (a: SavedPosition, b: SavedPosition) =>
+    a.cfi === b.cfi && a.page === b.page;
+
+  /** 跳转前调用：把当前位置压入历史栈 */
+  const pushHistory = () => {
+    const pos = currentPosRef.current;
+    if (!pos || (pos.cfi == null && pos.page == null)) return;
+    const h = histRef.current;
+    if (h.idx >= 0 && samePos(h.stack[h.idx], pos)) return;
+    h.stack = h.stack.slice(0, h.idx + 1);
+    h.stack.push(pos);
+    if (h.stack.length > 100) h.stack.shift();
+    h.idx = h.stack.length - 1;
+    syncHistState();
+  };
+
+  const applyPos = (pos: SavedPosition) => {
+    if (book.file_type === 'epub' && pos.cfi) renditionRef.current?.display(pos.cfi);
+    else if (pos.page != null) setPageIndex(pos.page);
+  };
+
+  const goBack = () => {
+    const h = histRef.current;
+    if (h.idx <= 0) return;
+    h.idx -= 1;
+    applyPos(h.stack[h.idx]);
+    syncHistState();
+  };
+
+  const goForward = () => {
+    const h = histRef.current;
+    if (h.idx >= h.stack.length - 1) return;
+    h.idx += 1;
+    applyPos(h.stack[h.idx]);
+    syncHistState();
+  };
+
+  // ---------- 首末页 / 指定位置 ----------
+
+  const goToFirst = () => {
+    pushHistory();
+    if (book.file_type === 'epub') renditionRef.current?.display();
+    else setPageIndex(0);
+  };
+
+  const goToLast = () => {
+    pushHistory();
+    if (book.file_type !== 'epub') {
+      if (totalPages > 0) setPageIndex(totalPages - 1);
+      return;
+    }
+    // EPUB：优先用位置索引换算文末 CFI，无索引则退到最后一条目录
+    let cfi = '';
+    if (locationsRef.current.length > 0) {
+      try {
+        cfi = bookRef.current?.locations?.cfiFromPercentage?.(0.999) || '';
+      } catch { /* 忽略，走目录回退 */ }
+    }
+    if (cfi) {
+      renditionRef.current?.display(cfi);
+      return;
+    }
+    const toc = chaptersRef.current;
+    if (toc.length > 0) renditionRef.current?.display(toc[toc.length - 1].href);
+  };
+
+  /** EPUB 按百分比跳转（EPUB 无全局页码，用阅读百分比定位） */
+  const jumpToPercent = (raw: string) => {
+    const percent = Math.min(100, Math.max(1, Number(raw)));
+    if (Number.isNaN(percent)) return;
+    setJumpInput('');
+    if (locationsRef.current.length === 0) {
+      showToast('位置索引生成中，请稍后再试');
+      return;
+    }
+    try {
+      const cfi = bookRef.current?.locations?.cfiFromPercentage?.(percent / 100);
+      if (cfi) {
+        pushHistory();
+        renditionRef.current?.display(cfi);
+      }
+    } catch {
+      showToast('跳转失败，请重试');
+    }
+  };
+
+  /** 读取阅读偏好与上次位置，然后加载书籍 */
+  const initReader = async () => {
+    lastPosRef.current = null;
+    const api = window.electronAPI;
+    if (!api) {
+      await loadBook();
+      return;
+    }
+    try {
+      const [tts, font, fontSize, lineHeight, theme, pos, autoOn, autoDayStart, autoNightStart, autoDay, autoNight] = await Promise.all([
+        api.getSetting('ttsRate'),
+        api.getSetting('fontFamily'),
+        api.getSetting('fontSize'),
+        api.getSetting('lineHeight'),
+        api.getSetting('theme'),
+        api.getSetting(`lastPos:${book.id}`),
+        api.getSetting('autoTheme'),
+        api.getSetting('autoThemeDayStart'),
+        api.getSetting('autoThemeNightStart'),
+        api.getSetting('autoThemeDay'),
+        api.getSetting('autoThemeNight'),
+      ]);
+      const rate = Number(tts);
+      if (!Number.isNaN(rate) && rate >= 0.5 && rate <= 2) setTtsRate(rate);
+      if (font && fontStackOf(font)) {
+        fontKeyRef.current = font;
+        setFontKey(font);
+      }
+      // 自动护眼配置（纯本地时钟判定）
+      const autoCfg: AutoThemeConfig = {
+        enabled: autoOn === 'true' || autoOn === '1',
+        dayStart: Number.isFinite(Number(autoDayStart)) ? Number(autoDayStart) : 7,
+        nightStart: Number.isFinite(Number(autoNightStart)) ? Number(autoNightStart) : 19,
+        dayTheme: (autoDay === 'sepia' || autoDay === 'dark' ? autoDay : 'light') as ThemeName,
+        nightTheme: (autoNight === 'sepia' || autoNight === 'light' ? autoNight : 'dark') as ThemeName,
+      };
+      autoThemeCfgRef.current = autoCfg;
+      // 设置页的默认阅读偏好，作为打开本书时的初值
+      const size = Number(fontSize);
+      const lh = Number(lineHeight);
+      const defaultTheme = (theme === 'light' || theme === 'sepia' ? theme : 'dark') as ThemeName;
+      const next = {
+        fontSize: Number.isFinite(size) && size >= 12 && size <= 32 ? size : cfgRef.current.fontSize,
+        lineHeight: Number.isFinite(lh) && lh >= 1 && lh <= 3 ? lh : cfgRef.current.lineHeight,
+        theme: autoCfg.enabled ? resolveThemeByClock(new Date(), autoCfg) : defaultTheme,
+      };
+      cfgRef.current = next;
+      setSettings(next);
+      savedPosRef.current = parseSavedPosition(pos);
+    } catch {
+      /* 读取失败按默认值走 */
+    }
+    await loadBook();
+  };
 
   // ---------- 加载 ----------
 
@@ -435,10 +667,18 @@ export function Reader({ book, onBack, initialTarget }: ReaderProps) {
     });
 
     renditionRef.current = rendition;
-    applyTheme(rendition, settings.theme, settings.fontSize);
-    // 详情页跳入则直达章节，否则从头显示
+    applyTheme(rendition);
+    // 跳转优先级：目录/检索指定位置 > 上次阅读位置 > 从头开始
+    const savedCfi = savedPosRef.current?.cfi;
     if (initialTarget?.href) {
       await rendition.display(initialTarget.href);
+    } else if (savedCfi) {
+      try {
+        await rendition.display(savedCfi);
+      } catch {
+        // CFI 失效（书籍重排或换版本）时回退到开头
+        await rendition.display();
+      }
     } else {
       await rendition.display();
     }
@@ -505,9 +745,27 @@ export function Reader({ book, onBack, initialTarget }: ReaderProps) {
       });
     });
 
+    // iframe 内点击空白处：取消划词条（与主文档行为一致）
+    rendition.on('rendered', (_section: any, renderedView: any) => {
+      try {
+        const doc = renderedView?.document;
+        if (!doc || doc.__blankClickBound) return;
+        doc.__blankClickBound = true;
+        doc.addEventListener('click', () => {
+          if (!renderedView.window?.getSelection()?.toString().trim()) setSel(null);
+        });
+      } catch { /* 忽略 */ }
+    });
+
     rendition.on('relocated', (location: any) => {
       const progress = location.start?.progress || 0;
       window.electronAPI?.updateProgress(book.id, progress);
+      // 记住当前位置（EPUB 用 CFI，跨版式与字号仍可定位）
+      const cfi: string | undefined = location.start?.cfi;
+      if (cfi) {
+        scheduleSavePos({ cfi });
+        currentPosRef.current = { cfi };
+      }
       // 章节模式状态同步（唯一可信源）
       const href: string = location.start?.href || location.end?.href || '';
       const startPage: number = location.start?.displayed?.page ?? 1;
@@ -551,7 +809,15 @@ export function Reader({ book, onBack, initialTarget }: ReaderProps) {
     if (current) pages.push(current);
     setTxtPages(pages.length > 0 ? pages : ['（空文件）']);
     const total = pages.length || 1;
-    setPageIndex(initialTarget?.page != null ? clampPage(initialTarget.page + 1, total) - 1 : 0);
+    const savedPage = savedPosRef.current?.page;
+    // 目录跳转页码从 0 起，保存的页码同样从 0 起，clampPage 入参为 1 起
+    const startPage =
+      initialTarget?.page != null
+        ? clampPage(initialTarget.page + 1, total) - 1
+        : savedPage != null
+          ? clampPage(savedPage + 1, total) - 1
+          : 0;
+    setPageIndex(startPage);
     setTotalPages(total);
   };
 
@@ -560,8 +826,13 @@ export function Reader({ book, onBack, initialTarget }: ReaderProps) {
     const pdfDoc = await pdfjsLib.getDocument({ data }).promise;
     pdfDocRef.current = pdfDoc;
     setTotalPages(pdfDoc.numPages);
+    const savedPage = savedPosRef.current?.page;
     setPageIndex(
-      initialTarget?.page != null ? clampPage(initialTarget.page, pdfDoc.numPages) - 1 : 0,
+      initialTarget?.page != null
+        ? clampPage(initialTarget.page, pdfDoc.numPages) - 1
+        : savedPage != null
+          ? clampPage(savedPage + 1, pdfDoc.numPages) - 1
+          : 0,
     );
     setPdfReady(true);
   };
@@ -581,6 +852,14 @@ export function Reader({ book, onBack, initialTarget }: ReaderProps) {
 
   const clearEpubSelection = () => {
     try { lastContentsRef.current?.window.getSelection().removeAllRanges(); } catch { /* 忽略 */ }
+  };
+
+  /** 点击空白处收起划词条（点操作条本身或刚划完词时不收起） */
+  const handleContentClick = (e: React.MouseEvent) => {
+    if ((e.target as HTMLElement).closest?.('.select-popup')) return;
+    if (window.getSelection()?.toString().trim()) return;
+    setSel(null);
+    clearEpubSelection();
   };
 
   const handleHighlight = async (colorKey: string = 'yellow') => {
@@ -632,7 +911,7 @@ export function Reader({ book, onBack, initialTarget }: ReaderProps) {
         await api.updateBookmark(b.id, next.trim());
         await refreshMarks();
       } catch (err) {
-        alert(err instanceof Error ? err.message : '修改失败');
+        showToast(err instanceof Error ? err.message : '修改失败');
       }
     }
   };
@@ -655,6 +934,7 @@ export function Reader({ book, onBack, initialTarget }: ReaderProps) {
   };
 
   const jumpToMark = (position: string) => {
+    pushHistory();
     if (book.file_type === 'epub') {
       renditionRef.current?.display(position);
     } else if (position.startsWith('txt:')) {
@@ -669,9 +949,9 @@ export function Reader({ book, onBack, initialTarget }: ReaderProps) {
     if (!api) return;
     try {
       const filePath = await api.exportNotes(book.id);
-      if (filePath) alert(`已导出到：${filePath}`);
+      if (filePath) showToast(`已导出到：${filePath}`);
     } catch (err) {
-      alert(err instanceof Error ? err.message : '导出失败');
+      showToast(err instanceof Error ? err.message : '导出失败');
     }
   };
 
@@ -744,7 +1024,7 @@ export function Reader({ book, onBack, initialTarget }: ReaderProps) {
 
   const speak = (text: string) => {
     if (!('speechSynthesis' in window)) {
-      alert('当前环境不支持语音朗读');
+      showToast('当前环境不支持语音朗读');
       return;
     }
     window.speechSynthesis.cancel();
@@ -808,15 +1088,19 @@ export function Reader({ book, onBack, initialTarget }: ReaderProps) {
 
   // ---------- 版式 / 主题 ----------
 
-  const applyTheme = (rendition: any, theme: string, fontSize: number) => {
+  const applyTheme = (rendition: any) => {
     const themes: Record<string, string> = {
       dark: 'background: #1a1a2e; color: #eaeaea;',
       light: 'background: #ffffff; color: #333333;',
       sepia: 'background: #f4ecd8; color: #5b4636;',
     };
+    const { theme, fontSize, lineHeight } = cfgRef.current;
     const stack = fontStackOf(fontKeyRef.current);
     rendition.themes.default({
-      'body': themes[theme] + (stack ? ` font-family: ${stack};` : ''),
+      'body':
+        themes[theme] +
+        ` line-height: ${lineHeight} !important;` +
+        (stack ? ` font-family: ${stack};` : ''),
       'p, div, span': { 'font-size': `${fontSize}px !important` },
     });
   };
@@ -828,14 +1112,18 @@ export function Reader({ book, onBack, initialTarget }: ReaderProps) {
   };
 
   const changeTheme = (theme: 'dark' | 'light' | 'sepia') => {
+    // 手动改过主题：本次阅读不再被自动护眼覆盖
+    themeUserOverrideRef.current = true;
+    cfgRef.current = { ...cfgRef.current, theme };
     setSettings(s => ({ ...s, theme }));
-    if (renditionRef.current) applyTheme(renditionRef.current, theme, settings.fontSize);
+    if (renditionRef.current) applyTheme(renditionRef.current);
   };
 
   const changeFontSize = (delta: number) => {
-    const newSize = Math.max(12, Math.min(32, settings.fontSize + delta));
+    const newSize = Math.max(12, Math.min(32, cfgRef.current.fontSize + delta));
+    cfgRef.current = { ...cfgRef.current, fontSize: newSize };
     setSettings(s => ({ ...s, fontSize: newSize }));
-    if (renditionRef.current) applyTheme(renditionRef.current, settings.theme, newSize);
+    if (renditionRef.current) applyTheme(renditionRef.current);
   };
 
   const changeFont = (key: string) => {
@@ -843,7 +1131,7 @@ export function Reader({ book, onBack, initialTarget }: ReaderProps) {
     setFontKey(key);
     window.electronAPI?.setSetting('fontFamily', key);
     if (renditionRef.current) {
-      applyTheme(renditionRef.current, settings.theme, settings.fontSize);
+      applyTheme(renditionRef.current);
     }
   };
 
@@ -903,6 +1191,13 @@ export function Reader({ book, onBack, initialTarget }: ReaderProps) {
     }
   }, [pdfReady, pageIndex, loading, pdfScale]);
 
+  // TXT / PDF：页码变化即记录阅读位置（加载完成前不写，避免覆盖上次位置）
+  useEffect(() => {
+    if (loading || book.file_type === 'epub') return;
+    scheduleSavePos({ page: pageIndex });
+    currentPosRef.current = { page: pageIndex };
+  }, [pageIndex, loading, book.file_type]);
+
   /** PDF 缩放档位 */
   const changePdfScale = (delta: number) => {
     setPdfScale(s => Math.min(3, Math.max(0.5, Math.round((s + delta) * 10) / 10)));
@@ -918,6 +1213,7 @@ export function Reader({ book, onBack, initialTarget }: ReaderProps) {
   /** 跳到指定页（TXT / PDF） */
   const jumpToPage = (raw: string) => {
     const target = clampPage(Number(raw), totalPages);
+    pushHistory();
     setPageIndex(target - 1);
     setJumpInput('');
     window.electronAPI?.updateProgress(book.id, totalPages > 0 ? (target - 1) / totalPages : 0);
@@ -1011,16 +1307,19 @@ export function Reader({ book, onBack, initialTarget }: ReaderProps) {
   const handlePrev = () => {
     setSel(null);
     stopAuto();
+    pushHistory();
     advancePage(-1);
   };
 
   const handleNext = () => {
     setSel(null);
     stopAuto();
+    pushHistory();
     advancePage(1);
   };
 
   const goToChapter = (href: string) => {
+    pushHistory();
     renditionRef.current?.display(href);
     setPanel(null);
   };
@@ -1036,7 +1335,40 @@ export function Reader({ book, onBack, initialTarget }: ReaderProps) {
     const onKey = (e: KeyboardEvent) => {
       const tag = (e.target as HTMLElement)?.tagName;
       if (tag === 'INPUT' || tag === 'TEXTAREA' || tag === 'SELECT') return;
+      // 跳转历史
+      if (e.altKey && e.key === 'ArrowLeft') {
+        e.preventDefault();
+        goBack();
+        return;
+      }
+      if (e.altKey && e.key === 'ArrowRight') {
+        e.preventDefault();
+        goForward();
+        return;
+      }
       switch (e.key) {
+        case 'Escape':
+          // 优先收起面板，无面板时关闭文档返回书架
+          if (panel) {
+            e.preventDefault();
+            setPanel(null);
+          } else if (sel) {
+            e.preventDefault();
+            setSel(null);
+            clearEpubSelection();
+          } else {
+            e.preventDefault();
+            onBack();
+          }
+          break;
+        case 'Home':
+          e.preventDefault();
+          goToFirst();
+          break;
+        case 'End':
+          e.preventDefault();
+          goToLast();
+          break;
         case 'ArrowRight':
         case 'PageDown':
         case ' ':
@@ -1047,15 +1379,6 @@ export function Reader({ book, onBack, initialTarget }: ReaderProps) {
         case 'PageUp':
           e.preventDefault();
           handlePrev();
-          break;
-        case 'Home':
-          e.preventDefault();
-          if (book.file_type === 'epub') renditionRef.current?.display();
-          else setPageIndex(0);
-          break;
-        case 'End':
-          e.preventDefault();
-          if (book.file_type !== 'epub' && totalPages > 0) setPageIndex(totalPages - 1);
           break;
         case 'F11':
           e.preventDefault();
@@ -1113,6 +1436,7 @@ export function Reader({ book, onBack, initialTarget }: ReaderProps) {
   };
 
   const jumpToHit = (hit: SearchHit) => {
+    pushHistory();
     if (book.file_type === 'txt' && typeof hit.target === 'number') {
       setSearchMark(keyword.trim());
       setPageIndex(hit.target);
@@ -1186,8 +1510,14 @@ export function Reader({ book, onBack, initialTarget }: ReaderProps) {
   const txtHtml = book.file_type === 'txt' ? renderTxtHtml() : null;
 
   return (
-    <div className="reader">
-      <div className="reader-header">
+    <div className={`reader ${view.autoHideBar ? 'bar-auto-hide' : ''}`}>
+      {view.autoHideBar && (
+        <div className="bar-trigger" onMouseEnter={() => setBarVisible(true)} />
+      )}
+      <div
+        className={`reader-header ${view.autoHideBar && !barVisible ? 'bar-hidden' : ''}`}
+        onMouseLeave={() => { if (view.autoHideBar) setBarVisible(false); }}
+      >
         <button className="back-btn" onClick={onBack}>← 返回</button>
         <h2 className="reader-title">{book.title}</h2>
         <div className="reader-actions">
@@ -1267,11 +1597,91 @@ export function Reader({ book, onBack, initialTarget }: ReaderProps) {
           >
             📱
           </button>
+          <button
+            onClick={() => setShowViewPanel(v => !v)}
+            className={showViewPanel ? 'active' : ''}
+            title="阅读视图"
+          >
+            👁
+          </button>
           <button onClick={handleToggleFullscreen} title="全屏 (F11)">
             ⛶
           </button>
         </div>
       </div>
+
+      {/* 阅读视图选项面板 */}
+      {showViewPanel && (
+        <div className="view-panel">
+          <h4>阅读视图</h4>
+          <label className="view-row">
+            <input
+              type="checkbox"
+              checked={view.pageShadow}
+              onChange={e => updateView({ pageShadow: e.target.checked })}
+            />
+            <span>页面阴影与边框</span>
+          </label>
+          <label className="view-row">
+            <input
+              type="checkbox"
+              checked={view.invert}
+              onChange={e => updateView({ invert: e.target.checked })}
+            />
+            <span>页面反色（暗光护眼）</span>
+          </label>
+          <label className="view-row">
+            <input
+              type="checkbox"
+              checked={view.clickEdge}
+              onChange={e => updateView({ clickEdge: e.target.checked })}
+            />
+            <span>点击页面边缘翻页</span>
+          </label>
+          {view.clickEdge && (
+            <label className="view-row">
+              <span>边缘宽度</span>
+              <input
+                type="range"
+                min={5}
+                max={25}
+                value={view.edgeWidth}
+                onChange={e => updateView({ edgeWidth: Number(e.target.value) })}
+              />
+              <span className="view-value">{view.edgeWidth}%</span>
+            </label>
+          )}
+          <label className="view-row">
+            <input
+              type="checkbox"
+              checked={view.autoHideBar}
+              onChange={e => {
+                updateView({ autoHideBar: e.target.checked });
+                setBarVisible(!e.target.checked);
+              }}
+            />
+            <span>自动隐藏工具栏</span>
+          </label>
+          <label className="view-row">
+            <span>光标样式</span>
+            <select
+              value={view.cursor}
+              onChange={e => updateView({ cursor: e.target.value as 'text' | 'default' })}
+            >
+              <option value="text">阅读光标</option>
+              <option value="default">选择光标</option>
+            </select>
+          </label>
+          <label className="view-row">
+            <input
+              type="checkbox"
+              checked={view.alwaysOnTop}
+              onChange={toggleAlwaysOnTop}
+            />
+            <span>窗口置顶</span>
+          </label>
+        </div>
+      )}
 
       <div className="reader-body">
         {panel === 'toc' && book.file_type === 'epub' && (
@@ -1417,7 +1827,11 @@ export function Reader({ book, onBack, initialTarget }: ReaderProps) {
           </div>
         )}
 
-        <div className={`reader-content ${readerThemeClass} ${phoneMode ? 'phone-mode' : ''}`} ref={viewerRef}>
+        <div
+          className={`reader-content ${readerThemeClass} ${phoneMode ? 'phone-mode' : ''}${view.pageShadow ? '' : ' no-shadow'}${view.invert ? ' invert' : ''}${view.cursor === 'default' ? ' cursor-default' : ''}`}
+          ref={viewerRef}
+          onClick={handleContentClick}
+        >
           {phoneMode && (
             <div className="phone-statusbar">
               <span>{clock}</span>
@@ -1459,10 +1873,44 @@ export function Reader({ book, onBack, initialTarget }: ReaderProps) {
               <canvas ref={canvasRef} />
             </div>
           )}
+
+          {/* 点击页面边缘翻页 */}
+          {view.clickEdge && !loading && !error && (
+            <>
+              <div
+                className="edge-zone edge-left"
+                style={{ width: `${view.edgeWidth}%` }}
+                onClick={handlePrev}
+                title="上一页"
+              />
+              <div
+                className="edge-zone edge-right"
+                style={{ width: `${view.edgeWidth}%` }}
+                onClick={handleNext}
+                title="下一页"
+              />
+            </>
+          )}
         </div>
       </div>
 
       <div className="reader-footer">
+        <button
+          className="nav-btn ghost"
+          onClick={goBack}
+          disabled={!histState.canBack}
+          title="后退到上一个跳转位置"
+        >
+          ↶
+        </button>
+        <button
+          className="nav-btn ghost"
+          onClick={goForward}
+          disabled={!histState.canForward}
+          title="前进到下一个跳转位置"
+        >
+          ↷
+        </button>
         <button className="nav-btn" onClick={handlePrev}>上一页</button>
         {book.file_type === 'epub' && chapterIdx != null && chapterTotal > 0 ? (
           <span className="page-indicator wide">
@@ -1483,6 +1931,18 @@ export function Reader({ book, onBack, initialTarget }: ReaderProps) {
               title="输入页码回车跳转"
             />
           </>
+        )}
+        {book.file_type === 'epub' && (
+          <input
+            className="jump-input"
+            value={jumpInput}
+            onChange={e => setJumpInput(e.target.value)}
+            onKeyDown={e => {
+              if (e.key === 'Enter') jumpToPercent(jumpInput);
+            }}
+            placeholder="跳转%"
+            title="输入阅读百分比（1-100）回车跳转"
+          />
         )}
         <button className="nav-btn" onClick={handleNext}>下一页</button>
       </div>
@@ -1566,6 +2026,9 @@ export function Reader({ book, onBack, initialTarget }: ReaderProps) {
           onExpand={expandMindChapter}
         />
       )}
+
+      {/* 轻量提示 */}
+      {toast && <div className="toast">{toast}</div>}
     </div>
   );
 }

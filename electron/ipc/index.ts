@@ -7,6 +7,15 @@ import { buildCrawlerFromRow, applyTextFilters } from '../services/book-source';
 import { splitText, cosine, embedTexts } from '../services/rag';
 import { buildEpub } from '../services/epub-export';
 import { AiService } from '../services/ai-service';
+import {
+  buildBackupFile,
+  writeBackup,
+  readBackup,
+  mergeBackup,
+  createSnapshot,
+  listSnapshots,
+  pruneSnapshots,
+} from '../services/local-backup';
 import { ModelService } from '../services/model-service';
 
 const sanitizeFileName = (name: string) => name.replace(/[\\/:*?"<>|]/g, '_');
@@ -232,6 +241,14 @@ export function registerIpcHandlers() {
     const next = !win.isFullScreen();
     win.setFullScreen(next);
     return next;
+  });
+
+  // 窗口置顶
+  ipcMain.handle('window:setAlwaysOnTop', (event, flag: boolean) => {
+    const win = BrowserWindow.fromWebContents(event.sender);
+    if (!win) return false;
+    win.setAlwaysOnTop(!!flag);
+    return win.isAlwaysOnTop();
   });
 
   // EPUB 位置索引缓存
@@ -811,6 +828,63 @@ export function registerIpcHandlers() {
     }
     db.setSetting('lastSyncAt', new Date().toLocaleString());
     return restored;
+  });
+
+  // ============ 本地备份（纯离线，不联网） ============
+
+  // 导出：默认增量（自上次导出后的变更），可显式要求全量
+  ipcMain.handle('backup:export', async (event, full = false) => {
+    const win = BrowserWindow.fromWebContents(event.sender) ?? undefined;
+    const stamp = new Date().toISOString().slice(0, 10);
+    const { canceled, filePath } = await dialog.showSaveDialog(win!, {
+      title: '导出备份',
+      defaultPath: `book-reader-backup-${stamp}.json`,
+      filters: [{ name: '备份文件', extensions: ['json'] }],
+    });
+    if (canceled || !filePath) return null;
+
+    const since = full ? null : db.getSetting('lastLocalBackupAt');
+    const payload = buildBackupFile(db, since);
+    writeBackup(filePath, payload);
+    // 仅在成功后推进增量基线，避免失败后丢变更
+    db.setSetting('lastLocalBackupAt', payload.createdAt);
+    const count =
+      (payload.data.books?.length ?? 0) +
+      (payload.data.bookmarks?.length ?? 0) +
+      (payload.data.notes?.length ?? 0) +
+      (payload.data.words?.length ?? 0) +
+      (payload.data.sources?.length ?? 0);
+    return { filePath, kind: payload.kind, count };
+  });
+
+  // 从备份文件恢复（幂等合并）
+  ipcMain.handle('backup:import', async (event) => {
+    const win = BrowserWindow.fromWebContents(event.sender) ?? undefined;
+    const { canceled, filePaths } = await dialog.showOpenDialog(win!, {
+      title: '选择备份文件',
+      filters: [{ name: '备份文件', extensions: ['json'] }],
+      properties: ['openFile'],
+    });
+    if (canceled || filePaths.length === 0) return null;
+    const payload = readBackup(filePaths[0]);
+    const restored = mergeBackup(db, payload);
+    return { restored, createdAt: payload.createdAt, kind: payload.kind };
+  });
+
+  // 本地快照：手动生成一份全量快照
+  ipcMain.handle('backup:snapshot', () => {
+    const file = createSnapshot(db);
+    const pruned = pruneSnapshots(14);
+    return { file, pruned };
+  });
+
+  ipcMain.handle('backup:snapshots', () => listSnapshots());
+
+  // 从快照回退
+  ipcMain.handle('backup:restoreSnapshot', (_event, file: string) => {
+    const payload = readBackup(file);
+    const restored = mergeBackup(db, payload);
+    return { restored, createdAt: payload.createdAt };
   });
 
   // ============ Settings ============

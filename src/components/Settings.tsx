@@ -1,4 +1,10 @@
 import { useState, useEffect } from 'react';
+import { THEMES } from '../utils/reader-options';
+import { DEFAULT_AUTO_THEME, isDaytime } from '../utils/auto-theme';
+
+/** 0-23 整点选项 */
+const HOURS = Array.from({ length: 24 }, (_, i) => i);
+const fmtHour = (h: number) => `${String(h).padStart(2, '0')}:00`;
 
 interface SettingsData {
   aiProvider: 'ollama' | 'openai' | 'custom';
@@ -14,6 +20,12 @@ interface SettingsData {
   theme: 'dark' | 'light' | 'sepia';
   fontFamily: string;
   ttsRate: number;
+  /** 自动护眼：按本机时钟切换日/夜间主题（纯本地） */
+  autoTheme: boolean;
+  autoThemeDayStart: number;
+  autoThemeNightStart: number;
+  autoThemeDay: 'dark' | 'light' | 'sepia';
+  autoThemeNight: 'dark' | 'light' | 'sepia';
 }
 
 export function Settings() {
@@ -31,12 +43,17 @@ export function Settings() {
     theme: 'dark',
     fontFamily: 'system',
     ttsRate: 1,
+    autoTheme: DEFAULT_AUTO_THEME.enabled,
+    autoThemeDayStart: DEFAULT_AUTO_THEME.dayStart,
+    autoThemeNightStart: DEFAULT_AUTO_THEME.nightStart,
+    autoThemeDay: DEFAULT_AUTO_THEME.dayTheme,
+    autoThemeNight: DEFAULT_AUTO_THEME.nightTheme,
   });
   const [saved, setSaved] = useState(false);
   const [syncing, setSyncing] = useState(false);
   const [lastSync, setLastSync] = useState('');
 
-  useEffect(() => { loadSettings(); loadLastSync(); }, []);
+  useEffect(() => { loadSettings(); loadLastSync(); loadSnapshots(); loadLastBackup(); }, []);
 
   const loadLastSync = async () => {
     const api = window.electronAPI;
@@ -48,12 +65,22 @@ export function Settings() {
   const loadSettings = async () => {
     const api = window.electronAPI;
     if (!api) return;
+    const BOOL_KEYS: (keyof SettingsData)[] = ['autoTheme'];
+    const NUM_KEYS: (keyof SettingsData)[] = [
+      'fontSize', 'lineHeight', 'ttsRate', 'autoThemeDayStart', 'autoThemeNightStart',
+    ];
     const keys = Object.keys(settings) as (keyof SettingsData)[];
     const loaded = { ...settings };
     for (const key of keys) {
       const value = await api.getSetting(key);
-      if (value !== null) {
-        (loaded as any)[key] = isNaN(Number(value)) ? value : Number(value);
+      if (value === null) continue;
+      if (BOOL_KEYS.includes(key)) {
+        (loaded as any)[key] = value === 'true' || value === '1';
+      } else if (NUM_KEYS.includes(key)) {
+        const n = Number(value);
+        if (!Number.isNaN(n)) (loaded as any)[key] = n;
+      } else {
+        (loaded as any)[key] = value;
       }
     }
     setSettings(loaded);
@@ -73,6 +100,88 @@ export function Settings() {
 
   const handleChange = (key: keyof SettingsData, value: any) => {
     setSettings(s => ({ ...s, [key]: value }));
+  };
+
+  // ---------- 本地备份（纯离线） ----------
+
+  const [snapshots, setSnapshots] = useState<
+    { file: string; name: string; createdAt: string; sizeKB: number }[]
+  >([]);
+  const [backupBusy, setBackupBusy] = useState(false);
+  const [lastBackup, setLastBackup] = useState('');
+
+  const loadSnapshots = async () => {
+    const api = window.electronAPI;
+    if (!api) return;
+    setSnapshots(await api.listSnapshots());
+  };
+
+  const loadLastBackup = async () => {
+    const api = window.electronAPI;
+    if (!api) return;
+    const v = await api.getSetting('lastLocalBackupAt');
+    if (v) setLastBackup(new Date(v).toLocaleString());
+  };
+
+  const handleExportBackup = async (full: boolean) => {
+    const api = window.electronAPI;
+    if (!api) return;
+    setBackupBusy(true);
+    try {
+      const r = await api.exportBackup(full);
+      if (r) {
+        await loadLastBackup();
+        alert(`已导出${r.kind === 'incremental' ? '增量' : '全量'}备份（${r.count} 条记录）\n${r.filePath}`);
+      }
+    } catch (err) {
+      alert(`导出失败：${err instanceof Error ? err.message : '未知错误'}`);
+    } finally {
+      setBackupBusy(false);
+    }
+  };
+
+  const handleImportBackup = async () => {
+    const api = window.electronAPI;
+    if (!api) return;
+    setBackupBusy(true);
+    try {
+      const r = await api.importBackup();
+      if (r) alert(`恢复完成，合并 ${r.restored} 条数据（备份时间：${new Date(r.createdAt).toLocaleString()}）`);
+    } catch (err) {
+      alert(`恢复失败：${err instanceof Error ? err.message : '未知错误'}`);
+    } finally {
+      setBackupBusy(false);
+    }
+  };
+
+  const handleSnapshot = async () => {
+    const api = window.electronAPI;
+    if (!api) return;
+    setBackupBusy(true);
+    try {
+      const r = await api.createSnapshot();
+      await loadSnapshots();
+      alert(`快照已生成${r.pruned > 0 ? `，清理旧快照 ${r.pruned} 份` : ''}`);
+    } catch (err) {
+      alert(`快照失败：${err instanceof Error ? err.message : '未知错误'}`);
+    } finally {
+      setBackupBusy(false);
+    }
+  };
+
+  const handleRestoreSnapshot = async (file: string) => {
+    if (!confirm('从该快照回退会合并历史数据，确定继续？')) return;
+    const api = window.electronAPI;
+    if (!api) return;
+    setBackupBusy(true);
+    try {
+      const r = await api.restoreSnapshot(file);
+      alert(`回退完成，合并 ${r.restored} 条数据`);
+    } catch (err) {
+      alert(`回退失败：${err instanceof Error ? err.message : '未知错误'}`);
+    } finally {
+      setBackupBusy(false);
+    }
   };
 
   const handleBackup = async () => {
@@ -108,6 +217,19 @@ export function Settings() {
     }
   };
 
+  /** 自动护眼预览：按当前本机时钟算出此刻会使用哪套主题 */
+  const autoThemePreview = (() => {
+    if (!settings.autoTheme) return '';
+    const day = isDaytime(
+      new Date().getHours(),
+      settings.autoThemeDayStart,
+      settings.autoThemeNightStart,
+    );
+    const key = day ? settings.autoThemeDay : settings.autoThemeNight;
+    const label = THEMES.find(t => t.key === key)?.label ?? key;
+    return `当前本机时间判定：${day ? '日间' : '夜间'} → ${label}`;
+  })();
+
   return (
     <div className="settings">
       <h1>设置</h1>
@@ -125,11 +247,65 @@ export function Settings() {
         <div className="form-row">
           <label>默认主题</label>
           <select value={settings.theme} onChange={e => handleChange('theme', e.target.value)}>
-            <option value="dark">深色</option>
-            <option value="light">浅色</option>
-            <option value="sepia">护眼</option>
+            {THEMES.map(t => (
+              <option key={t.key} value={t.key}>{t.label}</option>
+            ))}
           </select>
         </div>
+
+        <div className="form-row">
+          <label className="checkbox-row">
+            <input
+              type="checkbox"
+              checked={settings.autoTheme}
+              onChange={e => handleChange('autoTheme', e.target.checked)}
+            />
+            <span>自动护眼（按本机时钟切换主题，全程离线）</span>
+          </label>
+        </div>
+
+        {settings.autoTheme && (
+          <div className="auto-theme-panel">
+            <div className="form-row">
+              <label>日间时段</label>
+              <div className="hour-range">
+                <select
+                  value={settings.autoThemeDayStart}
+                  onChange={e => handleChange('autoThemeDayStart', Number(e.target.value))}
+                >
+                  {HOURS.map(h => <option key={h} value={h}>{fmtHour(h)}</option>)}
+                </select>
+                <span className="range-sep">起，至</span>
+                <select
+                  value={settings.autoThemeNightStart}
+                  onChange={e => handleChange('autoThemeNightStart', Number(e.target.value))}
+                >
+                  {HOURS.map(h => <option key={h} value={h}>{fmtHour(h)}</option>)}
+                </select>
+                <span className="range-sep">止</span>
+              </div>
+            </div>
+            <div className="form-row">
+              <label>日间主题</label>
+              <select value={settings.autoThemeDay} onChange={e => handleChange('autoThemeDay', e.target.value)}>
+                {THEMES.map(t => (
+                  <option key={t.key} value={t.key}>{t.label}</option>
+                ))}
+              </select>
+            </div>
+            <div className="form-row">
+              <label>夜间主题</label>
+              <select value={settings.autoThemeNight} onChange={e => handleChange('autoThemeNight', e.target.value)}>
+                {THEMES.map(t => (
+                  <option key={t.key} value={t.key}>{t.label}</option>
+                ))}
+              </select>
+            </div>
+            <p className="section-desc" style={{ marginBottom: 0 }}>
+              {autoThemePreview}
+            </p>
+          </div>
+        )}
         <div className="form-row">
           <label>默认字体</label>
           <select value={settings.fontFamily} onChange={e => handleChange('fontFamily', e.target.value)}>
@@ -182,6 +358,51 @@ export function Settings() {
           <label>向量服务地址（语义检索用）</label>
           <input value={settings.aiEmbedUrl} onChange={e => handleChange('aiEmbedUrl', e.target.value)} placeholder="http://localhost:8081" />
         </div>
+      </section>
+
+      <section className="settings-section">
+        <h2>本地备份（离线）</h2>
+        <p className="section-desc">
+          数据只写入你自己选择的文件，不上传任何服务器。增量导出仅包含上次导出后变更的笔记、书签、生词与设置。
+        </p>
+        <div className="form-actions" style={{ justifyContent: 'flex-start', flexWrap: 'wrap', gap: 10 }}>
+          <button className="btn-primary" onClick={() => handleExportBackup(false)} disabled={backupBusy}>
+            导出增量备份
+          </button>
+          <button className="btn-secondary" onClick={() => handleExportBackup(true)} disabled={backupBusy}>
+            导出全量
+          </button>
+          <button className="btn-secondary" onClick={handleImportBackup} disabled={backupBusy}>
+            从文件恢复
+          </button>
+          <button className="btn-secondary" onClick={handleSnapshot} disabled={backupBusy}>
+            立即生成快照
+          </button>
+        </div>
+        {lastBackup && (
+          <p className="section-desc" style={{ marginTop: 12, marginBottom: 0 }}>
+            上次导出：{lastBackup}
+          </p>
+        )}
+
+        {snapshots.length > 0 && (
+          <div className="snapshot-list">
+            <div className="snapshot-title">本地快照（自动保留最近 14 份）</div>
+            {snapshots.slice(0, 6).map(s => (
+              <div key={s.file} className="snapshot-row">
+                <span className="snapshot-time">{new Date(s.createdAt).toLocaleString()}</span>
+                <span className="snapshot-size">{s.sizeKB} KB</span>
+                <button
+                  className="btn-secondary small"
+                  onClick={() => handleRestoreSnapshot(s.file)}
+                  disabled={backupBusy}
+                >
+                  回退
+                </button>
+              </div>
+            ))}
+          </div>
+        )}
       </section>
 
       <section className="settings-section">
