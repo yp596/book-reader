@@ -6,6 +6,13 @@ import { Book, Bookmark, Note, TocEntry } from '../types';
 import { escapeHtml, excerptAround, clampPage, parseSavedPosition, serializeSavedPosition, SavedPosition } from '../utils/text';
 import { fontStackOf, highlightColorOf, HIGHLIGHT_COLORS, type ThemeName } from '../utils/reader-options';
 import { resolveThemeByClock, type AutoThemeConfig } from '../utils/auto-theme';
+import {
+  parseBookPrefs,
+  mergePrefs,
+  bookPrefsKey,
+  DEFAULT_READER_PREFS,
+  type ReaderPrefs,
+} from '../utils/book-prefs';
 import { parseMindmap, MindNode } from '../utils/mindmap';
 import { MindmapView } from './Mindmap';
 
@@ -61,6 +68,9 @@ export function Reader({ book, onBack, initialTarget }: ReaderProps) {
   const autoThemeCfgRef = useRef<AutoThemeConfig | null>(null);
   /** 用户本次阅读中手动改过主题：改过就不再被自动切换打扰 */
   const themeUserOverrideRef = useRef(false);
+  /** 本书已保存的排版偏好（写回时作为合并基底，避免读改写竞态） */
+  const bookPrefsRef = useRef<Partial<ReaderPrefs>>({});
+  const savePrefsTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   // 上次阅读位置：savedPosRef 是打开时恢复用，lastPosRef 是本次阅读的最新位置
   const savedPosRef = useRef<SavedPosition | null>(null);
@@ -411,6 +421,15 @@ export function Reader({ book, onBack, initialTarget }: ReaderProps) {
       aliveRef.current.alive = false;
       // 落盘最后阅读位置（防抖可能还没触发）
       flushPos();
+      // 落盘待写的排版偏好（同上，避免刚调完字号就退出导致丢失）
+      if (savePrefsTimerRef.current) {
+        clearTimeout(savePrefsTimerRef.current);
+        savePrefsTimerRef.current = null;
+        window.electronAPI?.setSetting(
+          bookPrefsKey(book.id),
+          JSON.stringify(bookPrefsRef.current),
+        );
+      }
       if (aiReqRef.current) {
         window.electronAPI?.aiAbort(aiReqRef.current);
         aiReqRef.current = null;
@@ -572,7 +591,7 @@ export function Reader({ book, onBack, initialTarget }: ReaderProps) {
       return;
     }
     try {
-      const [tts, font, fontSize, lineHeight, theme, pos, autoOn, autoDayStart, autoNightStart, autoDay, autoNight] = await Promise.all([
+      const [tts, font, fontSize, lineHeight, theme, pos, autoOn, autoDayStart, autoNightStart, autoDay, autoNight, bookPrefsRaw] = await Promise.all([
         api.getSetting('ttsRate'),
         api.getSetting('fontFamily'),
         api.getSetting('fontSize'),
@@ -584,13 +603,10 @@ export function Reader({ book, onBack, initialTarget }: ReaderProps) {
         api.getSetting('autoThemeNightStart'),
         api.getSetting('autoThemeDay'),
         api.getSetting('autoThemeNight'),
+        api.getSetting(bookPrefsKey(book.id)),
       ]);
       const rate = Number(tts);
       if (!Number.isNaN(rate) && rate >= 0.5 && rate <= 2) setTtsRate(rate);
-      if (font && fontStackOf(font)) {
-        fontKeyRef.current = font;
-        setFontKey(font);
-      }
       // 自动护眼配置（纯本地时钟判定）
       const autoCfg: AutoThemeConfig = {
         enabled: autoOn === 'true' || autoOn === '1',
@@ -600,17 +616,30 @@ export function Reader({ book, onBack, initialTarget }: ReaderProps) {
         nightTheme: (autoNight === 'sepia' || autoNight === 'light' ? autoNight : 'dark') as ThemeName,
       };
       autoThemeCfgRef.current = autoCfg;
-      // 设置页的默认阅读偏好，作为打开本书时的初值
+
+      // 排版偏好：全局默认 ← 书籍专属覆盖
       const size = Number(fontSize);
       const lh = Number(lineHeight);
-      const defaultTheme = (theme === 'light' || theme === 'sepia' ? theme : 'dark') as ThemeName;
-      const next = {
-        fontSize: Number.isFinite(size) && size >= 12 && size <= 32 ? size : cfgRef.current.fontSize,
-        lineHeight: Number.isFinite(lh) && lh >= 1 && lh <= 3 ? lh : cfgRef.current.lineHeight,
-        theme: autoCfg.enabled ? resolveThemeByClock(new Date(), autoCfg) : defaultTheme,
+      const base: ReaderPrefs = {
+        ...DEFAULT_READER_PREFS,
+        theme: (theme === 'light' || theme === 'sepia' ? theme : 'dark') as ThemeName,
+        fontSize: Number.isFinite(size) && size >= 12 && size <= 32 ? size : DEFAULT_READER_PREFS.fontSize,
+        lineHeight: Number.isFinite(lh) && lh >= 1 && lh <= 3 ? lh : DEFAULT_READER_PREFS.lineHeight,
+        fontFamily: font && fontStackOf(font) ? font : DEFAULT_READER_PREFS.fontFamily,
       };
-      cfgRef.current = next;
-      setSettings(next);
+      const saved = parseBookPrefs(bookPrefsRaw);
+      bookPrefsRef.current = saved;
+      const merged = mergePrefs(base, saved);
+      // 自动护眼是用户显式开启的全局开关，优先于书籍专属主题
+      if (autoCfg.enabled) merged.theme = resolveThemeByClock(new Date(), autoCfg);
+
+      cfgRef.current = { theme: merged.theme, fontSize: merged.fontSize, lineHeight: merged.lineHeight };
+      setSettings(cfgRef.current);
+      fontKeyRef.current = merged.fontFamily;
+      setFontKey(merged.fontFamily);
+      setDualColumn(merged.dualColumn);
+      setFlowMode(merged.flowMode);
+      setPdfScale(merged.pdfScale);
       savedPosRef.current = parseSavedPosition(pos);
     } catch {
       /* 读取失败按默认值走 */
@@ -1109,6 +1138,20 @@ export function Reader({ book, onBack, initialTarget }: ReaderProps) {
     const next = flowMode === 'paginated' ? 'scrolled' : 'paginated';
     setFlowMode(next);
     renditionRef.current?.flow(next);
+    queueSaveBookPrefs({ flowMode: next });
+  };
+
+  /**
+   * 写回本书排版偏好：内存合并 + 600ms 防抖。
+   * 用内存基底合并而非回读数据库，避免连点字号时的读改写竞态。
+   */
+  const queueSaveBookPrefs = (patch: Partial<ReaderPrefs>) => {
+    bookPrefsRef.current = { ...bookPrefsRef.current, ...patch };
+    if (savePrefsTimerRef.current) clearTimeout(savePrefsTimerRef.current);
+    savePrefsTimerRef.current = setTimeout(() => {
+      savePrefsTimerRef.current = null;
+      window.electronAPI?.setSetting(bookPrefsKey(book.id), JSON.stringify(bookPrefsRef.current));
+    }, 600);
   };
 
   const changeTheme = (theme: 'dark' | 'light' | 'sepia') => {
@@ -1117,6 +1160,7 @@ export function Reader({ book, onBack, initialTarget }: ReaderProps) {
     cfgRef.current = { ...cfgRef.current, theme };
     setSettings(s => ({ ...s, theme }));
     if (renditionRef.current) applyTheme(renditionRef.current);
+    queueSaveBookPrefs({ theme });
   };
 
   const changeFontSize = (delta: number) => {
@@ -1124,15 +1168,18 @@ export function Reader({ book, onBack, initialTarget }: ReaderProps) {
     cfgRef.current = { ...cfgRef.current, fontSize: newSize };
     setSettings(s => ({ ...s, fontSize: newSize }));
     if (renditionRef.current) applyTheme(renditionRef.current);
+    queueSaveBookPrefs({ fontSize: newSize });
   };
 
   const changeFont = (key: string) => {
     fontKeyRef.current = key;
     setFontKey(key);
+    // 全局默认字体与本书专属各记一份
     window.electronAPI?.setSetting('fontFamily', key);
     if (renditionRef.current) {
       applyTheme(renditionRef.current);
     }
+    queueSaveBookPrefs({ fontFamily: key });
   };
 
   /** 双栏：TXT 用 CSS 分栏，EPUB 用 spread */
@@ -1144,6 +1191,7 @@ export function Reader({ book, onBack, initialTarget }: ReaderProps) {
         renditionRef.current.spread(next ? 'always' : 'none');
       } catch { /* 忽略 */ }
     }
+    queueSaveBookPrefs({ dualColumn: next });
   };
 
   /** 自动翻页 */
@@ -1200,14 +1248,20 @@ export function Reader({ book, onBack, initialTarget }: ReaderProps) {
 
   /** PDF 缩放档位 */
   const changePdfScale = (delta: number) => {
-    setPdfScale(s => Math.min(3, Math.max(0.5, Math.round((s + delta) * 10) / 10)));
+    setPdfScale(s => {
+      const next = Math.min(3, Math.max(0.5, Math.round((s + delta) * 10) / 10));
+      queueSaveBookPrefs({ pdfScale: next });
+      return next;
+    });
   };
 
   /** PDF 适应宽度 */
   const fitPdfWidth = () => {
     if (!pdfBaseWidthRef.current || !pdfWrapRef.current) return;
     const avail = pdfWrapRef.current.clientWidth - 48;
-    setPdfScale(Math.min(3, Math.max(0.5, Math.round((avail / pdfBaseWidthRef.current) * 10) / 10)));
+    const next = Math.min(3, Math.max(0.5, Math.round((avail / pdfBaseWidthRef.current) * 10) / 10));
+    setPdfScale(next);
+    queueSaveBookPrefs({ pdfScale: next });
   };
 
   /** 跳到指定页（TXT / PDF） */
