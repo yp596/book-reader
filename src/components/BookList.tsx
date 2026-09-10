@@ -23,6 +23,9 @@ export function BookList({ books, searchQuery, onSelectBook, onShowDetail, onRef
   const [categories, setCategories] = useState<string[]>([]);
   const [contextMenu, setContextMenu] = useState<{ book: Book; x: number; y: number } | null>(null);
   const [dragOver, setDragOver] = useState(false);
+  // 批量管理：勾选态与所选 id
+  const [batchMode, setBatchMode] = useState(false);
+  const [selectedIds, setSelectedIds] = useState<Set<number>>(new Set());
 
   useEffect(() => {
     onRefresh();
@@ -181,6 +184,90 @@ export function BookList({ books, searchQuery, onSelectBook, onShowDetail, onRef
     onRefresh();
   };
 
+  // ---------- 批量管理 ----------
+
+  const toggleSelect = (id: number) =>
+    setSelectedIds(prev => {
+      const next = new Set(prev);
+      if (next.has(id)) next.delete(id);
+      else next.add(id);
+      return next;
+    });
+
+  /** 锁定书籍不参与任何批量写操作 */
+  const batchTargets = () => books.filter(b => selectedIds.has(b.id) && !b.locked);
+
+  const exitBatch = () => {
+    setBatchMode(false);
+    setSelectedIds(new Set());
+  };
+
+  const handleBatchCategory = async () => {
+    const api = window.electronAPI;
+    if (!api || selectedIds.size === 0) return;
+    const hint = categories.length > 0 ? `（已有：${categories.join('、')}）` : '';
+    const cat = prompt(`批量为 ${selectedIds.size} 本书设置分类${hint}，留空表示清除分类：`, '');
+    if (cat === null) return;
+    const targets = batchTargets();
+    for (const b of targets) {
+      try {
+        await api.setCategory(b.id, cat.trim());
+      } catch { /* 单本失败不中断整批 */ }
+    }
+    const skipped = selectedIds.size - targets.length;
+    const updated = await api.getCategories();
+    if (updated) setCategories(updated as string[]);
+    exitBatch();
+    onRefresh();
+    if (skipped > 0) alert(`已处理 ${targets.length} 本；${skipped} 本因锁定被跳过`);
+  };
+
+  const handleBatchLock = async (locked: boolean) => {
+    const api = window.electronAPI;
+    if (!api || selectedIds.size === 0) return;
+    const targets = books.filter(b => selectedIds.has(b.id));
+    for (const b of targets) {
+      if (!!b.locked === locked) continue;
+      try {
+        await api.setBookLock(b.id, locked);
+      } catch { /* 忽略 */ }
+    }
+    exitBatch();
+    onRefresh();
+  };
+
+  /** 重置所选书籍的专属排版，回到全局默认 */
+  const handleBatchResetPrefs = async () => {
+    const api = window.electronAPI;
+    if (!api || selectedIds.size === 0) return;
+    if (!confirm(`清除所选 ${selectedIds.size} 本书的专属排版，恢复全局默认？`)) return;
+    for (const id of selectedIds) {
+      try {
+        await api.setSetting(`bookPrefs:${id}`, '');
+      } catch { /* 忽略 */ }
+    }
+    exitBatch();
+    alert('已重置，下次打开这些书籍将使用全局默认排版');
+  };
+
+  const handleBatchDelete = async () => {
+    const api = window.electronAPI;
+    if (!api || selectedIds.size === 0) return;
+    const targets = batchTargets();
+    const lockedCount = selectedIds.size - targets.length;
+    const msg = `确定删除所选 ${targets.length} 本书？` +
+      (lockedCount > 0 ? `（另有 ${lockedCount} 本因锁定被跳过）` : '') +
+      '\n书签、笔记、阅读记录将一并清除（磁盘文件保留）。';
+    if (!confirm(msg)) return;
+    for (const b of targets) {
+      try {
+        await api.deleteBook(b.id);
+      } catch { /* 忽略 */ }
+    }
+    exitBatch();
+    onRefresh();
+  };
+
   // 拖拽导入
   const handleDrop = async (e: React.DragEvent) => {
     e.preventDefault();
@@ -225,6 +312,13 @@ export function BookList({ books, searchQuery, onSelectBook, onShowDetail, onRef
       <div className="book-list-header">
         <h1>我的书架</h1>
         <div className="book-list-controls">
+          <button
+            className={`btn-secondary small${batchMode ? ' active-preset' : ''}`}
+            onClick={() => (batchMode ? exitBatch() : setBatchMode(true))}
+            title="批量管理书架"
+          >
+            {batchMode ? '退出批量' : '批量管理'}
+          </button>
           <button className="btn-secondary small" onClick={handleClearHistory} title="清除全部阅读进度">
             清除记录
           </button>
@@ -289,6 +383,56 @@ export function BookList({ books, searchQuery, onSelectBook, onShowDetail, onRef
         )}
       </div>
 
+      {batchMode && (
+        <div className="batch-bar">
+          <span className="batch-count">已选 {selectedIds.size} 本</span>
+          <button
+            className="btn-secondary small"
+            onClick={() => setSelectedIds(new Set(filteredBooks.map(b => b.id)))}
+          >
+            全选当前
+          </button>
+          <button className="btn-secondary small" onClick={() => setSelectedIds(new Set())}>
+            清空
+          </button>
+          <button
+            className="btn-secondary small"
+            onClick={handleBatchCategory}
+            disabled={selectedIds.size === 0}
+          >
+            设分类
+          </button>
+          <button
+            className="btn-secondary small"
+            onClick={() => handleBatchLock(true)}
+            disabled={selectedIds.size === 0}
+          >
+            锁定
+          </button>
+          <button
+            className="btn-secondary small"
+            onClick={() => handleBatchLock(false)}
+            disabled={selectedIds.size === 0}
+          >
+            解锁
+          </button>
+          <button
+            className="btn-secondary small"
+            onClick={handleBatchResetPrefs}
+            disabled={selectedIds.size === 0}
+          >
+            重置排版
+          </button>
+          <button
+            className="btn-danger small"
+            onClick={handleBatchDelete}
+            disabled={selectedIds.size === 0}
+          >
+            删除
+          </button>
+        </div>
+      )}
+
       {filteredBooks.length === 0 ? (
         <div className="empty-state">
           <div className="empty-icon">📚</div>
@@ -303,8 +447,8 @@ export function BookList({ books, searchQuery, onSelectBook, onShowDetail, onRef
           {filteredBooks.map(book => (
             <div
               key={book.id}
-              className="book-card"
-              onClick={() => onShowDetail(book)}
+              className={`book-card${batchMode ? ' selectable' : ''}${selectedIds.has(book.id) ? ' selected' : ''}`}
+              onClick={() => (batchMode ? toggleSelect(book.id) : onShowDetail(book))}
               onContextMenu={(e) => handleContextMenu(e, book)}
             >
               <div className="book-cover">
@@ -314,6 +458,11 @@ export function BookList({ books, searchQuery, onSelectBook, onShowDetail, onRef
                   <div className="book-cover-placeholder">
                     <span>{book.file_type.toUpperCase()}</span>
                   </div>
+                )}
+                {batchMode && (
+                  <span className={`pick-box${selectedIds.has(book.id) ? ' on' : ''}`}>
+                    {selectedIds.has(book.id) ? '✓' : ''}
+                  </span>
                 )}
                 {book.favorite ? <span className="fav-badge">⭐</span> : null}
                 {book.locked ? <span className="lock-badge" title="已锁定">🔒</span> : null}

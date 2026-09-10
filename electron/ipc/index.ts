@@ -224,6 +224,11 @@ export function registerIpcHandlers() {
     return db.toggleBookLock(id);
   });
 
+  // 批量场景：显式设置（不做 toggle）
+  ipcMain.handle('books:setLock', (_event, id: number, locked: boolean) => {
+    db.setBookLock(id, locked);
+  });
+
   // ============ 多进度断点 ============
 
   ipcMain.handle('positions:list', (_event, bookId: number) => {

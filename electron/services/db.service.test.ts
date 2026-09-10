@@ -218,3 +218,23 @@ describe('跨书籍笔记与标签', () => {
     expect(all.filter((n: any) => n.book_title === '笔记书乙')).toHaveLength(2);
   });
 });
+
+describe('批量：显式设置锁定态', () => {
+  it('setBookLock 幂等，重复设置同一值不翻转', () => {
+    const id = db.insertBook({ title: '批量测试书', file_path: '/tmp/batch.epub', file_type: 'epub' });
+    db.setBookLock(id, true);
+    db.setBookLock(id, true); // 与 toggle 不同，不应翻转成未锁定
+    expect(!!db.getBookById(id).locked).toBe(true);
+    db.setBookLock(id, false);
+    db.setBookLock(id, false);
+    expect(!!db.getBookById(id).locked).toBe(false);
+  });
+
+  it('批量改分类对锁定书籍生效前会抛错（守卫仍在）', () => {
+    const id = db.insertBook({ title: '批量锁定书', file_path: '/tmp/batch2.epub', file_type: 'epub' });
+    db.setBookLock(id, true);
+    expect(() => db.setCategory(id, '测试')).toThrow(/已锁定/);
+    db.setBookLock(id, false);
+    expect(() => db.setCategory(id, '测试')).not.toThrow();
+  });
+});

@@ -147,6 +147,7 @@ declare global {
       renameBook: (id: number, title: string) => Promise<void>;
       toggleFavorite: (id: number) => Promise<number>;
       toggleBookLock: (id: number) => Promise<number>;
+      setBookLock: (id: number, locked: boolean) => Promise<void>;
       getReadingPositions: (bookId: number) => Promise<ReadingPosition[]>;
       addReadingPosition: (p: {
         book_id: number;

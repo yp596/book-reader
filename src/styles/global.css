@@ -1416,3 +1416,61 @@ button:focus-visible, input:focus-visible, select:focus-visible, textarea:focus-
   transition: var(--transition);
 }
 .tag-input:focus { border-color: var(--accent); box-shadow: 0 0 0 3px var(--accent-glow); }
+
+/* ============ 批量管理 ============ */
+.batch-bar {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+  padding: 12px 16px;
+  margin-bottom: 20px;
+  border: 1px solid var(--accent);
+  border-radius: var(--radius-md);
+  background: rgba(108, 92, 231, 0.08);
+}
+
+.batch-count {
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--accent-light);
+  margin-right: 6px;
+  min-width: 72px;
+}
+
+.book-card.selectable { cursor: pointer; }
+
+.book-card.selected .book-cover {
+  box-shadow: 0 0 0 2px var(--accent), 0 8px 24px var(--accent-glow);
+}
+
+.pick-box {
+  position: absolute;
+  top: 8px;
+  left: 8px;
+  z-index: 2;
+  width: 22px;
+  height: 22px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  border-radius: 50%;
+  border: 2px solid rgba(255, 255, 255, 0.8);
+  background: rgba(0, 0, 0, 0.45);
+  color: #fff;
+  font-size: 13px;
+  font-weight: 700;
+  line-height: 1;
+}
+
+.pick-box.on {
+  background: var(--accent);
+  border-color: #fff;
+}
+
+/* 已激活的次级按钮（批量模式等） */
+.btn-secondary.active-preset {
+  border-color: var(--accent);
+  color: var(--accent-light);
+  background: var(--accent-glow);
+}

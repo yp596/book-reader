@@ -282,6 +282,11 @@ export class DatabaseService {
     return next;
   }
 
+  /** 批量场景：显式设置锁定态（toggleBookLock 依赖当前值，不适合批量） */
+  setBookLock(id: number, locked: boolean) {
+    this.run('UPDATE books SET locked = ? WHERE id = ?', [locked ? 1 : 0, id]);
+  }
+
   updateBookInfo(id: number, title: string, author: string | null) {
     this.assertUnlocked(id, '修改书籍信息');
     this.run('UPDATE books SET title = ?, author = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?', [title, author, id]);
