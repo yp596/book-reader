@@ -18,8 +18,18 @@ describe('parseBookPrefs', () => {
       dualColumn: true,
       flowMode: 'scrolled',
       pdfScale: 2,
+      comicSpread: true,
+      comicRtl: true,
     };
     expect(parseBookPrefs(JSON.stringify(prefs))).toEqual(prefs);
+  });
+
+  it('漫画开关须为布尔值，非布尔一律丢弃', () => {
+    expect(parseBookPrefs(JSON.stringify({ comicSpread: 'yes', comicRtl: 1 }))).toEqual({});
+    expect(parseBookPrefs(JSON.stringify({ comicSpread: false, comicRtl: true }))).toEqual({
+      comicSpread: false,
+      comicRtl: true,
+    });
   });
 
   it('空值 / 坏 JSON 返回空对象', () => {

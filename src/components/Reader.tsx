@@ -121,6 +121,12 @@ export function Reader({ book, onBack, initialTarget, initialPosition }: ReaderP
   /** 漫画（CBZ）：页面条目名清单与当前页图片数据，按页拉取，不整包驻留 */
   const [comicPages, setComicPages] = useState<string[]>([]);
   const [comicPageData, setComicPageData] = useState<{ data: string; mime: string } | null>(null);
+  /** 双页合并时右半页（页码在后的那页）的数据 */
+  const [comicNextData, setComicNextData] = useState<{ data: string; mime: string } | null>(null);
+  const [comicSpread, setComicSpread] = useState(false);
+  const [comicRtl, setComicRtl] = useState(false);
+  /** 快捷键分发要同步读取翻页方向，用 ref 避免闭包拿到旧值 */
+  const comicRtlRef = useRef(false);
   const [pdfReady, setPdfReady] = useState(false);
 
   // EPUB 版式
@@ -148,6 +154,8 @@ export function Reader({ book, onBack, initialTarget, initialPosition }: ReaderP
   const [reflowPages, setReflowPages] = useState<string[]>([]);
   const [reflowPage, setReflowPage] = useState(0);
   const [reflowBusy, setReflowBusy] = useState(false);
+  /** 显示/隐藏全部批注（只影响渲染，不删数据） */
+  const [hideMarks, setHideMarks] = useState(false);
   /** 全局强制统一字体：压过电子书自带的奇葩字体 */
   const forceFontRef = useRef(false);
   /** 批注只读：屏蔽新增/删除批注的操作入口 */
@@ -722,6 +730,9 @@ export function Reader({ book, onBack, initialTarget, initialPosition }: ReaderP
       setDualColumn(merged.dualColumn);
       setFlowMode(merged.flowMode);
       setPdfScale(merged.pdfScale);
+      setComicSpread(merged.comicSpread);
+      setComicRtl(merged.comicRtl);
+      comicRtlRef.current = merged.comicRtl;
       savedPosRef.current = parseSavedPosition(pos);
     } catch {
       /* 读取失败按默认值走 */
@@ -846,10 +857,13 @@ export function Reader({ book, onBack, initialTarget, initialPosition }: ReaderP
         for (const b of saved) {
           try {
             const color = highlightColorOf(b.color || 'yellow');
-            rendition.annotations.highlight(b.position, { markId: b.id }, undefined, undefined, {
-              fill: color.epubFill,
-              'fill-opacity': '0.35',
-            });
+            rendition.annotations.highlight(
+              b.position,
+              { markId: b.id },
+              undefined,
+              undefined,
+              epubAnnotationStyles(color, b.style),
+            );
           } catch { /* CFI 失效则跳过 */ }
         }
       }
@@ -1137,7 +1151,13 @@ export function Reader({ book, onBack, initialTarget, initialPosition }: ReaderP
     return true;
   };
 
-  const handleHighlight = async (colorKey: string = 'yellow') => {
+  /** EPUB 注解样式：下划线用描边，高亮用填充 */
+  const epubAnnotationStyles = (color: { epubFill: string }, style?: string) =>
+    style === 'underline'
+      ? { stroke: color.epubFill, 'stroke-width': '3px', fill: 'transparent', 'fill-opacity': '0' }
+      : { fill: color.epubFill, 'fill-opacity': '0.35' };
+
+  const handleHighlight = async (colorKey: string = 'yellow', style: 'highlight' | 'underline' = 'highlight') => {
     if (blockedByReadonly('新增高亮')) return;
     if (!sel) return;
     const api = window.electronAPI;
@@ -1149,12 +1169,16 @@ export function Reader({ book, onBack, initialTarget, initialPosition }: ReaderP
       position: sel.position,
       text: sel.text.slice(0, 200),
       color: color.key,
+      style,
     });
     if (book.file_type === 'epub' && renditionRef.current) {
-      renditionRef.current.annotations.highlight(sel.position, { markId }, undefined, undefined, {
-        fill: color.epubFill,
-        'fill-opacity': '0.35',
-      });
+      renditionRef.current.annotations.highlight(
+        sel.position,
+        { markId },
+        undefined,
+        undefined,
+        epubAnnotationStyles(color, style),
+      );
     }
     clearEpubSelection();
     setSel(null);
@@ -1283,15 +1307,18 @@ export function Reader({ book, onBack, initialTarget, initialPosition }: ReaderP
     const text = txtPages[pageIndex] || '';
     interface TxtRange { s: number; e: number; cls: string; style?: string; id?: number }
     const ranges: TxtRange[] = [];
-    // 书签优先
-    for (const b of bookmarks) {
+    // 书签优先（隐藏批注时整段跳过）
+    for (const b of hideMarks ? [] : bookmarks) {
       if (!b.position.startsWith(`txt:${pageIndex}:`)) continue;
       const parts = b.position.split(':');
       const s = Number(parts[2]);
       const e = Number(parts[3]);
       if (Number.isNaN(s) || Number.isNaN(e) || s >= e || s >= text.length) continue;
       const color = highlightColorOf(b.color || 'yellow');
-      ranges.push({ s, e: Math.min(e, text.length), cls: '', style: `background:${color.css}`, id: b.id });
+      const style = b.style === 'underline'
+        ? `border-bottom:2px solid ${color.solid}; background:transparent`
+        : `background:${color.css}`;
+      ranges.push({ s, e: Math.min(e, text.length), cls: '', style, id: b.id });
     }
     // 检索词（跳过与书签重叠的部分）
     if (searchMark) {
@@ -1432,9 +1459,23 @@ export function Reader({ book, onBack, initialTarget, initialPosition }: ReaderP
     }, 600);
   };
 
+  /** 漫画双页合并开关 */
+  const toggleComicSpread = () => {
+    const next = !comicSpread;
+    setComicSpread(next);
+    queueSaveBookPrefs({ comicSpread: next });
+  };
+
+  /** 漫画右向左翻页开关（日漫） */
+  const toggleComicRtl = () => {
+    const next = !comicRtl;
+    setComicRtl(next);
+    comicRtlRef.current = next;
+    queueSaveBookPrefs({ comicRtl: next });
+  };
+
   /** 循环切换主题（快捷键用） */
-  const cycleTheme = () => {
-    const order: ThemeName[] = ['dark', 'light', 'sepia'];
+  const cycleTheme = () => {    const order: ThemeName[] = ['dark', 'light', 'sepia'];
     const idx = order.indexOf(cfgRef.current.theme as ThemeName);
     changeTheme(order[(idx + 1) % order.length]);
   };
@@ -1704,12 +1745,15 @@ export function Reader({ book, onBack, initialTarget, initialPosition }: ReaderP
         reflowPages.length > 0 ? next / reflowPages.length : 0,
       );
     } else if (dir > 0 && pageIndex < totalPages - 1) {
-      const next = pageIndex + 1;
+      // 漫画双页合并时一次跨两页
+      const step = book.file_type === 'cbz' && comicSpread ? 2 : 1;
+      const next = Math.min(pageIndex + step, totalPages - 1);
       setPageIndex(next);
       setSearchMark('');
       window.electronAPI?.updateProgress(book.id, totalPages > 0 ? next / totalPages : 0);
     } else if (dir < 0 && pageIndex > 0) {
-      const next = pageIndex - 1;
+      const step = book.file_type === 'cbz' && comicSpread ? 2 : 1;
+      const next = Math.max(pageIndex - step, 0);
       setPageIndex(next);
       setSearchMark('');
       window.electronAPI?.updateProgress(book.id, totalPages > 0 ? next / totalPages : 0);
@@ -1777,9 +1821,14 @@ export function Reader({ book, onBack, initialTarget, initialPosition }: ReaderP
           break;
       }
       // 预设快捷键：未绑定的键一律放行，不抢占系统/浏览器行为
-      const action = resolveAction(presetRef.current, e);
+      let action = resolveAction(presetRef.current, e);
       if (!action) return;
       e.preventDefault();
+      // 日漫右向左：左右键的语义与横排文本相反，翻页动作对调
+      if (book.file_type === 'cbz' && comicRtlRef.current) {
+        if (action === 'next') action = 'prev';
+        else if (action === 'prev') action = 'next';
+      }
       switch (action) {
         case 'next': handleNext(); break;
         case 'prev': handlePrev(); break;
@@ -1925,21 +1974,32 @@ export function Reader({ book, onBack, initialTarget, initialPosition }: ReaderP
   /** 支持文本类操作（朗读/检索/笔记/双栏/脑图）的格式；漫画与 PDF 不适用 */
   const supportsTextOps = book.file_type === 'epub' || book.file_type === 'txt';
 
-  // 漫画翻页：按需拉取当前页图片，翻页时丢弃上一页，避免整包驻留内存
+  // 漫画翻页：按需拉取当前页（双页合并时连下一页一起），翻页后丢弃旧图，避免整包驻留内存
   useEffect(() => {
     if (book.file_type !== 'cbz') return;
-    const name = comicPages[pageIndex];
-    if (!name) {
+    const api = window.electronAPI;
+    const current = comicPages[pageIndex];
+    const neighbor = comicSpread ? comicPages[pageIndex + 1] : undefined;
+    if (!api || !current) {
       setComicPageData(null);
+      setComicNextData(null);
       return;
     }
     let alive = true;
-    window.electronAPI
-      ?.getComicPage(book.id, name)
+    api
+      .getComicPage(book.id, current)
       .then(page => { if (alive) setComicPageData(page); })
       .catch(() => { if (alive) setComicPageData(null); });
+    if (neighbor) {
+      api
+        .getComicPage(book.id, neighbor)
+        .then(page => { if (alive) setComicNextData(page); })
+        .catch(() => { if (alive) setComicNextData(null); });
+    } else {
+      setComicNextData(null);
+    }
     return () => { alive = false; };
-  }, [book.file_type, book.id, comicPages, pageIndex]);
+  }, [book.file_type, book.id, comicPages, pageIndex, comicSpread]);
 
   const txtHtml = book.file_type === 'txt' ? renderTxtHtml() : null;
   return (
@@ -1984,6 +2044,24 @@ export function Reader({ book, onBack, initialTarget, initialPosition }: ReaderP
           {(book.file_type === 'epub' || book.file_type === 'txt') && (
             <button onClick={() => togglePanel('toc')} className={panel === 'toc' ? 'active' : ''}>📑 目录</button>
           )}
+          {book.file_type === 'cbz' && (
+            <>
+              <button
+                onClick={toggleComicSpread}
+                className={comicSpread ? 'active' : ''}
+                title={comicSpread ? '单页显示' : '双页合并'}
+              >
+                {comicSpread ? '▣' : '▢'}
+              </button>
+              <button
+                onClick={toggleComicRtl}
+                className={comicRtl ? 'active' : ''}
+                title={comicRtl ? '左向右翻页' : '右向左翻页（日漫）'}
+              >
+                {comicRtl ? '⇦' : '⇨'}
+              </button>
+            </>
+          )}
           {book.file_type === 'pdf' && (
             <>
               <button onClick={() => changePdfScale(-0.25)} title="缩小">🔍-</button>
@@ -2008,6 +2086,13 @@ export function Reader({ book, onBack, initialTarget, initialPosition }: ReaderP
           )}
           <button onClick={() => togglePanel('notes')} className={panel === 'notes' ? 'active' : ''} title="笔记">
             📝{notes.length > 0 ? ` ${notes.length}` : ''}
+          </button>
+          <button
+            onClick={() => setHideMarks(h => !h)}
+            className={hideMarks ? 'active' : ''}
+            title={hideMarks ? '显示批注' : '隐藏批注（不删除）'}
+          >
+            {hideMarks ? '🙈' : '👁'}
           </button>
           <button onClick={() => togglePanel('marks')} className={panel === 'marks' ? 'active' : ''} title="书签">
             🔖{bookmarks.length > 0 ? ` ${bookmarks.length}` : ''}
@@ -2373,11 +2458,31 @@ export function Reader({ book, onBack, initialTarget, initialPosition }: ReaderP
               }}
             >
               {comicPageData ? (
-                <img
-                  src={`data:${comicPageData.mime};base64,${comicPageData.data}`}
-                  alt={`第 ${pageIndex + 1} 页`}
-                  style={{ maxWidth: '100%', height: 'auto', objectFit: 'contain' }}
-                />
+                <div
+                  style={{
+                    display: 'flex',
+                    gap: 8,
+                    justifyContent: 'center',
+                    alignItems: 'flex-start',
+                    maxWidth: '100%',
+                  }}
+                >
+                  {/* 右向左时页码大的在左边，与日漫阅读顺序一致 */}
+                  {(comicRtl ? [comicNextData, comicPageData] : [comicPageData, comicNextData])
+                    .filter((p): p is { data: string; mime: string } => p !== null)
+                    .map((page, i) => (
+                      <img
+                        key={i}
+                        src={`data:${page.mime};base64,${page.data}`}
+                        alt=""
+                        style={{
+                          maxWidth: comicSpread ? '50%' : '100%',
+                          height: 'auto',
+                          objectFit: 'contain',
+                        }}
+                      />
+                    ))}
+                </div>
               ) : (
                 <p className="empty-text">加载中…</p>
               )}
@@ -2418,20 +2523,20 @@ export function Reader({ book, onBack, initialTarget, initialPosition }: ReaderP
             </div>
           )}
 
-          {/* 点击页面边缘翻页 */}
+          {/* 点击页面边缘翻页；漫画右向左时左右对调 */}
           {view.clickEdge && !loading && !error && (
             <>
               <div
                 className="edge-zone edge-left"
                 style={{ width: `${view.edgeWidth}%` }}
-                onClick={handlePrev}
-                title="上一页"
+                onClick={book.file_type === 'cbz' && comicRtl ? handleNext : handlePrev}
+                title={book.file_type === 'cbz' && comicRtl ? '下一页' : '上一页'}
               />
               <div
                 className="edge-zone edge-right"
                 style={{ width: `${view.edgeWidth}%` }}
-                onClick={handleNext}
-                title="下一页"
+                onClick={book.file_type === 'cbz' && comicRtl ? handlePrev : handleNext}
+                title={book.file_type === 'cbz' && comicRtl ? '上一页' : '下一页'}
               />
             </>
           )}
@@ -2529,6 +2634,9 @@ export function Reader({ book, onBack, initialTarget, initialPosition }: ReaderP
           </button>
           <button onClick={() => { speak(sel.text); setSel(null); clearEpubSelection(); }} title="朗读选中">
             🔊 朗读
+          </button>
+          <button onClick={() => handleHighlight(undefined as any, 'underline')} title="加下划线">
+            <span style={{ borderBottom: '2px solid currentColor', paddingBottom: 1 }}>U</span>
           </button>
           <button onClick={() => handleAiQuick('explain')} title="AI 一键短解释">
             ✨ 解释

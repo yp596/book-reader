@@ -31,3 +31,23 @@ describe('HIGHLIGHT_COLORS', () => {
     expect(highlightColorOf('nope').key).toBe('yellow');
   });
 });
+
+describe('高亮颜色三套取值', () => {
+  it('每个颜色都有 css / solid / epubFill（缺一个渲染就会出现 undefined）', () => {
+    for (const c of HIGHLIGHT_COLORS) {
+      expect(c.css).toMatch(/^rgba\(/);
+      expect(c.solid).toMatch(/^#[0-9a-f]{6}$/i);
+      expect(c.epubFill).toMatch(/^#/);
+    }
+  });
+
+  it('下划线用实色而非半透明（半透明描边看不清）', () => {
+    for (const c of HIGHLIGHT_COLORS) {
+      expect(c.solid).not.toContain('rgba');
+    }
+  });
+
+  it('未知 key 回退首个颜色', () => {
+    expect(highlightColorOf('不存在').key).toBe(HIGHLIGHT_COLORS[0].key);
+  });
+});

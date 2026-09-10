@@ -202,6 +202,8 @@ export class DatabaseService {
       `ALTER TABLE notes ADD COLUMN tags TEXT DEFAULT ''`,
       // 内容指纹：导入查重
       `ALTER TABLE books ADD COLUMN hash TEXT DEFAULT ''`,
+      // 标注样式：highlight=高亮底色 / underline=下划线
+      `ALTER TABLE bookmarks ADD COLUMN style TEXT DEFAULT 'highlight'`,
       // 阅读状态（''=按进度推断 / reading / finished / shelved）与星级评分
       `ALTER TABLE books ADD COLUMN status TEXT DEFAULT ''`,
       `ALTER TABLE books ADD COLUMN rating INTEGER DEFAULT 0`,
@@ -523,14 +525,25 @@ export class DatabaseService {
     return this.all('SELECT * FROM bookmarks WHERE book_id = ? ORDER BY created_at DESC', [bookId]);
   }
 
-  insertBookmark(bookmark: { book_id: number; position: string; text?: string; color?: string }) {
+  insertBookmark(bookmark: {
+    book_id: number;
+    position: string;
+    text?: string;
+    color?: string;
+    style?: string;
+  }) {
     this.assertUnlocked(bookmark.book_id, '新增书签');
+    const style = bookmark.style === 'underline' ? 'underline' : 'highlight';
     this.run(
-      'INSERT INTO bookmarks (book_id, position, text, color) VALUES (?, ?, ?, ?)',
-      [bookmark.book_id, bookmark.position, bookmark.text ?? null, bookmark.color ?? 'yellow'],
+      'INSERT INTO bookmarks (book_id, position, text, color, style) VALUES (?, ?, ?, ?, ?)',
+      [bookmark.book_id, bookmark.position, bookmark.text ?? null, bookmark.color ?? 'yellow', style],
     );
     const row = this.get('SELECT last_insert_rowid() as id');
     return row?.id;
+  }
+
+  getBookmarkByPosition(bookId: number, position: string) {
+    return this.get('SELECT * FROM bookmarks WHERE book_id = ? AND position = ?', [bookId, position]);
   }
 
   deleteBookmark(id: number) {

@@ -105,6 +105,8 @@ export interface Bookmark {
   position: string;
   text?: string;
   color?: string;
+  /** 标注样式：highlight=高亮底色 / underline=下划线 */
+  style?: string;
   created_at: string;
 }
 

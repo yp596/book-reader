@@ -318,3 +318,27 @@ describe('阅读状态与星级评分', () => {
     expect(() => db.setBookStatus(sid, 'finished')).not.toThrow();
   });
 });
+
+describe('标注样式', () => {
+  let bid: number;
+
+  beforeAll(() => {
+    bid = db.insertBook({ title: '标注样式书', file_path: '/tmp/mark.epub', file_type: 'epub' });
+  });
+
+  it('默认样式为高亮', () => {
+    db.insertBookmark({ book_id: bid, position: 'p-default' });
+    const b = db.getBookmarkByPosition(bid, 'p-default');
+    expect(b.style).toBe('highlight');
+  });
+
+  it('可存下划线样式', () => {
+    db.insertBookmark({ book_id: bid, position: 'p-under', style: 'underline' });
+    expect(db.getBookmarkByPosition(bid, 'p-under').style).toBe('underline');
+  });
+
+  it('非法样式归一化为高亮（不写脏值）', () => {
+    db.insertBookmark({ book_id: bid, position: 'p-bad', style: '波浪线' });
+    expect(db.getBookmarkByPosition(bid, 'p-bad').style).toBe('highlight');
+  });
+});

@@ -21,12 +21,17 @@ export type FontKey = (typeof FONT_OPTIONS)[number]['key'];
 export const fontStackOf = (key: string): string =>
   FONT_OPTIONS.find(f => f.key === key)?.stack ?? '';
 
-/** 高亮颜色：TXT 用 css 背景，EPUB 用 SVG fill */
+/**
+ * 高亮颜色三套取值：
+ * - css：TXT 高亮底色（半透明）
+ * - solid：下划线用（半透明描边会看不清，必须用实色）
+ * - epubFill：EPUB 注解填充
+ */
 export const HIGHLIGHT_COLORS = [
-  { key: 'yellow', label: '黄', css: 'rgba(255,235,59,.45)', epubFill: '#ffeb3b' },
-  { key: 'green', label: '绿', css: 'rgba(105,240,174,.45)', epubFill: '#69f0ae' },
-  { key: 'blue', label: '蓝', css: 'rgba(128,216,255,.45)', epubFill: '#80d8ff' },
-  { key: 'red', label: '红', css: 'rgba(255,138,128,.45)', epubFill: '#ff8a80' },
+  { key: 'yellow', label: '黄', css: 'rgba(255,235,59,.45)', solid: '#f5c518', epubFill: '#ffeb3b' },
+  { key: 'green', label: '绿', css: 'rgba(105,240,174,.45)', solid: '#2ec27e', epubFill: '#69f0ae' },
+  { key: 'blue', label: '蓝', css: 'rgba(128,216,255,.45)', solid: '#3aa0e0', epubFill: '#80d8ff' },
+  { key: 'red', label: '红', css: 'rgba(255,138,128,.45)', solid: '#e74c3c', epubFill: '#ff8a80' },
 ] as const;
 
 export type HighlightColorKey = (typeof HIGHLIGHT_COLORS)[number]['key'];
