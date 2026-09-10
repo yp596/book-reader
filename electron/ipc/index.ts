@@ -20,6 +20,7 @@ import { ModelService } from '../services/model-service';
 import { listComicPages, readComicPage } from '../services/comic';
 import { extractCover } from '../services/cover';
 import { contentHash } from '../services/file-hash';
+import { loadRenderer } from '../renderer-window';
 import { buildBookListMarkdown, buildBookBackup, backupFileName, localDateStamp } from '../services/book-export';
 
 /**
@@ -384,6 +385,41 @@ export function registerIpcHandlers() {
   // 保存手动编辑后的目录
   ipcMain.handle('books:saveToc', (_event, id: number, entries: unknown[]) => {
     db.setBookToc(id, JSON.stringify(Array.isArray(entries) ? entries : []), 'manual');
+  });
+
+  // 在新窗口打开书籍（多文档并行阅读）
+  ipcMain.handle('window:openReader', (_event, bookId: number) => {
+    const win = new BrowserWindow({
+      width: 1100,
+      height: 820,
+      minWidth: 800,
+      minHeight: 600,
+      backgroundColor: '#1a1a2e',
+      webPreferences: {
+        preload: path.join(__dirname, 'preload.js'),
+        contextIsolation: true,
+        nodeIntegration: false,
+      },
+    });
+    loadRenderer(win, bookId);
+  });
+
+  // 打印预览：把渲染进程生成的打印页开在独立窗口里，由该窗口的「打印」按钮调用系统打印
+  ipcMain.handle('books:printPreview', async (_event, html: string, title: string) => {
+    // 走临时文件而非 data: URL——正文可能很大，data: URL 在部分导航场景会被截断
+    const tmpFile = path.join(app.getPath('temp'), `book-reader-print-${Date.now()}.html`);
+    fs.writeFileSync(tmpFile, html, 'utf-8');
+    const win = new BrowserWindow({
+      width: 900,
+      height: 760,
+      title: title || '打印预览',
+      webPreferences: { contextIsolation: true, nodeIntegration: false },
+    });
+    win.on('closed', () => {
+      try { fs.unlinkSync(tmpFile); } catch { /* 已删除则忽略 */ }
+    });
+    await win.loadFile(tmpFile);
+    return true;
   });
 
   // 漫画包页面清单（按自然序）

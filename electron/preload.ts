@@ -59,6 +59,10 @@ contextBridge.exposeInMainWorld('electronAPI', {
     ipcRenderer.invoke('books:comicPages', id),
   getComicPage: (id: number, name: string) =>
     ipcRenderer.invoke('books:comicPage', id, name),
+  printPreview: (html: string, title: string) =>
+    ipcRenderer.invoke('books:printPreview', html, title),
+  openReaderWindow: (bookId: number) =>
+    ipcRenderer.invoke('window:openReader', bookId),
 
   // Sources
   getAllSources: () => ipcRenderer.invoke('sources:getAll'),

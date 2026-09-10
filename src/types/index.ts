@@ -175,6 +175,8 @@ declare global {
       saveToc: (id: number, entries: TocEntry[]) => Promise<void>;
       getComicPages: (id: number) => Promise<string[]>;
       getComicPage: (id: number, name: string) => Promise<{ data: string; mime: string } | null>;
+      printPreview: (html: string, title: string) => Promise<boolean>;
+      openReaderWindow: (bookId: number) => Promise<void>;
       getAllBooks: () => Promise<Book[]>;
       getBookById: (id: number) => Promise<Book>;
       deleteBook: (id: number) => Promise<void>;

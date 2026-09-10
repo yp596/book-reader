@@ -1479,9 +1479,53 @@ export function Reader({ book, onBack, initialTarget, initialPosition }: ReaderP
     }, 600);
   };
 
+  /**
+   * 生成打印用 HTML：只含当前阅读内容，工具条在打印时隐藏。
+   * 各格式取当前可见内容——TXT 当前页、EPUB 当前章节、漫画当前页图、PDF 当前页画布。
+   */
+  const buildPrintHtml = async (): Promise<string> => {
+    let body = '';
+    if (book.file_type === 'txt') {
+      body = `<pre>${escapeHtml(txtPages[pageIndex] ?? '')}</pre>`;
+    } else if (book.file_type === 'epub') {
+      const href = locationRef.current.href;
+      const text = href ? await loadChapterText(href) : '';
+      body = text ? `<p>${escapeHtml(text)}</p>` : '<p>（未取到当前章节内容）</p>';
+    } else if (book.file_type === 'cbz') {
+      body = comicPageData
+        ? `<img src="data:${comicPageData.mime};base64,${comicPageData.data}" alt="">`
+        : '<p>（当前页尚未加载）</p>';
+    } else if (book.file_type === 'pdf') {
+      const dataUrl = canvasRef.current?.toDataURL('image/png');
+      body = dataUrl ? `<img src="${dataUrl}" alt="">` : '<p>（当前页尚未渲染）</p>';
+    }
+    return `<!doctype html><html><head><meta charset="utf-8"><title>${escapeHtml(book.title)}</title>
+<style>
+  body { font-family: "Noto Serif SC","Songti SC",serif; line-height: 1.8; margin: 0; padding: 24px; color: #222; }
+  pre { white-space: pre-wrap; word-break: break-word; font: inherit; margin: 0; }
+  img { max-width: 100%; height: auto; display: block; margin: 0 auto; }
+  .bar { position: sticky; top: 0; padding: 10px 16px; background: #f4f4f5; border-bottom: 1px solid #ddd;
+         display: flex; align-items: center; gap: 12px; font-size: 13px; }
+  .bar button { padding: 6px 16px; cursor: pointer; }
+  @media print { .bar { display: none; } body { padding: 0; } }
+</style></head><body>
+<div class="bar"><button onclick="window.print()">打印</button><span>${escapeHtml(book.title)}</span></div>
+${body}</body></html>`;
+  };
+
+  /** 打开打印预览窗口（预览页里的按钮再触发系统打印对话框） */
+  const handlePrint = async () => {
+    const api = window.electronAPI;
+    if (!api) return;
+    try {
+      await api.printPreview(await buildPrintHtml(), book.title);
+    } catch (err) {
+      alert(`打印失败：${err instanceof Error ? err.message : '未知错误'}`);
+    }
+  };
+
   /** 漫画双页合并开关 */
-  const toggleComicSpread = () => {
-    const next = !comicSpread;
+  const toggleComicSpread = () => {    const next = !comicSpread;
     setComicSpread(next);
     queueSaveBookPrefs({ comicSpread: next });
   };
@@ -2070,6 +2114,7 @@ export function Reader({ book, onBack, initialTarget, initialPosition }: ReaderP
               {flowMode === 'paginated' ? '📜' : '📄'}
             </button>
           )}
+          <button onClick={handlePrint} title="打印 / 打印预览">🖨</button>
           {(book.file_type === 'epub' || book.file_type === 'txt') && (
             <button onClick={() => togglePanel('toc')} className={panel === 'toc' ? 'active' : ''}>📑 目录</button>
           )}

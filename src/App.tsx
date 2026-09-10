@@ -1,4 +1,4 @@
-import { useState } from 'react';
+import { useState, useEffect } from 'react';
 import { Book, TocEntry } from './types';
 import { BookList } from './components/BookList';
 import { BookDetail } from './components/BookDetail';
@@ -9,6 +9,7 @@ import { SemanticSearch } from './components/SemanticSearch';
 import { Vocab } from './components/Vocab';
 import { Notes } from './components/Notes';
 import { HelpAbout } from './components/HelpAbout';
+import { Onboarding } from './components/Onboarding';
 import { Models } from './components/Models';
 import { Settings } from './components/Settings';
 import { Statistics } from './components/Statistics';
@@ -48,6 +49,30 @@ function App() {
   const [readerPosition, setReaderPosition] = useState<string | null>(null);
   const [view, setView] = useState<View>('library');
   const [searchQuery, setSearchQuery] = useState('');
+  /** 首次启动引导：仅在未标记过时展示一次 */
+  const [showOnboarding, setShowOnboarding] = useState(false);
+
+  useEffect(() => {
+    window.electronAPI
+      ?.getSetting('onboarded')
+      .then(v => { if (v !== '1') setShowOnboarding(true); })
+      .catch(() => {});
+  }, []);
+
+  // 多窗口：本窗口带 book 参数时，启动即打开这本书（由主进程 window:openReader 创建）
+  useEffect(() => {
+    const id = Number(new URLSearchParams(window.location.search).get('book'));
+    if (!Number.isInteger(id) || id <= 0) return;
+    window.electronAPI
+      ?.getBookById(id)
+      .then(b => { if (b) handleSelectBook(b as Book); })
+      .catch(() => {});
+  }, []);
+
+  const dismissOnboarding = () => {
+    setShowOnboarding(false);
+    window.electronAPI?.setSetting('onboarded', '1').catch(() => {});
+  };
 
   const loadBooks = async () => {
     const allBooks = await api.getAllBooks();
@@ -172,6 +197,12 @@ function App() {
       <main className="main-content">
         {renderContent()}
       </main>
+      {showOnboarding && (
+        <Onboarding
+          onImport={handleOpenFile}
+          onClose={dismissOnboarding}
+        />
+      )}
     </div>
   );
 }

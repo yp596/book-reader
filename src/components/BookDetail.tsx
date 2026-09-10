@@ -108,6 +108,13 @@ export function BookDetail({ book, onBack, onRead }: BookDetailProps) {
   return (
     <div className="book-detail">
       <button className="back-btn" onClick={onBack}>← 返回书架</button>
+      <button
+        className="link-btn"
+        style={{ marginLeft: 12 }}
+        onClick={() => window.electronAPI?.openReaderWindow(book.id)}
+      >
+        在新窗口打开
+      </button>
 
       <div className="detail-hero">
         <div className="detail-cover">

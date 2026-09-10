@@ -6,6 +6,7 @@ import { DatabaseService } from './services/db.service';
 import { ModelService } from './services/model-service';
 import { disposeEngine } from './services/llama-engine';
 import { registerIpcHandlers } from './ipc';
+import { loadRenderer } from './renderer-window';
 import { LOCAL_FILE_SCHEME, filePathFromUrl, isInsideBooksDir } from './services/local-file';
 
 // 必须在 app ready 之前声明为特权协议，否则渲染进程的 CSP 与跨源策略会拦掉封面请求
@@ -49,11 +50,7 @@ function createWindow() {
     backgroundColor: '#1a1a2e',
   });
 
-  if (process.env.VITE_DEV_SERVER_URL) {
-    mainWindow.loadURL(process.env.VITE_DEV_SERVER_URL);
-  } else {
-    mainWindow.loadFile(path.join(__dirname, '../dist/index.html'));
-  }
+  loadRenderer(mainWindow);
 
   mainWindow.on('close', () => {
     if (mainWindow) {
