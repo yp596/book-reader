@@ -16,6 +16,7 @@ import {
 import { parseMindmap, MindNode } from '../utils/mindmap';
 import { lookupMark } from '../utils/mark-lookup';
 import { normalizeText } from '../utils/text-normalize';
+import { getPreset, resolveAction, DEFAULT_SHORTCUT_PRESET } from '../utils/shortcuts';
 import { MindmapView } from './Mindmap';
 
 pdfjsLib.GlobalWorkerOptions.workerSrc = PdfWorkerUrl;
@@ -113,6 +114,10 @@ export function Reader({ book, onBack, initialTarget, initialPosition }: ReaderP
   const [txtPages, setTxtPages] = useState<string[]>([]);
   const [pageIndex, setPageIndex] = useState(0);
   const [totalPages, setTotalPages] = useState(0);
+  /** TXT 目录（含段落行号），阅读器内可直接跳转与增补章节 */
+  const [txtToc, setTxtToc] = useState<TocEntry[]>([]);
+  /** 每页起始段落行号，用于目录行号 ↔ 页码互转 */
+  const txtPageStartRef = useRef<number[]>([]);
   const [pdfReady, setPdfReady] = useState(false);
 
   // EPUB 版式
@@ -135,6 +140,8 @@ export function Reader({ book, onBack, initialTarget, initialPosition }: ReaderP
   const [aiWord, setAiWord] = useState('');
   /** 多进度断点：本书已保存的阅读位置 */
   const [positions, setPositions] = useState<ReadingPosition[]>([]);
+  /** 当前快捷键预设（从设置读取） */
+  const presetRef = useRef(getPreset(DEFAULT_SHORTCUT_PRESET));
   /** TXT 规整：原文缓存 + 开关（非破坏性，原文与磁盘文件都不动） */
   const txtRawRef = useRef<string>('');
   const [normalizeOn, setNormalizeOn] = useState(false);
@@ -646,7 +653,7 @@ export function Reader({ book, onBack, initialTarget, initialPosition }: ReaderP
       return;
     }
     try {
-      const [tts, font, fontSize, lineHeight, theme, pos, autoOn, autoDayStart, autoNightStart, autoDay, autoNight, bookPrefsRaw] = await Promise.all([
+      const [tts, font, fontSize, lineHeight, theme, pos, autoOn, autoDayStart, autoNightStart, autoDay, autoNight, bookPrefsRaw, presetKey] = await Promise.all([
         api.getSetting('ttsRate'),
         api.getSetting('fontFamily'),
         api.getSetting('fontSize'),
@@ -659,7 +666,9 @@ export function Reader({ book, onBack, initialTarget, initialPosition }: ReaderP
         api.getSetting('autoThemeDay'),
         api.getSetting('autoThemeNight'),
         api.getSetting(bookPrefsKey(book.id)),
+        api.getSetting('shortcutPreset'),
       ]);
+      if (presetKey) presetRef.current = getPreset(presetKey);
       const rate = Number(tts);
       if (!Number.isNaN(rate) && rate >= 0.5 && rate <= 2) setTtsRate(rate);
       // 自动护眼配置（纯本地时钟判定）
@@ -724,6 +733,7 @@ export function Reader({ book, onBack, initialTarget, initialPosition }: ReaderP
         await loadEpub(bytes.buffer as ArrayBuffer);
       } else if (book.file_type === 'txt') {
         loadTxt(bytes);
+        setTxtToc(((await api.getBookToc(book.id)) as TocEntry[]) || []);
       } else if (book.file_type === 'pdf') {
         await loadPdf(bytes);
       } else {
@@ -904,6 +914,7 @@ export function Reader({ book, onBack, initialTarget, initialPosition }: ReaderP
       }
     }
     if (current) pages.push(current);
+    txtPageStartRef.current = pageStartLines;
     setTxtPages(pages.length > 0 ? pages : ['（空文件）']);
     const total = pages.length || 1;
     const savedPage = savedPosRef.current?.page;
@@ -947,6 +958,31 @@ export function Reader({ book, onBack, initialTarget, initialPosition }: ReaderP
     const raw = txtRawRef.current;
     if (!raw) return;
     paginateTxt(next ? normalizeText(raw) : raw, pageIndex);
+  };
+
+  /** TXT 目录跳转：优先按段落行号换算页码，缺失时退回页号 */
+  const goToTxtLine = (line?: number, page?: number) => {
+    const idx =
+      line != null
+        ? lineToPageIndex(txtPageStartRef.current, line)
+        : clampPage((page ?? 0) + 1, totalPages) - 1;
+    setPageIndex(idx);
+    window.electronAPI?.updateProgress(book.id, totalPages > 0 ? idx / totalPages : 0);
+  };
+
+  /** 把当前页起始位置登记为章节并保存（目录转为手动编辑，不再被自动解析覆盖） */
+  const handleAddChapterAtCursor = async () => {
+    const line = txtPageStartRef.current[pageIndex];
+    if (line == null) return;
+    const firstLine =
+      (txtPages[pageIndex] || '').split('\n').map(s => s.trim()).find(Boolean) ?? '';
+    const label = prompt('章节名称：', firstLine.slice(0, 30));
+    if (!label) return;
+    const next = [...txtToc, { label, href: '', page: pageIndex, line }].sort(
+      (a, b) => (a.line ?? 0) - (b.line ?? 0),
+    );
+    setTxtToc(next);
+    await window.electronAPI?.saveToc(book.id, next);
   };
 
   const loadPdf = async (bytes: Uint8Array) => {
@@ -1332,6 +1368,13 @@ export function Reader({ book, onBack, initialTarget, initialPosition }: ReaderP
     }, 600);
   };
 
+  /** 循环切换主题（快捷键用） */
+  const cycleTheme = () => {
+    const order: ThemeName[] = ['dark', 'light', 'sepia'];
+    const idx = order.indexOf(cfgRef.current.theme as ThemeName);
+    changeTheme(order[(idx + 1) % order.length]);
+  };
+
   const changeTheme = (theme: 'dark' | 'light' | 'sepia') => {
     // 手动改过主题：本次阅读不再被自动护眼覆盖
     themeUserOverrideRef.current = true;
@@ -1593,31 +1636,34 @@ export function Reader({ book, onBack, initialTarget, initialPosition }: ReaderP
             onBack();
           }
           break;
-        case 'Home':
-          e.preventDefault();
-          goToFirst();
-          break;
-        case 'End':
-          e.preventDefault();
-          goToLast();
-          break;
-        case 'ArrowRight':
-        case 'PageDown':
-        case ' ':
-          e.preventDefault();
-          handleNext();
-          break;
-        case 'ArrowLeft':
-        case 'PageUp':
-          e.preventDefault();
-          handlePrev();
-          break;
-        case 'F11':
-          e.preventDefault();
-          handleToggleFullscreen();
-          break;
         default:
           break;
+      }
+      // 预设快捷键：未绑定的键一律放行，不抢占系统/浏览器行为
+      const action = resolveAction(presetRef.current, e);
+      if (!action) return;
+      e.preventDefault();
+      switch (action) {
+        case 'next': handleNext(); break;
+        case 'prev': handlePrev(); break;
+        case 'first': goToFirst(); break;
+        case 'last': goToLast(); break;
+        case 'toggleTheme': cycleTheme(); break;
+        case 'fontUp': changeFontSize(2); break;
+        case 'fontDown': changeFontSize(-2); break;
+        case 'openToc': if (book.file_type === 'epub') togglePanel('toc'); break;
+        case 'openSearch': if (book.file_type !== 'pdf') togglePanel('search'); break;
+        case 'openNotes': togglePanel('notes'); break;
+        case 'openPositions': togglePanel('positions'); break;
+        case 'highlight': if (sel) handleHighlight(); break;
+        case 'addNote':
+          if (sel) {
+            setNoteDraft({ text: sel.text, position: sel.position });
+            setNoteContent('');
+          }
+          break;
+        case 'toggleDualColumn': toggleDualColumn(); break;
+        case 'toggleFullscreen': handleToggleFullscreen(); break;
       }
     };
     window.addEventListener('keydown', onKey);
@@ -1776,12 +1822,12 @@ export function Reader({ book, onBack, initialTarget, initialPosition }: ReaderP
             </button>
           )}
           {book.file_type === 'epub' && (
-            <>
-              <button onClick={toggleFlow} title={flowMode === 'paginated' ? '切换滚动模式' : '切换分页模式'}>
-                {flowMode === 'paginated' ? '📜' : '📄'}
-              </button>
-              <button onClick={() => togglePanel('toc')} className={panel === 'toc' ? 'active' : ''}>📑 目录</button>
-            </>
+            <button onClick={toggleFlow} title={flowMode === 'paginated' ? '切换滚动模式' : '切换分页模式'}>
+              {flowMode === 'paginated' ? '📜' : '📄'}
+            </button>
+          )}
+          {(book.file_type === 'epub' || book.file_type === 'txt') && (
+            <button onClick={() => togglePanel('toc')} className={panel === 'toc' ? 'active' : ''}>📑 目录</button>
           )}
           {book.file_type === 'pdf' && (
             <>
@@ -1928,6 +1974,24 @@ export function Reader({ book, onBack, initialTarget, initialPosition }: ReaderP
       )}
 
       <div className="reader-body">
+        {panel === 'toc' && book.file_type === 'txt' && (
+          <div className="toc-panel">
+            <div className="panel-title-row">
+              <h3>目录（{txtToc.length}）</h3>
+              <button className="link-btn" onClick={handleAddChapterAtCursor}>＋ 当前位置</button>
+            </div>
+            {txtToc.length === 0 ? (
+              <p className="empty-text">未识别到章节，可在书籍详情页调整解析方式</p>
+            ) : (
+              txtToc.map((t, i) => (
+                <div key={i} className="toc-item" onClick={() => goToTxtLine(t.line, t.page)}>
+                  {t.label}
+                </div>
+              ))
+            )}
+          </div>
+        )}
+
         {panel === 'toc' && book.file_type === 'epub' && (
           <div className="toc-panel">
             <h3>目录</h3>

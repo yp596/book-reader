@@ -1,6 +1,21 @@
 import { useState, useEffect } from 'react';
 import { THEMES } from '../utils/reader-options';
 import { DEFAULT_AUTO_THEME, isDaytime } from '../utils/auto-theme';
+import { SHORTCUT_PRESETS, getPreset, DEFAULT_SHORTCUT_PRESET, type ShortcutAction } from '../utils/shortcuts';
+
+/** 动作的中文名，用于键位表展示 */
+const ACTION_LABELS: Record<ShortcutAction, string> = {
+  next: '下一页', prev: '上一页', first: '跳到首页', last: '跳到末页',
+  toggleTheme: '切换主题', fontUp: '放大字号', fontDown: '缩小字号',
+  openToc: '打开目录', openSearch: '书内检索', openNotes: '我的笔记', openPositions: '阅读位置',
+  highlight: '高亮选中文字', addNote: '为选中文字写笔记',
+  toggleDualColumn: '单双栏切换', toggleFullscreen: '全屏切换',
+};
+
+const KEY_LABELS: Record<string, string> = {
+  ' ': '空格', ArrowRight: '→', ArrowLeft: '←', PageDown: 'PgDn', PageUp: 'PgUp',
+};
+const keyLabel = (k: string) => KEY_LABELS[k] ?? (k.length === 1 ? k.toUpperCase() : k);
 
 /** 0-23 整点选项 */
 const HOURS = Array.from({ length: 24 }, (_, i) => i);
@@ -28,6 +43,8 @@ interface SettingsData {
   autoThemeNight: 'dark' | 'light' | 'sepia';
   /** 退出软件时自动清理临时隐私数据 */
   privacyAutoClear: boolean;
+  /** 当前快捷键预设 key */
+  shortcutPreset: string;
   /** TXT 目录解析方式：默认择优 / 关键字 / 自定义正则 */
   txtTocMode: 'default' | 'keyword' | 'regex';
   /** 关键字解析时的关键字，多个用 | 或换行分隔 */
@@ -57,6 +74,7 @@ export function Settings() {
     autoThemeDay: DEFAULT_AUTO_THEME.dayTheme,
     autoThemeNight: DEFAULT_AUTO_THEME.nightTheme,
     privacyAutoClear: false,
+    shortcutPreset: DEFAULT_SHORTCUT_PRESET,
     txtTocMode: 'default',
     txtTocKeyword: '',
     txtTocRegex: '',
@@ -495,6 +513,36 @@ export function Settings() {
             ))}
           </div>
         )}
+      </section>
+
+      <section className="settings-section">
+        <h2>快捷键方案</h2>
+        <p className="section-desc">
+          三套预设一键切换。每套都保留翻页与首末页基础键，不会出现切过去翻不了页的情况。
+        </p>
+        <div className="preset-row">
+          {SHORTCUT_PRESETS.map(p => (
+            <button
+              key={p.key}
+              className={`preset-card${settings.shortcutPreset === p.key ? ' active' : ''}`}
+              onClick={() => handleChange('shortcutPreset', p.key)}
+            >
+              <strong>{p.name}</strong>
+              <span>{p.desc}</span>
+            </button>
+          ))}
+        </div>
+        <div className="keymap-list">
+          {Object.entries(getPreset(settings.shortcutPreset).map).map(([key, action]) => (
+            <div key={key} className="keymap-row">
+              <kbd>{keyLabel(key)}</kbd>
+              <span>{ACTION_LABELS[action as ShortcutAction]}</span>
+            </div>
+          ))}
+        </div>
+        <p className="section-desc" style={{ marginTop: 12, marginBottom: 0 }}>
+          固定键位：Esc 收起面板 / 返回书架；Alt+← → 前进后退。
+        </p>
       </section>
 
       <section className="settings-section">

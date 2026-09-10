@@ -1495,3 +1495,65 @@ button:focus-visible, input:focus-visible, select:focus-visible, textarea:focus-
   color: var(--text-muted);
   line-height: 1.5;
 }
+
+/* ============ 快捷键预设 ============ */
+.preset-row {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+  gap: 12px;
+  margin-bottom: 20px;
+}
+
+.preset-card {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding: 14px 16px;
+  text-align: left;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md);
+  background: var(--bg-input);
+  color: var(--text-secondary);
+  cursor: pointer;
+  transition: var(--transition);
+}
+
+.preset-card:hover { border-color: var(--accent); color: var(--text-primary); }
+
+.preset-card.active {
+  border-color: var(--accent);
+  background: var(--accent-glow);
+  color: var(--text-primary);
+}
+
+.preset-card strong { font-size: 14px; font-weight: 600; }
+.preset-card span { font-size: 12px; color: var(--text-muted); line-height: 1.5; }
+
+.keymap-list {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+  gap: 8px 20px;
+  padding-top: 16px;
+  border-top: 1px solid var(--border);
+}
+
+.keymap-row {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  font-size: 13px;
+  color: var(--text-secondary);
+}
+
+.keymap-row kbd {
+  min-width: 46px;
+  padding: 3px 8px;
+  text-align: center;
+  border: 1px solid var(--border-light);
+  border-bottom-width: 2px;
+  border-radius: 5px;
+  background: var(--bg-card);
+  color: var(--text-primary);
+  font-family: inherit;
+  font-size: 12px;
+}
