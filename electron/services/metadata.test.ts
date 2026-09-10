@@ -138,19 +138,22 @@ describe('parseTxtChapters', () => {
 });
 
 describe('TXT 目录提取', () => {
-  it('超过 4MB 的 UTF-8 文件仍能识别章节（截断处字符不完整时不误判为 GBK）', async () => {
+  it('超过 4MB 的 UTF-8 文件全量识别章节（不截断、不误判编码）', async () => {
     const p = path.join(tmpDir, 'big.txt');
     let s = '';
     let i = 0;
-    // 行长度递增变化，使 4MB 截断点落在多字节字符中间
+    // 行长度递增变化，使原先的 4MB 截断点落在多字节字符中间
     while (s.length < 5 * 1024 * 1024) {
       i++;
       s += '第' + i + '章 标题' + '字'.repeat(i % 37) + '\n' + '正文内容'.repeat(1 + (i % 53)) + '\n';
     }
+    // 末尾追加特征章节，验证 4MB 之后的内容同样被解析
+    s += '第九九九九章 末尾章节\n正文\n';
     fs.writeFileSync(p, s, 'utf-8');
     const toc = await extractToc(p, '.txt');
     expect(toc.length).toBeGreaterThan(0);
     expect(toc[0].label).toContain('第1章');
+    expect(toc[toc.length - 1].label).toContain('第九九九九章');
   });
 });
 

@@ -15,6 +15,7 @@ import {
 } from '../utils/book-prefs';
 import { parseMindmap, MindNode } from '../utils/mindmap';
 import { lookupMark } from '../utils/mark-lookup';
+import { normalizeText } from '../utils/text-normalize';
 import { MindmapView } from './Mindmap';
 
 pdfjsLib.GlobalWorkerOptions.workerSrc = PdfWorkerUrl;
@@ -132,6 +133,9 @@ export function Reader({ book, onBack, initialTarget }: ReaderProps) {
   const [aiWord, setAiWord] = useState('');
   /** 多进度断点：本书已保存的阅读位置 */
   const [positions, setPositions] = useState<ReadingPosition[]>([]);
+  /** TXT 规整：原文缓存 + 开关（非破坏性，原文与磁盘文件都不动） */
+  const txtRawRef = useRef<string>('');
+  const [normalizeOn, setNormalizeOn] = useState(false);
   /** 原文批注预览：点击正文高亮时展开对应的完整笔记 */
   const [markPreview, setMarkPreview] = useState<{
     position: string;
@@ -872,13 +876,11 @@ export function Reader({ book, onBack, initialTarget }: ReaderProps) {
     return idx >= 0 ? idx : null;
   };
 
-  const loadTxt = (bytes: Uint8Array) => {
-    let text: string;
-    try {
-      text = new TextDecoder('utf-8', { fatal: true }).decode(bytes);
-    } catch {
-      text = new TextDecoder('gbk').decode(bytes);
-    }
+  /**
+   * TXT 分页。keepPage 非空时沿用该页码（规整切换场景），
+   * 否则按目录/断点定位。
+   */
+  const paginateTxt = (text: string, keepPage: number | null = null) => {
     const paragraphs = text.split('\n');
     const pages: string[] = [];
     // 每页起始段落行号，用于把目录里的章节行号换算成真实页码
@@ -899,15 +901,37 @@ export function Reader({ book, onBack, initialTarget }: ReaderProps) {
     // 目录跳转页码从 0 起，保存的页码同样从 0 起，clampPage 入参为 1 起
     // 章节行号优先：按字符数估算的页码会与实际分页产生累积偏差
     const startPage =
-      initialTarget?.line != null
-        ? lineToPageIndex(pageStartLines, initialTarget.line)
-        : initialTarget?.page != null
-          ? clampPage(initialTarget.page + 1, total) - 1
-          : savedPage != null
-            ? clampPage(savedPage + 1, total) - 1
-            : 0;
+      keepPage != null
+        ? clampPage(keepPage + 1, total) - 1
+        : initialTarget?.line != null
+          ? lineToPageIndex(pageStartLines, initialTarget.line)
+          : initialTarget?.page != null
+            ? clampPage(initialTarget.page + 1, total) - 1
+            : savedPage != null
+              ? clampPage(savedPage + 1, total) - 1
+              : 0;
     setPageIndex(startPage);
     setTotalPages(total);
+  };
+
+  const loadTxt = (bytes: Uint8Array) => {
+    let text: string;
+    try {
+      text = new TextDecoder('utf-8', { fatal: true }).decode(bytes);
+    } catch {
+      text = new TextDecoder('gbk').decode(bytes);
+    }
+    txtRawRef.current = text;
+    paginateTxt(normalizeOn ? normalizeText(text) : text);
+  };
+
+  /** 切换文本规整：只换渲染源，不动原文、不写磁盘，可随时还原 */
+  const toggleNormalize = () => {
+    const next = !normalizeOn;
+    setNormalizeOn(next);
+    const raw = txtRawRef.current;
+    if (!raw) return;
+    paginateTxt(next ? normalizeText(raw) : raw, pageIndex);
   };
 
   const loadPdf = async (bytes: Uint8Array) => {
@@ -1757,6 +1781,15 @@ export function Reader({ book, onBack, initialTarget }: ReaderProps) {
           <button onClick={() => togglePanel('marks')} className={panel === 'marks' ? 'active' : ''} title="书签">
             🔖{bookmarks.length > 0 ? ` ${bookmarks.length}` : ''}
           </button>
+          {book.file_type === 'txt' && (
+            <button
+              onClick={toggleNormalize}
+              className={normalizeOn ? 'active' : ''}
+              title={normalizeOn ? '还原原始排版' : '文本规整：清理空行/缩进/硬折行（不改原文件）'}
+            >
+              ✨ 规整
+            </button>
+          )}
           <button onClick={() => togglePanel('positions')} className={panel === 'positions' ? 'active' : ''} title="阅读位置">
             📍{positions.length > 0 ? ` ${positions.length}` : ''}
           </button>
