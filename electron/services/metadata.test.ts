@@ -3,7 +3,7 @@ import fs from 'fs';
 import os from 'os';
 import path from 'path';
 import JSZip from 'jszip';
-import { extractMetadata, parseTxtChapters, docxToChapters } from './metadata';
+import { extractMetadata, extractToc, parseTxtChapters, docxToChapters } from './metadata';
 
 let tmpDir: string;
 
@@ -116,6 +116,41 @@ describe('parseTxtChapters', () => {
     const toc = parseTxtChapters(text);
     expect(toc[0].page).toBe(0);
     expect(toc[1].page).toBeGreaterThan(0);
+  });
+
+  it('记录章节所在段落行号', () => {
+    const text = '书名\n\n第一章 开始\n正文\n\n第二章 继续\n正文';
+    const toc = parseTxtChapters(text);
+    expect(toc.map(t => t.line)).toEqual([2, 5]);
+  });
+
+  it('标题尾部 30 字以内识别，超过则不算章节', () => {
+    const ok = parseTxtChapters('第一章 ' + '标'.repeat(30));
+    expect(ok).toHaveLength(1);
+    const tooLong = parseTxtChapters('第一章 ' + '标'.repeat(31));
+    expect(tooLong).toEqual([]);
+  });
+
+  it('正文段落以「第X章」开头但过长，不误判为章节', () => {
+    const text = '第三章的内容他早就忘得一干二净，可是命运偏偏又把它摆到了面前，让他不得不重新面对。';
+    expect(parseTxtChapters(text)).toEqual([]);
+  });
+});
+
+describe('TXT 目录提取', () => {
+  it('超过 4MB 的 UTF-8 文件仍能识别章节（截断处字符不完整时不误判为 GBK）', async () => {
+    const p = path.join(tmpDir, 'big.txt');
+    let s = '';
+    let i = 0;
+    // 行长度递增变化，使 4MB 截断点落在多字节字符中间
+    while (s.length < 5 * 1024 * 1024) {
+      i++;
+      s += '第' + i + '章 标题' + '字'.repeat(i % 37) + '\n' + '正文内容'.repeat(1 + (i % 53)) + '\n';
+    }
+    fs.writeFileSync(p, s, 'utf-8');
+    const toc = await extractToc(p, '.txt');
+    expect(toc.length).toBeGreaterThan(0);
+    expect(toc[0].label).toContain('第1章');
   });
 });
 

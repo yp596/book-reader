@@ -3,7 +3,7 @@ import ePub from 'epubjs';
 import * as pdfjsLib from 'pdfjs-dist';
 import PdfWorkerUrl from 'pdfjs-dist/build/pdf.worker.min.mjs?url';
 import { Book, Bookmark, Note, TocEntry, ReadingPosition } from '../types';
-import { escapeHtml, excerptAround, clampPage, parseSavedPosition, serializeSavedPosition, SavedPosition } from '../utils/text';
+import { escapeHtml, excerptAround, clampPage, lineToPageIndex, parseSavedPosition, serializeSavedPosition, SavedPosition } from '../utils/text';
 import { fontStackOf, highlightColorOf, HIGHLIGHT_COLORS, type ThemeName } from '../utils/reader-options';
 import { resolveThemeByClock, type AutoThemeConfig } from '../utils/auto-theme';
 import {
@@ -14,6 +14,7 @@ import {
   type ReaderPrefs,
 } from '../utils/book-prefs';
 import { parseMindmap, MindNode } from '../utils/mindmap';
+import { lookupMark } from '../utils/mark-lookup';
 import { MindmapView } from './Mindmap';
 
 pdfjsLib.GlobalWorkerOptions.workerSrc = PdfWorkerUrl;
@@ -131,6 +132,14 @@ export function Reader({ book, onBack, initialTarget }: ReaderProps) {
   const [aiWord, setAiWord] = useState('');
   /** 多进度断点：本书已保存的阅读位置 */
   const [positions, setPositions] = useState<ReadingPosition[]>([]);
+  /** 原文批注预览：点击正文高亮时展开对应的完整笔记 */
+  const [markPreview, setMarkPreview] = useState<{
+    position: string;
+    text?: string;
+    note?: string;
+    noteId?: number;
+    markId?: number;
+  } | null>(null);
   /** 思维导图 */
   const [mindNodes, setMindNodes] = useState<MindNode[] | null>(null);
   const [mindTitle, setMindTitle] = useState('');
@@ -788,7 +797,7 @@ export function Reader({ book, onBack, initialTarget }: ReaderProps) {
         for (const b of saved) {
           try {
             const color = highlightColorOf(b.color || 'yellow');
-            rendition.annotations.highlight(b.position, {}, undefined, undefined, {
+            rendition.annotations.highlight(b.position, { markId: b.id }, undefined, undefined, {
               fill: color.epubFill,
               'fill-opacity': '0.35',
             });
@@ -824,6 +833,11 @@ export function Reader({ book, onBack, initialTarget }: ReaderProps) {
           if (!renderedView.window?.getSelection()?.toString().trim()) setSel(null);
         });
       } catch { /* 忽略 */ }
+    });
+
+    // 点击正文高亮 → 展开对应笔记（原文 → 笔记）
+    rendition.on('markClicked', (cfiRange: string, data: any) => {
+      openMarkPreview(cfiRange, data?.markId);
     });
 
     rendition.on('relocated', (location: any) => {
@@ -867,9 +881,12 @@ export function Reader({ book, onBack, initialTarget }: ReaderProps) {
     }
     const paragraphs = text.split('\n');
     const pages: string[] = [];
+    // 每页起始段落行号，用于把目录里的章节行号换算成真实页码
+    const pageStartLines: number[] = [];
     let current = '';
-    for (const p of paragraphs) {
-      current += p + '\n';
+    for (let i = 0; i < paragraphs.length; i++) {
+      if (current === '') pageStartLines.push(i);
+      current += paragraphs[i] + '\n';
       if (current.length >= 3000) {
         pages.push(current);
         current = '';
@@ -880,12 +897,15 @@ export function Reader({ book, onBack, initialTarget }: ReaderProps) {
     const total = pages.length || 1;
     const savedPage = savedPosRef.current?.page;
     // 目录跳转页码从 0 起，保存的页码同样从 0 起，clampPage 入参为 1 起
+    // 章节行号优先：按字符数估算的页码会与实际分页产生累积偏差
     const startPage =
-      initialTarget?.page != null
-        ? clampPage(initialTarget.page + 1, total) - 1
-        : savedPage != null
-          ? clampPage(savedPage + 1, total) - 1
-          : 0;
+      initialTarget?.line != null
+        ? lineToPageIndex(pageStartLines, initialTarget.line)
+        : initialTarget?.page != null
+          ? clampPage(initialTarget.page + 1, total) - 1
+          : savedPage != null
+            ? clampPage(savedPage + 1, total) - 1
+            : 0;
     setPageIndex(startPage);
     setTotalPages(total);
   };
@@ -995,18 +1015,19 @@ export function Reader({ book, onBack, initialTarget }: ReaderProps) {
     const api = window.electronAPI;
     if (!api) return;
     const color = highlightColorOf(colorKey);
-    if (book.file_type === 'epub' && renditionRef.current) {
-      renditionRef.current.annotations.highlight(sel.position, {}, undefined, undefined, {
-        fill: color.epubFill,
-        'fill-opacity': '0.35',
-      });
-    }
-    await api.addBookmark({
+    // 先落库拿到 id，再挂到注解上——点击高亮时靠它反查笔记
+    const markId = await api.addBookmark({
       book_id: book.id,
       position: sel.position,
       text: sel.text.slice(0, 200),
       color: color.key,
     });
+    if (book.file_type === 'epub' && renditionRef.current) {
+      renditionRef.current.annotations.highlight(sel.position, { markId }, undefined, undefined, {
+        fill: color.epubFill,
+        'fill-opacity': '0.35',
+      });
+    }
     clearEpubSelection();
     setSel(null);
     await refreshMarks();
@@ -1061,6 +1082,24 @@ export function Reader({ book, onBack, initialTarget }: ReaderProps) {
     await refreshMarks();
   };
 
+  /**
+   * 原文 → 笔记：点击正文高亮时反查该处的批注与笔记。
+   * 优先按 markId 精确匹配，退化到按 position 匹配。
+   */
+  const openMarkPreview = (position: string, markId?: number) => {
+    const hit = lookupMark(bookmarks, notes, position, markId);
+    if (hit) setMarkPreview(hit);
+  };
+
+  /** TXT 正文点击：命中带 data-id 的高亮时展开预览 */
+  const handleTxtMarkClick = (e: React.MouseEvent) => {
+    const el = (e.target as HTMLElement).closest?.('mark[data-id]') as HTMLElement | null;
+    if (!el) return;
+    const id = Number(el.dataset.id);
+    const mark = bookmarks.find(b => b.id === id);
+    if (mark) openMarkPreview(mark.position, id);
+  };
+
   const jumpToMark = (position: string) => {
     pushHistory();
     if (book.file_type === 'epub') {
@@ -1110,7 +1149,7 @@ export function Reader({ book, onBack, initialTarget }: ReaderProps) {
   /** TXT 当前页渲染：书签高亮（含颜色）+ 检索词高亮合并 */
   const renderTxtHtml = () => {
     const text = txtPages[pageIndex] || '';
-    interface TxtRange { s: number; e: number; cls: string; style?: string }
+    interface TxtRange { s: number; e: number; cls: string; style?: string; id?: number }
     const ranges: TxtRange[] = [];
     // 书签优先
     for (const b of bookmarks) {
@@ -1120,7 +1159,7 @@ export function Reader({ book, onBack, initialTarget }: ReaderProps) {
       const e = Number(parts[3]);
       if (Number.isNaN(s) || Number.isNaN(e) || s >= e || s >= text.length) continue;
       const color = highlightColorOf(b.color || 'yellow');
-      ranges.push({ s, e: Math.min(e, text.length), cls: '', style: `background:${color.css}` });
+      ranges.push({ s, e: Math.min(e, text.length), cls: '', style: `background:${color.css}`, id: b.id });
     }
     // 检索词（跳过与书签重叠的部分）
     if (searchMark) {
@@ -1140,7 +1179,8 @@ export function Reader({ book, onBack, initialTarget }: ReaderProps) {
     for (const r of ranges) {
       if (r.s < last) continue;
       html += escapeHtml(text.slice(last, r.s));
-      const open = r.cls ? `<mark class="${r.cls}">` : `<mark style="${r.style}">`;
+      const attr = r.id != null ? ` data-id="${r.id}"` : '';
+      const open = r.cls ? `<mark class="${r.cls}">` : `<mark${attr} style="${r.style}">`;
       html += `${open}${escapeHtml(text.slice(r.s, r.e))}</mark>`;
       last = r.e;
     }
@@ -2047,6 +2087,7 @@ export function Reader({ book, onBack, initialTarget }: ReaderProps) {
                 columnGap: dualColumn ? '48px' : undefined,
               } as CSSProperties}
               onMouseUp={handleTxtMouseUp}
+              onClick={handleTxtMarkClick}
             >
               {txtHtml ? (
                 <span dangerouslySetInnerHTML={{ __html: txtHtml }} />
@@ -2199,6 +2240,45 @@ export function Reader({ book, onBack, initialTarget }: ReaderProps) {
             <div className="form-actions">
               <button className="btn-secondary" onClick={() => setNoteDraft(null)}>取消</button>
               <button className="btn-primary" onClick={handleSaveNote} disabled={!noteContent.trim()}>保存</button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* 批注详情（原文 → 笔记） */}
+      {markPreview && (
+        <div className="modal-mask" onClick={() => setMarkPreview(null)}>
+          <div className="note-modal" onClick={e => e.stopPropagation()}>
+            <h3>批注详情</h3>
+            {markPreview.text && <p className="mark-quote">{markPreview.text}</p>}
+            {markPreview.note ? (
+              <p className="mark-note" style={{ whiteSpace: 'pre-wrap' }}>{markPreview.note}</p>
+            ) : (
+              <p className="empty-text">此处只有高亮，还没有写笔记</p>
+            )}
+            <div className="form-actions">
+              <button
+                className="btn-secondary"
+                onClick={() => {
+                  jumpToMark(markPreview.position);
+                  setMarkPreview(null);
+                }}
+              >
+                跳到原文
+              </button>
+              {markPreview.noteId != null && (
+                <button
+                  className="btn-secondary"
+                  onClick={async () => {
+                    if (!confirm('删除这条笔记？')) return;
+                    await handleDeleteNote(markPreview.noteId!);
+                    setMarkPreview(null);
+                  }}
+                >
+                  删除笔记
+                </button>
+              )}
+              <button className="btn-primary" onClick={() => setMarkPreview(null)}>关闭</button>
             </div>
           </div>
         </div>

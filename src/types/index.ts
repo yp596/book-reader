@@ -30,6 +30,8 @@ export interface TocEntry {
   label: string;
   href: string;
   page?: number;
+  /** TXT 章节所在段落行号（0 起），优先于 page 用于换算真实页码 */
+  line?: number;
 }
 
 export interface WordEntry {

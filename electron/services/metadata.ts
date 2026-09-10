@@ -11,9 +11,12 @@ export interface BookMetadata {
 
 export interface TocEntry {
   label: string;
-  /** EPUB 为 href，TXT/PDF 为页码（1 起） */
+  /** EPUB 为 href；TXT/PDF 不使用 */
   href: string;
+  /** PDF 为跳转页码（1 起）；TXT 为按字符数估算的页码，仅作 line 缺失时的兜底 */
   page?: number;
+  /** TXT 章节所在段落行号（0 起），阅读器据此换算真实页码，优先于 page */
+  line?: number;
 }
 
 /** 从文件内容提取书名和作者，失败返回 null（调用方回退文件名） */
@@ -179,31 +182,48 @@ async function extractEpubToc(filePath: string): Promise<TocEntry[]> {
   }));
 }
 
-/** TXT 章节行识别：第X章/节/回/卷/篇/集/部 + 序言楔子等 */
+/**
+ * TXT 章节行识别：第X章/节/回/卷/篇/集/部 + 序言楔子等。
+ * 标题尾部长度由正则的 {0,30} 约束（与 Legado、Calibre 取值一致），
+ * 超出即视为正文段落误命中，而非标题。
+ */
 export function parseTxtChapters(text: string): TocEntry[] {
   const pattern =
-    /^(第[一二三四五六七八九十百千万\d\s]+[章节回卷篇集部])\s*(.*)$|^(序言|楔子|引子|序章|终章|尾声|后记|番外.*|序)$/;
+    /^(第[一二三四五六七八九十百千万\d\s]+[章节回卷篇集部])\s*(.{0,30})$|^(序言|楔子|引子|序章|终章|尾声|后记|番外.{0,30}|序)$/;
   const lines = text.split('\n');
   const entries: TocEntry[] = [];
   let charCount = 0;
-  for (const raw of lines) {
+  for (let i = 0; i < lines.length; i++) {
+    const raw = lines[i];
     const line = raw.trim();
-    const m = pattern.exec(line);
-    if (m && line.length <= 40) {
-      entries.push({ label: line, href: '', page: Math.floor(charCount / 3000) });
+    if (pattern.test(line)) {
+      // line 记录段落行号供阅读器换算真实页码；page 为字符数估算值，会与真实分页产生累积偏差
+      entries.push({ label: line, href: '', page: Math.floor(charCount / 3000), line: i });
     }
     charCount += raw.length + 1;
   }
   return entries;
 }
 
-function readTextHead(filePath: string, maxBytes = 65536): string {  const buffer = fs.readFileSync(filePath);
-  const head = buffer.slice(0, maxBytes);
-  try {
-    return new TextDecoder('utf-8', { fatal: true }).decode(head);
-  } catch {
-    return new TextDecoder('gbk').decode(head);
+/**
+ * 文本解码，自动识别 UTF-8 / GBK。
+ * 读取头部时截断点可能落在多字节字符中间，此时 UTF-8 严格解码会抛错；
+ * 需先回退最多 3 字节再判定，否则正常 UTF-8 文件会被误判为 GBK，全文变乱码。
+ */
+function decodeTextAuto(buffer: Buffer): string {
+  for (let drop = 0; drop <= 3 && drop < buffer.length; drop++) {
+    try {
+      return new TextDecoder('utf-8', { fatal: true }).decode(buffer.subarray(0, buffer.length - drop));
+    } catch {
+      // 截断处字符不完整，回退一字节重试
+    }
   }
+  return new TextDecoder('gbk').decode(buffer);
+}
+
+function readTextHead(filePath: string, maxBytes = 65536): string {
+  const buffer = fs.readFileSync(filePath);
+  return decodeTextAuto(buffer.subarray(0, maxBytes));
 }
 
 function extractTxtToc(filePath: string): TocEntry[] {

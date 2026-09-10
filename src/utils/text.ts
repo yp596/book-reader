@@ -32,6 +32,27 @@ export const clampPage = (page: number, total: number) => {
   return Math.min(Math.max(1, Math.floor(page)), total);
 };
 
+/**
+ * 章节段落行号 → 页码下标（0 起）。
+ * pageStartLines 为每页起始段落行号（递增），取起始行号不超过 line 的最后一页。
+ */
+export const lineToPageIndex = (pageStartLines: number[], line: number) => {
+  if (pageStartLines.length === 0) return 0;
+  let lo = 0;
+  let hi = pageStartLines.length - 1;
+  let ans = 0;
+  while (lo <= hi) {
+    const mid = (lo + hi) >> 1;
+    if (pageStartLines[mid] <= line) {
+      ans = mid;
+      lo = mid + 1;
+    } else {
+      hi = mid - 1;
+    }
+  }
+  return ans;
+};
+
 /** 上次阅读位置：EPUB 记 CFI，TXT/PDF 记页码（0 起） */
 export interface SavedPosition {
   cfi?: string;

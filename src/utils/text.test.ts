@@ -5,6 +5,7 @@ import {
   formatMinutes,
   formatFileSize,
   clampPage,
+  lineToPageIndex,
   serializeSavedPosition,
   parseSavedPosition,
 } from './text';
@@ -75,6 +76,34 @@ describe('clampPage', () => {
   it('非法输入回退第 1 页', () => {
     expect(clampPage(NaN, 10)).toBe(1);
     expect(clampPage(5, 0)).toBe(1);
+  });
+});
+
+describe('lineToPageIndex', () => {
+  const starts = [0, 10, 20, 30];
+
+  it('行号落在页起始行上，取该页', () => {
+    expect(lineToPageIndex(starts, 0)).toBe(0);
+    expect(lineToPageIndex(starts, 10)).toBe(1);
+    expect(lineToPageIndex(starts, 30)).toBe(3);
+  });
+
+  it('行号落在页中间，取所属页', () => {
+    expect(lineToPageIndex(starts, 5)).toBe(0);
+    expect(lineToPageIndex(starts, 19)).toBe(1);
+    expect(lineToPageIndex(starts, 29)).toBe(2);
+  });
+
+  it('行号超出范围，钳到末页', () => {
+    expect(lineToPageIndex(starts, 9999)).toBe(3);
+  });
+
+  it('行号为负，取首页', () => {
+    expect(lineToPageIndex(starts, -1)).toBe(0);
+  });
+
+  it('空页表返回 0', () => {
+    expect(lineToPageIndex([], 5)).toBe(0);
   });
 });
 
