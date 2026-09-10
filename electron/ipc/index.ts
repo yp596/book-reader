@@ -18,7 +18,22 @@ import {
 } from '../services/local-backup';
 import { ModelService } from '../services/model-service';
 import { listComicPages, readComicPage } from '../services/comic';
+import { extractCover } from '../services/cover';
 import { contentHash } from '../services/file-hash';
+
+/**
+ * 补全缺失的封面：封面提取是后加的，此前入库的书都没有封面。
+ * 逐个处理、单本失败跳过，不影响其它书与界面。
+ */
+async function backfillCovers(db: DatabaseService) {
+  for (const book of db.getBooksWithoutCover()) {
+    try {
+      const hash = book.hash || contentHash(book.file_path);
+      const cover = await extractCover(book.file_path, '.' + book.file_type, hash);
+      if (cover) db.setBookCover(book.id, cover);
+    } catch { /* 跳过这本 */ }
+  }
+}
 
 const sanitizeFileName = (name: string) => name.replace(/[\\/:*?"<>|]/g, '_');
 
@@ -93,9 +108,15 @@ async function importOneFile(db: DatabaseService, filePath: string) {
   }
 
   const meta = ext === '.docx' ? await extractMetadata(filePath, ext) : await extractMetadata(storePath, storeExt);
+  // 封面提取失败不阻塞导入，书架会退回格式占位块
+  let coverUrl: string | null = null;
+  try {
+    coverUrl = await extractCover(storePath, storeExt, hash);
+  } catch { /* 忽略 */ }
   const id = db.insertBook({
     title: meta?.title ?? fileName,
     author: meta?.author,
+    cover_path: coverUrl ?? undefined,
     file_path: storePath,
     file_type: storeExt.slice(1),
     hash,
@@ -124,6 +145,9 @@ export function registerIpcHandlers() {
       regex: db.getSetting('txtTocRegex') ?? '',
     };
   };
+
+  // 启动后异步补全缺失的封面，不阻塞界面
+  setTimeout(() => { void backfillCovers(db); }, 3000);
 
   // ============ Books ============
 
@@ -942,6 +966,20 @@ export function registerIpcHandlers() {
     }
     db.setSetting('lastSyncAt', new Date().toLocaleString());
     return restored;
+  });
+
+  // ============ 应用信息（静态只读，不联网） ============
+
+  ipcMain.handle('app:info', () => {
+    return {
+      version: app.getVersion(),
+      electron: process.versions.electron,
+      chrome: process.versions.chrome,
+      node: process.versions.node,
+      platform: process.platform,
+      dataDir: app.getPath('userData'),
+      booksDir: path.join(app.getPath('userData'), 'books'),
+    };
   });
 
   // ============ 隐私清理（纯本地） ============

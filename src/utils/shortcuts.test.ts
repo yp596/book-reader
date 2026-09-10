@@ -4,6 +4,8 @@ import {
   DEFAULT_SHORTCUT_PRESET,
   getPreset,
   normalizeKey,
+  ACTION_LABELS,
+  keyLabel,
   resolveAction,
 } from './shortcuts';
 
@@ -111,5 +113,35 @@ describe('resolveAction', () => {
 
   it('未绑定按键返回 null', () => {
     expect(resolveAction(reading, { key: 'z' })).toBeNull();
+  });
+});
+
+describe('ACTION_LABELS / keyLabel', () => {
+  it('每套预设里出现的动作都有中文名（否则界面会显示 undefined）', () => {
+    for (const p of SHORTCUT_PRESETS) {
+      for (const action of Object.values(p.map)) {
+        expect(ACTION_LABELS[action]).toBeTruthy();
+      }
+    }
+  });
+
+  it('中文名非空且无重复遗漏项', () => {
+    for (const [action, label] of Object.entries(ACTION_LABELS)) {
+      expect(action.length).toBeGreaterThan(0);
+      expect(label.length).toBeGreaterThan(0);
+    }
+  });
+
+  it('keyLabel 符号化常见按键', () => {
+    expect(keyLabel(' ')).toBe('空格');
+    expect(keyLabel('ArrowRight')).toBe('→');
+    expect(keyLabel('ArrowLeft')).toBe('←');
+    expect(keyLabel('PageDown')).toBe('PgDn');
+  });
+
+  it('keyLabel 单字符转大写，其他原样', () => {
+    expect(keyLabel('h')).toBe('H');
+    expect(keyLabel('F11')).toBe('F11');
+    expect(keyLabel('/')).toBe('/');
   });
 });

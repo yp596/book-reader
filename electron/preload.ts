@@ -110,6 +110,9 @@ contextBridge.exposeInMainWorld('electronAPI', {
   syncBackup: () => ipcRenderer.invoke('sync:backup'),
   syncRestore: () => ipcRenderer.invoke('sync:restore'),
 
+  // 应用信息
+  getAppInfo: () => ipcRenderer.invoke('app:info'),
+
   // 隐私清理
   clearPrivacy: (opts: {
     positions?: boolean;

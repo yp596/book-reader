@@ -1574,3 +1574,57 @@ button:focus-visible, input:focus-visible, select:focus-visible, textarea:focus-
   letter-spacing: 1px;
   margin-bottom: 4px;
 }
+
+/* ============ 帮助与关于 ============ */
+.help-steps {
+  padding-left: 20px;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  font-size: 14px;
+  color: var(--text-secondary);
+  line-height: 1.7;
+}
+
+.help-steps strong { color: var(--text-primary); }
+
+.help-preset {
+  margin-bottom: 18px;
+  padding-bottom: 14px;
+  border-bottom: 1px dashed var(--border);
+}
+
+.help-preset:last-of-type { border-bottom: none; margin-bottom: 0; }
+
+.help-preset-title {
+  font-size: 14px;
+  font-weight: 600;
+  color: var(--text-primary);
+  margin-bottom: 10px;
+}
+
+.faq-item {
+  padding: 14px 0;
+  border-bottom: 1px dashed var(--border);
+}
+
+.faq-item:last-child { border-bottom: none; padding-bottom: 0; }
+
+.faq-q {
+  font-size: 14px;
+  font-weight: 600;
+  color: var(--text-primary);
+  margin-bottom: 6px;
+}
+
+.faq-a {
+  font-size: 13px;
+  color: var(--text-secondary);
+  line-height: 1.8;
+}
+
+.mono-cell {
+  font-family: 'JetBrains Mono', Consolas, monospace;
+  font-size: 12px;
+  word-break: break-all;
+}

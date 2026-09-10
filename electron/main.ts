@@ -1,11 +1,33 @@
-import { app, BrowserWindow, globalShortcut, clipboard } from 'electron';
+import { app, BrowserWindow, globalShortcut, clipboard, protocol, net } from 'electron';
+import fs from 'fs';
 import path from 'path';
+import { pathToFileURL } from 'url';
 import { DatabaseService } from './services/db.service';
 import { ModelService } from './services/model-service';
 import { disposeEngine } from './services/llama-engine';
 import { registerIpcHandlers } from './ipc';
+import { LOCAL_FILE_SCHEME, filePathFromUrl, isInsideBooksDir } from './services/local-file';
+
+// 必须在 app ready 之前声明为特权协议，否则渲染进程的 CSP 与跨源策略会拦掉封面请求
+protocol.registerSchemesAsPrivileged([
+  {
+    scheme: LOCAL_FILE_SCHEME,
+    privileges: { standard: true, secure: true, supportFetchAPI: true, stream: true },
+  },
+]);
 
 let mainWindow: BrowserWindow | null = null;
+
+/** 处理本机文件请求：只放行书库目录内的文件，不把整个磁盘暴露给渲染进程 */
+function registerLocalFileProtocol() {
+  protocol.handle(LOCAL_FILE_SCHEME, async (request) => {
+    const filePath = filePathFromUrl(request.url);
+    if (!isInsideBooksDir(filePath) || !fs.existsSync(filePath)) {
+      return new Response('forbidden', { status: 403 });
+    }
+    return net.fetch(pathToFileURL(filePath).toString());
+  });
+}
 
 function createWindow() {
   const db = DatabaseService.getInstance();
@@ -53,6 +75,7 @@ function registerShortcuts() {
 // 先异步初始化数据库，再创建窗口
 app.whenReady().then(async () => {
   await DatabaseService.create();
+  registerLocalFileProtocol();
   createWindow();
   registerIpcHandlers();
   registerShortcuts();

@@ -79,6 +79,22 @@ export const SHORTCUT_PRESETS: ShortcutPreset[] = [
 
 export const DEFAULT_SHORTCUT_PRESET = 'reading';
 
+/** 动作的中文名：设置页与帮助中心共用，避免两处各写一份而漂移 */
+export const ACTION_LABELS: Record<ShortcutAction, string> = {
+  next: '下一页', prev: '上一页', first: '跳到首页', last: '跳到末页',
+  toggleTheme: '切换主题', fontUp: '放大字号', fontDown: '缩小字号',
+  openToc: '打开目录', openSearch: '书内检索', openNotes: '我的笔记', openPositions: '阅读位置',
+  highlight: '高亮选中文字', addNote: '为选中文字写笔记',
+  toggleDualColumn: '单双栏切换', toggleFullscreen: '全屏切换',
+};
+
+/** 按键的展示名（空格、方向键等符号化） */
+const KEY_LABELS: Record<string, string> = {
+  ' ': '空格', ArrowRight: '→', ArrowLeft: '←', PageDown: 'PgDn', PageUp: 'PgUp',
+};
+
+export const keyLabel = (k: string) => KEY_LABELS[k] ?? (k.length === 1 ? k.toUpperCase() : k);
+
 export function getPreset(key: string): ShortcutPreset {
   return SHORTCUT_PRESETS.find(p => p.key === key) ?? SHORTCUT_PRESETS[0];
 }

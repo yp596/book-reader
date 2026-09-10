@@ -8,11 +8,12 @@ import { SourceManager } from './components/SourceManager';
 import { SemanticSearch } from './components/SemanticSearch';
 import { Vocab } from './components/Vocab';
 import { Notes } from './components/Notes';
+import { HelpAbout } from './components/HelpAbout';
 import { Models } from './components/Models';
 import { Settings } from './components/Settings';
 import { Statistics } from './components/Statistics';
 
-type View = 'library' | 'detail' | 'reader' | 'sources' | 'rag' | 'vocab' | 'notes' | 'models' | 'settings' | 'stats';
+type View = 'library' | 'detail' | 'reader' | 'sources' | 'rag' | 'vocab' | 'notes' | 'models' | 'settings' | 'stats' | 'help';
 
 // 安全获取 electronAPI，preload 未就绪时返回空实现
 const api = window.electronAPI ?? {
@@ -147,6 +148,8 @@ function App() {
         return <Vocab />;
       case 'notes':
         return <Notes onOpenNote={handleOpenNote} />;
+      case 'help':
+        return <HelpAbout />;
       case 'models':
         return <Models />;
       case 'settings':

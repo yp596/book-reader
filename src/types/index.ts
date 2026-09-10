@@ -240,6 +240,15 @@ declare global {
       deleteWord: (id: number) => Promise<void>;
       syncBackup: () => Promise<boolean>;
       syncRestore: () => Promise<number>;
+      getAppInfo: () => Promise<{
+        version: string;
+        electron: string;
+        chrome: string;
+        node: string;
+        platform: string;
+        dataDir: string;
+        booksDir: string;
+      }>;
       clearPrivacy: (opts: {
         positions?: boolean;
         chapterCache?: boolean;

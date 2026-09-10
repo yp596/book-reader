@@ -376,8 +376,7 @@ export class DatabaseService {
   }
 
   /** 读取本书指定的目录规则名，空串表示自动择优 */
-  getBookTocRule(id: number): string {
-    const row = this.get('SELECT toc_rule FROM books WHERE id = ?', [id]) as
+  getBookTocRule(id: number): string {    const row = this.get('SELECT toc_rule FROM books WHERE id = ?', [id]) as
       | { toc_rule?: string }
       | undefined;
     return row?.toc_rule ?? '';
@@ -385,6 +384,23 @@ export class DatabaseService {
 
   setBookTocRule(id: number, ruleName: string) {
     this.run('UPDATE books SET toc_rule = ? WHERE id = ?', [ruleName, id]);
+  }
+
+  /**
+   * 写入封面地址。
+   * 存的是 bookfile:// 协议 URL 而非磁盘路径——渲染进程直接用它做 <img src>，
+   * 磁盘路径在 loadFile 的页面里解析不成图片。
+   */
+  setBookCover(id: number, coverUrl: string) {
+    this.run('UPDATE books SET cover_path = ? WHERE id = ?', [coverUrl, id]);
+  }
+
+  /** 尚无封面的书籍，供启动后异步补全 */
+  getBooksWithoutCover(): { id: number; file_path: string; file_type: string; hash: string }[] {
+    return this.all(
+      `SELECT id, file_path, file_type, COALESCE(hash, '') AS hash
+       FROM books WHERE cover_path IS NULL OR cover_path = ''`,
+    );
   }
 
   setBookLocations(id: number, locationsJson: string) {

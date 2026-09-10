@@ -1,21 +1,8 @@
 import { useState, useEffect } from 'react';
 import { THEMES } from '../utils/reader-options';
 import { DEFAULT_AUTO_THEME, isDaytime } from '../utils/auto-theme';
-import { SHORTCUT_PRESETS, getPreset, DEFAULT_SHORTCUT_PRESET, type ShortcutAction } from '../utils/shortcuts';
+import { SHORTCUT_PRESETS, getPreset, DEFAULT_SHORTCUT_PRESET, ACTION_LABELS, keyLabel, type ShortcutAction } from '../utils/shortcuts';
 
-/** 动作的中文名，用于键位表展示 */
-const ACTION_LABELS: Record<ShortcutAction, string> = {
-  next: '下一页', prev: '上一页', first: '跳到首页', last: '跳到末页',
-  toggleTheme: '切换主题', fontUp: '放大字号', fontDown: '缩小字号',
-  openToc: '打开目录', openSearch: '书内检索', openNotes: '我的笔记', openPositions: '阅读位置',
-  highlight: '高亮选中文字', addNote: '为选中文字写笔记',
-  toggleDualColumn: '单双栏切换', toggleFullscreen: '全屏切换',
-};
-
-const KEY_LABELS: Record<string, string> = {
-  ' ': '空格', ArrowRight: '→', ArrowLeft: '←', PageDown: 'PgDn', PageUp: 'PgUp',
-};
-const keyLabel = (k: string) => KEY_LABELS[k] ?? (k.length === 1 ? k.toUpperCase() : k);
 
 /** 0-23 整点选项 */
 const HOURS = Array.from({ length: 24 }, (_, i) => i);
