@@ -20,6 +20,7 @@ import { ModelService } from '../services/model-service';
 import { listComicPages, readComicPage } from '../services/comic';
 import { extractCover } from '../services/cover';
 import { contentHash } from '../services/file-hash';
+import { buildBookListMarkdown, buildBookBackup, backupFileName, localDateStamp } from '../services/book-export';
 
 /**
  * 补全缺失的封面：封面提取是后加的，此前入库的书都没有封面。
@@ -277,6 +278,42 @@ export function registerIpcHandlers() {
   // 书籍锁定：防误删误改（仅保留阅读）
   ipcMain.handle('books:toggleLock', (_event, id: number) => {
     return db.toggleBookLock(id);
+  });
+
+  // 导出书籍清单（Markdown）
+  ipcMain.handle('books:exportList', async (event) => {
+    const win = BrowserWindow.fromWebContents(event.sender) ?? undefined;
+    const books = db.getAllBooks() as any[];
+    const { canceled, filePath } = await dialog.showSaveDialog(win!, {
+      title: '导出书籍清单',
+      defaultPath: `书籍清单-${localDateStamp()}.md`,
+      filters: [{ name: 'Markdown', extensions: ['md'] }],
+    });
+    if (canceled || !filePath) return null;
+    fs.writeFileSync(filePath, buildBookListMarkdown(books), 'utf-8');
+    return { filePath, count: books.length };
+  });
+
+  // 单本书备份：带走阅读痕迹（不含书籍文件）
+  ipcMain.handle('books:exportOne', async (event, id: number) => {
+    const win = BrowserWindow.fromWebContents(event.sender) ?? undefined;
+    const book = db.getBookById(id) as any;
+    if (!book) throw new Error('书籍不存在');
+    const { canceled, filePath } = await dialog.showSaveDialog(win!, {
+      title: '导出书籍备份',
+      defaultPath: backupFileName(book.title),
+      filters: [{ name: '备份文件', extensions: ['json'] }],
+    });
+    if (canceled || !filePath) return null;
+    const payload = buildBookBackup(
+      book,
+      db.getBookmarksByBookId(id),
+      db.getNotesByBookId(id),
+      db.getReadingPositions(id, 100),
+    );
+    fs.writeFileSync(filePath, JSON.stringify(payload, null, 2), 'utf-8');
+    const n = payload.bookmarks.length + payload.notes.length + payload.positions.length;
+    return { filePath, count: n };
   });
 
   // 批量场景：显式设置（不做 toggle）
@@ -1007,7 +1044,7 @@ export function registerIpcHandlers() {
   // 导出：默认增量（自上次导出后的变更），可显式要求全量
   ipcMain.handle('backup:export', async (event, full = false) => {
     const win = BrowserWindow.fromWebContents(event.sender) ?? undefined;
-    const stamp = new Date().toISOString().slice(0, 10);
+    const stamp = localDateStamp();
     const { canceled, filePath } = await dialog.showSaveDialog(win!, {
       title: '导出备份',
       defaultPath: `book-reader-backup-${stamp}.json`,

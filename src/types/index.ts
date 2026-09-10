@@ -154,6 +154,8 @@ declare global {
       setBookLock: (id: number, locked: boolean) => Promise<void>;
       setBookStatus: (id: number, status: string) => Promise<void>;
       setBookRating: (id: number, rating: number) => Promise<void>;
+      exportBookList: () => Promise<{ filePath: string; count: number } | null>;
+      exportOneBook: (id: number) => Promise<{ filePath: string; count: number } | null>;
       getReadingPositions: (bookId: number) => Promise<ReadingPosition[]>;
       addReadingPosition: (p: {
         book_id: number;

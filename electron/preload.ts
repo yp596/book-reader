@@ -38,6 +38,8 @@ contextBridge.exposeInMainWorld('electronAPI', {
     ipcRenderer.invoke('books:setStatus', id, status),
   setBookRating: (id: number, rating: number) =>
     ipcRenderer.invoke('books:setRating', id, rating),
+  exportBookList: () => ipcRenderer.invoke('books:exportList'),
+  exportOneBook: (id: number) => ipcRenderer.invoke('books:exportOne', id),
   getReadingPositions: (bookId: number) => ipcRenderer.invoke('positions:list', bookId),
   addReadingPosition: (p: any) => ipcRenderer.invoke('positions:add', p),
   deleteReadingPosition: (id: number) => ipcRenderer.invoke('positions:delete', id),

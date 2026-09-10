@@ -36,6 +36,8 @@ interface SettingsData {
   forceFont: boolean;
   /** 批注只读：禁止新增/删除批注 */
   annotationsReadonly: boolean;
+  /** 闲置判定天数（书架「闲置」筛选用） */
+  idleDays: number;
   /** TXT 目录解析方式：默认择优 / 关键字 / 自定义正则 */
   txtTocMode: 'default' | 'keyword' | 'regex';
   /** 关键字解析时的关键字，多个用 | 或换行分隔 */
@@ -68,6 +70,7 @@ export function Settings() {
     shortcutPreset: DEFAULT_SHORTCUT_PRESET,
     forceFont: false,
     annotationsReadonly: false,
+    idleDays: 90,
     txtTocMode: 'default',
     txtTocKeyword: '',
     txtTocRegex: '',
@@ -90,7 +93,7 @@ export function Settings() {
     if (!api) return;
     const BOOL_KEYS: (keyof SettingsData)[] = ['autoTheme', 'privacyAutoClear', 'forceFont', 'annotationsReadonly'];
     const NUM_KEYS: (keyof SettingsData)[] = [
-      'fontSize', 'lineHeight', 'ttsRate', 'autoThemeDayStart', 'autoThemeNightStart',
+      'fontSize', 'lineHeight', 'ttsRate', 'autoThemeDayStart', 'autoThemeNightStart', 'idleDays',
     ];
     const keys = Object.keys(settings) as (keyof SettingsData)[];
     const loaded = { ...settings };
@@ -363,6 +366,16 @@ export function Settings() {
             </p>
           </div>
         )}
+        <div className="form-row">
+          <label>闲置判定天数（书架「闲置」筛选）</label>
+          <input
+            type="number"
+            min={1}
+            max={3650}
+            value={settings.idleDays}
+            onChange={e => handleChange('idleDays', Math.max(1, Number(e.target.value) || 1))}
+          />
+        </div>
         <div className="form-row">
           <label>默认字体</label>
           <select value={settings.fontFamily} onChange={e => handleChange('fontFamily', e.target.value)}>

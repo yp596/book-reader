@@ -13,7 +13,7 @@ interface BookListProps {
 
 type ViewMode = 'grid' | 'list';
 type SortBy = SortByWithRating;
-type Filter = 'all' | 'reading' | 'finished' | 'favorite' | 'shelved';
+type Filter = 'all' | 'reading' | 'finished' | 'favorite' | 'shelved' | 'idle';
 type SortByWithRating = 'recent' | 'title' | 'author' | 'rating';
 
 export function BookList({ books, searchQuery, onSelectBook, onShowDetail, onRefresh, onImport }: BookListProps) {
@@ -24,6 +24,8 @@ export function BookList({ books, searchQuery, onSelectBook, onShowDetail, onRef
   const [categories, setCategories] = useState<string[]>([]);
   const [contextMenu, setContextMenu] = useState<{ book: Book; x: number; y: number } | null>(null);
   const [dragOver, setDragOver] = useState(false);
+  /** 闲置判定天数（设置页可调，默认 90 天） */
+  const [idleDays, setIdleDays] = useState(90);
   // 批量管理：勾选态与所选 id
   const [batchMode, setBatchMode] = useState(false);
   const [selectedIds, setSelectedIds] = useState<Set<number>>(new Set());
@@ -31,6 +33,10 @@ export function BookList({ books, searchQuery, onSelectBook, onShowDetail, onRef
   useEffect(() => {
     onRefresh();
     window.electronAPI?.getCategories().then(setCategories).catch(() => {});
+    window.electronAPI?.getSetting('idleDays').then(v => {
+      const d = Number(v);
+      if (Number.isFinite(d) && d > 0) setIdleDays(d);
+    }).catch(() => {});
   }, []);
 
   const filteredBooks = books
@@ -48,6 +54,13 @@ export function BookList({ books, searchQuery, onSelectBook, onShowDetail, onRef
         case 'shelved':
           if (book.status !== 'shelved') return false;
           break;
+        case 'idle': {
+          // 从未读过则看加入时间；都没有时间戳的保守放行
+          const raw = book.last_read_at || book.created_at;
+          const t = raw ? new Date(raw).getTime() : NaN;
+          if (!Number.isNaN(t) && t > Date.now() - idleDays * 86400_000) return false;
+          break;
+        }
         default:
           break;
       }
@@ -204,6 +217,28 @@ export function BookList({ books, searchQuery, onSelectBook, onShowDetail, onRef
     onRefresh();
   };
 
+  const handleExportList = async () => {
+    try {
+      const r = await window.electronAPI?.exportBookList();
+      if (r) alert(`已导出 ${r.count} 本书的清单
+${r.filePath}`);
+    } catch (err) {
+      alert(err instanceof Error ? err.message : '导出失败');
+    }
+  };
+
+  const handleExportOne = async () => {
+    if (!contextMenu) return;
+    try {
+      const r = await window.electronAPI?.exportOneBook(contextMenu.book.id);
+      if (r) alert(`已导出《${contextMenu.book.title}》的批注与笔记（${r.count} 条）
+${r.filePath}`);
+    } catch (err) {
+      alert(err instanceof Error ? err.message : '导出失败');
+    }
+    closeMenu();
+  };
+
   const handleReveal = async () => {
     if (contextMenu) {
       try {
@@ -348,6 +383,7 @@ export function BookList({ books, searchQuery, onSelectBook, onShowDetail, onRef
     { key: 'finished', label: '已读完' },
     { key: 'favorite', label: '⭐ 收藏' },
     { key: 'shelved', label: '📦 搁置' },
+    { key: 'idle', label: `💤 闲置${idleDays}天+` },
   ];
 
   return (
@@ -372,6 +408,9 @@ export function BookList({ books, searchQuery, onSelectBook, onShowDetail, onRef
             title="批量管理书架"
           >
             {batchMode ? '退出批量' : '批量管理'}
+          </button>
+          <button className="btn-secondary small" onClick={handleExportList} title="导出全部书籍的清单（Markdown）">
+            导出清单
           </button>
           <button className="btn-secondary small" onClick={handleClearHistory} title="清除全部阅读进度">
             清除记录
@@ -589,6 +628,7 @@ export function BookList({ books, searchQuery, onSelectBook, onShowDetail, onRef
           <div className="context-menu-item" onClick={handleRename}>重命名</div>
           <div className="context-menu-item" onClick={handleRefreshMetadata}>重新识别标题</div>
           <div className="context-menu-item" onClick={handleFileInfo}>属性</div>
+          <div className="context-menu-item" onClick={handleExportOne}>导出批注与笔记</div>
           <div className="context-menu-item" onClick={handleReveal}>打开所在位置</div>
           <div className="context-menu-item danger" onClick={handleDelete}>删除</div>
         </div>
