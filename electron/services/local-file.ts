@@ -1,5 +1,4 @@
 import path from 'path';
-import { pathToFileURL, fileURLToPath } from 'url';
 import { app } from 'electron';
 
 /**
@@ -10,13 +9,23 @@ import { app } from 'electron';
  */
 export const LOCAL_FILE_SCHEME = 'bookfile';
 
-/** 本机路径 → 渲染进程可用的 URL（编码交给 Node，避免盘符冒号被误编码） */
-export const localFileUrl = (filePath: string) =>
-  pathToFileURL(filePath).href.replace(/^file:/, `${LOCAL_FILE_SCHEME}:`);
+/** 固定主机名。主机段会被 Chromium 统一转小写，不能用来承载路径 */
+const FILE_HOST = 'local';
 
-/** 协议请求 URL → 本机路径（平台本地分隔符，便于与其它路径直接比较） */
+/**
+ * 本机路径 → 渲染进程可用的 URL。
+ *
+ * 两点约束来自实测（协议注册为 standard 后 Chromium 会按 URL 结构规整）：
+ * 1. Windows 盘符的冒号无论是否编码都会被解码后当成主机名分隔符，必须整段编码掉；
+ * 2. 主机段会被转小写，而 base64url 大小写敏感，所以路径必须放在路径段里。
+ * 合起来就是：固定主机名 + 路径段放 base64url。代价是 URL 不可读。
+ */
+export const localFileUrl = (filePath: string) =>
+  `${LOCAL_FILE_SCHEME}://${FILE_HOST}/${Buffer.from(filePath, 'utf8').toString('base64url')}`;
+
+/** 协议请求 URL → 本机路径 */
 export const filePathFromUrl = (url: string) =>
-  fileURLToPath(url.replace(new RegExp(`^${LOCAL_FILE_SCHEME}:`), 'file:'));
+  Buffer.from(new URL(url).pathname.replace(/^\//, ''), 'base64url').toString('utf8');
 
 /** 书库目录：封面等本机资源只允许从这里读取 */
 export const booksDir = () => path.join(app.getPath('userData'), 'books');

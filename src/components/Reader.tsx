@@ -441,6 +441,8 @@ export function Reader({ book, onBack, initialTarget, initialPosition }: ReaderP
 
   // PDF 缩放 / 跳页 / 全屏 / 朗读变速
   const [pdfScale, setPdfScale] = useState(1.5);
+  /** PDF 页面旋转角度（0/90/180/270） */
+  const [pdfRotation, setPdfRotation] = useState(0);
   const pdfBaseWidthRef = useRef(0);
   const pdfWrapRef = useRef<HTMLDivElement>(null);
   const [jumpInput, setJumpInput] = useState('');
@@ -1502,13 +1504,13 @@ export function Reader({ book, onBack, initialTarget, initialPosition }: ReaderP
 
   // ---------- 翻页 ----------
 
-  const renderPdfPage = async (pdfDoc: any, pageNum: number, scale: number) => {
+  const renderPdfPage = async (pdfDoc: any, pageNum: number, scale: number, rotation = 0) => {
     if (!canvasRef.current) return;
     const page = await pdfDoc.getPage(pageNum);
     if (!pdfBaseWidthRef.current) {
       pdfBaseWidthRef.current = page.getViewport({ scale: 1 }).width;
     }
-    const viewport = page.getViewport({ scale });
+    const viewport = page.getViewport({ scale, rotation });
     const canvas = canvasRef.current;
     canvas.height = viewport.height;
     canvas.width = viewport.width;
@@ -1518,9 +1520,9 @@ export function Reader({ book, onBack, initialTarget, initialPosition }: ReaderP
 
   useEffect(() => {
     if (book.file_type === 'pdf' && pdfReady && pdfDocRef.current && !loading && !pdfReflow) {
-      renderPdfPage(pdfDocRef.current, pageIndex + 1, pdfScale);
+      renderPdfPage(pdfDocRef.current, pageIndex + 1, pdfScale, pdfRotation);
     }
-  }, [pdfReady, pageIndex, loading, pdfScale, pdfReflow]);
+  }, [pdfReady, pageIndex, loading, pdfScale, pdfReflow, pdfRotation]);
 
   // TXT / PDF：页码变化即记录阅读位置（加载完成前不写，避免覆盖上次位置）
   useEffect(() => {
@@ -1590,6 +1592,9 @@ export function Reader({ book, onBack, initialTarget, initialPosition }: ReaderP
     }
     await buildPdfReflow();
   };
+
+  /** 顺时针旋转 90°（用于横向扫描件） */
+  const rotatePdf = () => setPdfRotation(r => (r + 90) % 360);
 
   const changePdfScale = (delta: number) => {
     setPdfScale(s => {
@@ -1985,6 +1990,13 @@ export function Reader({ book, onBack, initialTarget, initialPosition }: ReaderP
               <button onClick={() => changePdfScale(0.25)} title="放大">🔍+</button>
               <button onClick={fitPdfWidth} title="适应宽度">↔</button>
               <button
+                onClick={rotatePdf}
+                className={pdfRotation ? 'active' : ''}
+                title="顺时针旋转 90°"
+              >
+                ⟳{pdfRotation ? ` ${pdfRotation}°` : ''}
+              </button>
+              <button
                 onClick={togglePdfReflow}
                 className={pdfReflow ? 'active' : ''}
                 disabled={reflowBusy}
@@ -2315,6 +2327,9 @@ export function Reader({ book, onBack, initialTarget, initialPosition }: ReaderP
             {hits.length === 0 && !searching && keyword && (
               <p className="empty-text">没有找到相关内容</p>
             )}
+            {hits.length > 0 && (
+              <p className="search-count">共找到 {hits.length} 处</p>
+            )}
             {hits.map((h, i) => (
               <div key={i} className="mark-item search-hit" onClick={() => jumpToHit(h)}>
                 <p className="mark-label">{h.label}</p>
@@ -2451,6 +2466,11 @@ export function Reader({ book, onBack, initialTarget, initialPosition }: ReaderP
             {reflowPage + 1} / {reflowPages.length}
           </span>
         )}
+        {book.file_type === 'txt' && txtRawRef.current.length > 0 && (
+          <span className="word-count" title="全书字数（不含空白字符）">
+            {txtRawRef.current.replace(/\s/g, '').length.toLocaleString()} 字
+          </span>
+        )}
         {book.file_type !== 'epub' && !pdfReflow && totalPages > 0 && (
           <>
             <span className="page-indicator">{pageIndex + 1} / {totalPages}</span>
@@ -2529,6 +2549,7 @@ export function Reader({ book, onBack, initialTarget, initialPosition }: ReaderP
           >
             📋 复制
           </button>
+          <span className="sel-count">{sel.text.replace(/\s/g, '').length} 字</span>
           <button onClick={() => { setSel(null); clearEpubSelection(); }} title="关闭">✕</button>
         </div>
       )}

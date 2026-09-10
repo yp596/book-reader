@@ -12,6 +12,10 @@ export interface ReaderPrefs {
   flowMode: 'paginated' | 'scrolled';
   /** PDF 缩放倍率 */
   pdfScale: number;
+  /** 漫画：双页合并显示（跨页大图并排） */
+  comicSpread: boolean;
+  /** 漫画：右向左翻页（日漫阅读方向） */
+  comicRtl: boolean;
 }
 
 export const DEFAULT_READER_PREFS: ReaderPrefs = {
@@ -22,6 +26,8 @@ export const DEFAULT_READER_PREFS: ReaderPrefs = {
   dualColumn: false,
   flowMode: 'paginated',
   pdfScale: 1.5,
+  comicSpread: false,
+  comicRtl: false,
 };
 
 /** 每本书的偏好存这个 key 下 */
@@ -55,6 +61,8 @@ export function parseBookPrefs(raw: string | null | undefined): Partial<ReaderPr
   if (typeof parsed.dualColumn === 'boolean') out.dualColumn = parsed.dualColumn;
   if (parsed.flowMode === 'paginated' || parsed.flowMode === 'scrolled') out.flowMode = parsed.flowMode;
   if (numIn(parsed.pdfScale, 0.5, 3)) out.pdfScale = parsed.pdfScale;
+  if (typeof parsed.comicSpread === 'boolean') out.comicSpread = parsed.comicSpread;
+  if (typeof parsed.comicRtl === 'boolean') out.comicRtl = parsed.comicRtl;
   return out;
 }
 
