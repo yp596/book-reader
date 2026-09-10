@@ -202,6 +202,9 @@ export class DatabaseService {
       `ALTER TABLE notes ADD COLUMN tags TEXT DEFAULT ''`,
       // 内容指纹：导入查重
       `ALTER TABLE books ADD COLUMN hash TEXT DEFAULT ''`,
+      // 阅读状态（''=按进度推断 / reading / finished / shelved）与星级评分
+      `ALTER TABLE books ADD COLUMN status TEXT DEFAULT ''`,
+      `ALTER TABLE books ADD COLUMN rating INTEGER DEFAULT 0`,
       // 本书指定的 TXT 目录规则名，空串表示自动择优
       `ALTER TABLE books ADD COLUMN toc_rule TEXT DEFAULT ''`,
       // 目录来源：auto 自动解析 / manual 用户手动编辑
@@ -334,6 +337,23 @@ export class DatabaseService {
   setCategory(id: number, category: string) {
     this.assertUnlocked(id, '修改分类');
     this.run('UPDATE books SET category = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?', [category.trim(), id]);
+  }
+
+  /** 阅读状态：'' 表示按进度自动推断，其余为用户显式标记 */
+  setBookStatus(id: number, status: string) {
+    this.assertUnlocked(id, '修改阅读状态');
+    const allowed = ['', 'reading', 'finished', 'shelved'];
+    this.run('UPDATE books SET status = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?', [
+      allowed.includes(status) ? status : '',
+      id,
+    ]);
+  }
+
+  /** 星级评分：0 表示未评分，1-5 为有效值 */
+  setBookRating(id: number, rating: number) {
+    this.assertUnlocked(id, '修改评分');
+    const r = Math.max(0, Math.min(5, Math.floor(Number(rating) || 0)));
+    this.run('UPDATE books SET rating = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?', [r, id]);
   }
 
   getCategories(): string[] {

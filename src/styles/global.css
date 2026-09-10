@@ -1557,3 +1557,20 @@ button:focus-visible, input:focus-visible, select:focus-visible, textarea:focus-
   font-family: inherit;
   font-size: 12px;
 }
+
+/* 搁置徽标（右下角，与收藏/锁定错开） */
+.shelf-badge {
+  position: absolute;
+  bottom: 8px;
+  right: 8px;
+  font-size: 14px;
+  filter: drop-shadow(0 2px 4px rgba(0, 0, 0, 0.5));
+}
+
+/* 星级评分 */
+.book-rating {
+  font-size: 12px;
+  color: var(--warning);
+  letter-spacing: 1px;
+  margin-bottom: 4px;
+}

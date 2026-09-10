@@ -17,6 +17,12 @@ export function BookDetail({ book, onBack, onRead }: BookDetailProps) {
   const [notes, setNotes] = useState<Note[]>([]);
   const [marks, setMarks] = useState<Bookmark[]>([]);
   const [fileSize, setFileSize] = useState(0);
+  // TXT 目录解析：可选规则、本书指定规则、目录来源（auto/manual）
+  const [ruleNames, setRuleNames] = useState<string[]>([]);
+  const [tocRule, setTocRule] = useState('');
+  const [tocSource, setTocSource] = useState('');
+  const [tocEditing, setTocEditing] = useState(false);
+  const [tocBusy, setTocBusy] = useState(false);
 
   useEffect(() => {
     loadAll();
@@ -27,16 +33,20 @@ export function BookDetail({ book, onBack, onRead }: BookDetailProps) {
     if (!api) return;
     setTocLoading(true);
     try {
-      const [t, n, m, info] = await Promise.all([
+      const [t, n, m, info, rules] = await Promise.all([
         api.getBookToc(book.id) as Promise<TocEntry[]>,
         api.getNotes(book.id),
         api.getBookmarks(book.id),
         api.getBookFileInfo(book.id),
+        api.getTocRules(book.id),
       ]);
       setToc(t);
       setNotes(n as Note[]);
       setMarks(m as Bookmark[]);
       setFileSize(info.size);
+      setRuleNames(rules.rules);
+      setTocRule(rules.current);
+      setTocSource(rules.source);
     } catch {
       setToc([]);
     } finally {
@@ -47,6 +57,52 @@ export function BookDetail({ book, onBack, onRead }: BookDetailProps) {
   const jumpToToc = (entry: TocEntry) => {
     // EPUB 用 href，TXT/PDF 用页码 — 交给阅读器处理，详情页只负责打开
     onRead({ ...book, _tocTarget: entry } as Book & { _tocTarget: TocEntry });
+  };
+
+  /** 切换本书使用的目录规则并重新解析（空串=恢复自动择优） */
+  const applyTocRule = async (ruleName: string) => {
+    const api = window.electronAPI;
+    if (!api) return;
+    setTocBusy(true);
+    try {
+      const entries = await api.reparseToc(book.id, ruleName);
+      setToc(entries);
+      setTocRule(ruleName);
+      setTocSource('auto');
+      setTocEditing(false);
+    } catch (err) {
+      alert(`重新解析失败：${err instanceof Error ? err.message : '未知错误'}`);
+    } finally {
+      setTocBusy(false);
+    }
+  };
+
+  /** 进入编辑态；退出时把改动写回（标记为手动编辑，不再被自动解析覆盖） */
+  const toggleTocEdit = async () => {
+    const api = window.electronAPI;
+    if (!api) return;
+    if (!tocEditing) {
+      setTocEditing(true);
+      return;
+    }
+    setTocBusy(true);
+    try {
+      await api.saveToc(book.id, toc);
+      setTocSource('manual');
+      setTocEditing(false);
+    } catch (err) {
+      alert(`保存失败：${err instanceof Error ? err.message : '未知错误'}`);
+    } finally {
+      setTocBusy(false);
+    }
+  };
+
+  const renameTocEntry = (index: number, label: string) => {
+    setToc(list => list.map((e, i) => (i === index ? { ...e, label } : e)));
+  };
+
+  const removeTocEntry = (index: number) => {
+    setToc(list => list.filter((_, i) => i !== index));
   };
 
   return (
@@ -102,17 +158,61 @@ export function BookDetail({ book, onBack, onRead }: BookDetailProps) {
       <div className="detail-body">
         {tab === 'toc' && (
           <>
+            {book.file_type === 'txt' && (
+              <>
+                <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 12, flexWrap: 'wrap' }}>
+                  <label style={{ fontSize: 13, opacity: 0.75 }}>解析方式</label>
+                  <select
+                    value={tocRule}
+                    disabled={tocBusy}
+                    onChange={e => applyTocRule(e.target.value)}
+                    style={{ flex: 1, minWidth: 160 }}
+                  >
+                    <option value="">自动（内置规则择优）</option>
+                    {ruleNames.map(r => (
+                      <option key={r} value={r}>{r}</option>
+                    ))}
+                  </select>
+                  <button className="link-btn" disabled={tocBusy} onClick={() => applyTocRule(tocRule)}>
+                    重新解析
+                  </button>
+                  <button className="link-btn" disabled={tocBusy} onClick={toggleTocEdit}>
+                    {tocEditing ? '保存' : '编辑'}
+                  </button>
+                </div>
+                {tocSource === 'manual' && !tocEditing && (
+                  <p className="empty-text" style={{ marginBottom: 8 }}>
+                    目录已手动编辑过，重新解析会覆盖手动改动
+                  </p>
+                )}
+              </>
+            )}
             {tocLoading ? (
               <p className="empty-text">加载目录中...</p>
             ) : toc.length === 0 ? (
               <p className="empty-text">本书无目录信息</p>
             ) : (
               <div className="toc-list">
-                {toc.map((t, i) => (
-                  <div key={i} className="toc-item full" onClick={() => jumpToToc(t)}>
-                    {t.label}
-                  </div>
-                ))}
+                {toc.map((t, i) =>
+                  tocEditing ? (
+                    <div
+                      key={i}
+                      className="toc-item full"
+                      style={{ display: 'flex', gap: 8, cursor: 'default' }}
+                    >
+                      <input
+                        value={t.label}
+                        onChange={e => renameTocEntry(i, e.target.value)}
+                        style={{ flex: 1 }}
+                      />
+                      <button className="danger" onClick={() => removeTocEntry(i)}>删除</button>
+                    </div>
+                  ) : (
+                    <div key={i} className="toc-item full" onClick={() => jumpToToc(t)}>
+                      {t.label}
+                    </div>
+                  ),
+                )}
               </div>
             )}
           </>

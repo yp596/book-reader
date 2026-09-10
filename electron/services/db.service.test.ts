@@ -268,3 +268,53 @@ describe('导入查重（内容指纹）', () => {
     expect(db.findBookByHash('hash-late')?.id).toBe(id);
   });
 });
+
+describe('阅读状态与星级评分', () => {
+  let sid: number;
+
+  beforeAll(() => {
+    sid = db.insertBook({ title: '状态测试书', file_path: '/tmp/status.epub', file_type: 'epub' });
+  });
+
+  it('默认状态为空（按进度推断）且未评分', () => {
+    const b = db.getBookById(sid);
+    expect(b.status ?? '').toBe('');
+    expect(b.rating ?? 0).toBe(0);
+  });
+
+  it('设置阅读状态', () => {
+    db.setBookStatus(sid, 'shelved');
+    expect(db.getBookById(sid).status).toBe('shelved');
+    db.setBookStatus(sid, 'reading');
+    expect(db.getBookById(sid).status).toBe('reading');
+  });
+
+  it('非法状态值被归一化为空串（不写脏数据）', () => {
+    db.setBookStatus(sid, '不存在的状态');
+    expect(db.getBookById(sid).status).toBe('');
+  });
+
+  it('评分钳制在 0-5', () => {
+    db.setBookRating(sid, 4);
+    expect(db.getBookById(sid).rating).toBe(4);
+    db.setBookRating(sid, 99);
+    expect(db.getBookById(sid).rating).toBe(5);
+    db.setBookRating(sid, -3);
+    expect(db.getBookById(sid).rating).toBe(0);
+  });
+
+  it('评分支持小数（向下取整）与非数字', () => {
+    db.setBookRating(sid, 3.7);
+    expect(db.getBookById(sid).rating).toBe(3);
+    db.setBookRating(sid, NaN as any);
+    expect(db.getBookById(sid).rating).toBe(0);
+  });
+
+  it('锁定的书籍拒绝改状态与评分', () => {
+    db.setBookLock(sid, true);
+    expect(() => db.setBookStatus(sid, 'finished')).toThrow(/已锁定/);
+    expect(() => db.setBookRating(sid, 5)).toThrow(/已锁定/);
+    db.setBookLock(sid, false);
+    expect(() => db.setBookStatus(sid, 'finished')).not.toThrow();
+  });
+});

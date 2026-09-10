@@ -3,6 +3,7 @@ import JSZip from 'jszip';
 import * as pdfjsLib from 'pdfjs-dist';
 import mammoth from 'mammoth';
 import * as cheerio from 'cheerio/slim';
+import { TXT_TOC_RULES, type TxtTocRule } from './txt-toc-rules';
 
 export interface BookMetadata {
   title: string;
@@ -120,13 +121,17 @@ function decodeXmlEntities(s: string): string {
 }
 
 /** 从文件内容提取目录：EPUB 读 NCX，TXT 识别章节标题行，PDF 读大纲 */
-export async function extractToc(filePath: string, ext: string): Promise<TocEntry[]> {
+export async function extractToc(
+  filePath: string,
+  ext: string,
+  txtOptions?: TxtTocOptions,
+): Promise<TocEntry[]> {
   try {
     switch (ext.toLowerCase()) {
       case '.epub':
         return await extractEpubToc(filePath);
       case '.txt':
-        return extractTxtToc(filePath);
+        return extractTxtToc(filePath, txtOptions);
       case '.pdf':
         return await extractPdfToc(filePath);
       default:
@@ -183,24 +188,167 @@ async function extractEpubToc(filePath: string): Promise<TocEntry[]> {
 }
 
 /**
- * TXT 章节行识别：第X章/节/回/卷/篇/集/部 + 序言楔子等。
- * 标题尾部长度由正则的 {0,30} 约束（与 Legado、Calibre 取值一致），
- * 超出即视为正文段落误命中，而非标题。
+ * 相邻两次命中至少间隔该字符数才计为新章节。
+ * 取值只需大于书籍前置目录页里章节名的行距（通常几十字符），
+ * 取值过大会把「每章几百字」的短章书按章吃掉一半（实测 1000 时 800 字/章的书只剩一半章节）。
  */
-export function parseTxtChapters(text: string): TocEntry[] {
-  const pattern =
-    /^(第[一二三四五六七八九十百千万\d\s]+[章节回卷篇集部])\s*(.{0,30})$|^(序言|楔子|引子|序章|终章|尾声|后记|番外.{0,30}|序)$/;
-  const lines = text.split('\n');
-  const entries: TocEntry[] = [];
-  let charCount = 0;
-  for (let i = 0; i < lines.length; i++) {
-    const raw = lines[i];
-    const line = raw.trim();
-    if (pattern.test(line)) {
-      // line 记录段落行号供阅读器换算真实页码；page 为字符数估算值，会与真实分页产生累积偏差
-      entries.push({ label: line, href: '', page: Math.floor(charCount / 3000), line: i });
+const TOC_HIT_MIN_GAP = 300;
+
+/**
+ * 编译规则正则。规则自带的行内标志（如 (?im)）在 JS 中不合法，提取为编译标志；
+ * 非法正则返回 null，由调用方跳过，不影响其他规则。
+ */
+function compileTocRule(pattern: string): RegExp | null {
+  try {
+    const inline = /^\(\?([gimsuy]+)\)/.exec(pattern);
+    const flags = 'gm' + (inline ? inline[1].replace(/[gm]/g, '') : '');
+    return new RegExp(inline ? pattern.slice(inline[0].length) : pattern, flags);
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * 统计有效章节命中数。
+ * 与上一次命中的间隔不足 TOC_HIT_MIN_GAP 的命中不计入：书籍前置目录页里章节名密排，
+ * 间距远小于正文，借此过滤；未计入的命中不推进参照位置。
+ */
+function countTocHits(text: string, re: RegExp): number {
+  let count = 0;
+  let lastEnd = -1;
+  re.lastIndex = 0;
+  for (let m = re.exec(text); m; m = re.exec(text)) {
+    if (m[0].length === 0) {
+      re.lastIndex++;
+      continue;
     }
-    charCount += raw.length + 1;
+    if (lastEnd < 0 || m.index - lastEnd > TOC_HIT_MIN_GAP) {
+      count++;
+      lastEnd = m.index + m[0].length;
+    }
+  }
+  return count;
+}
+
+/**
+ * 择优选择目录规则：启用的规则各跑一遍，取有效命中数最多者。
+ * 命中数相同时靠前的规则胜出（与 Legado 一致：倒序遍历配合 >=）。
+ */
+function selectTocRule(text: string): TxtTocRule | null {
+  const rules = TXT_TOC_RULES.filter(r => r.enable);
+  let best: TxtTocRule | null = null;
+  let bestCount = 1;
+  for (let i = rules.length - 1; i >= 0; i--) {
+    const re = compileTocRule(rules[i].chapterRule);
+    if (!re) continue;
+    const count = countTocHits(text, re);
+    if (count >= bestCount) {
+      bestCount = count;
+      best = rules[i];
+    }
+  }
+  return best;
+}
+
+/** TXT 目录解析配置：默认走内置规则择优，也可指定关键字或自定义正则 */
+export interface TxtTocOptions {
+  /** 解析方式：default 内置规则择优 / keyword 关键字 / regex 自定义正则 */
+  mode?: 'default' | 'keyword' | 'regex';
+  /** 关键字，多个用换行或 | 分隔（仅 mode=keyword 生效） */
+  keyword?: string;
+  /** 自定义正则（仅 mode=regex 生效） */
+  regex?: string;
+  /** 指定内置规则名，优先级高于 mode；未匹配到则回退择优 */
+  ruleName?: string;
+}
+
+/** 正则元字符转义，用于把用户输入的关键字安全拼进正则 */
+const escapeRegExp = (s: string) => s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+
+/** 内置规则名列表，供设置页与书籍详情页展示 */
+export const TXT_TOC_RULE_NAMES = TXT_TOC_RULES.map(r => r.name);
+
+/**
+ * 按配置解析出本次使用的规则。
+ * 未指定配置、或指定的规则不存在 / 非法时，回退到内置规则择优。
+ */
+function resolveTocRule(text: string, options?: TxtTocOptions): TxtTocRule | null {
+  if (options?.ruleName) {
+    const named = TXT_TOC_RULES.find(r => r.name === options.ruleName);
+    if (named) return named;
+  }
+  if (options?.mode === 'regex' && options.regex?.trim()) {
+    const pattern = options.regex.trim();
+    if (compileTocRule(pattern)) return { name: '自定义正则', chapterRule: pattern, enable: true };
+  }
+  if (options?.mode === 'keyword' && options.keyword?.trim()) {
+    const words = options.keyword
+      .split(/[\n|]/)
+      .map(s => s.trim())
+      .filter(Boolean)
+      .map(escapeRegExp);
+    if (words.length > 0) {
+      // 行首命中任一关键字即视为章节标题，尾部长度沿用内置规则的 30 字约束
+      return {
+        name: '自定义关键字',
+        chapterRule: `^[ 　\\t]{0,4}(?:${words.join('|')}).{0,30}$`,
+        enable: true,
+      };
+    }
+  }
+  return selectTocRule(text);
+}
+
+/**
+ * TXT 章节识别：先按配置定出规则（默认择优选出最贴合本书的一条），再逐条抽出章节。
+ * 规则表见 electron/services/txt-toc-rules.ts；标题尾部长度由各规则自身的 {0,30} 约束，
+ * 超出即视为正文段落误命中。
+ */
+export function parseTxtChapters(text: string, options?: TxtTocOptions): TocEntry[] {
+  const rule = resolveTocRule(text, options);
+  if (!rule) return [];
+  const re = compileTocRule(rule.chapterRule);
+  if (!re) return [];
+
+  const entries: TocEntry[] = [];
+  /** 开头密排段（通常是书籍前置目录页）里最后一个命中，用于修正首章位置 */
+  let leadingRunLast: TocEntry | null = null;
+  let lastEnd = -1;
+  let line = 0; // 当前扫描位置所在的行号
+  let cursor = 0; // 已统计过换行的扫描位置
+
+  /** 推进到指定偏移，累计途经的换行得到行号（行号供阅读器换算真实页码） */
+  const advanceTo = (offset: number) => {
+    let nl = text.indexOf('\n', cursor);
+    while (nl >= 0 && nl < offset) {
+      line++;
+      cursor = nl + 1;
+      nl = text.indexOf('\n', cursor);
+    }
+  };
+
+  re.lastIndex = 0;
+  for (let m = re.exec(text); m; m = re.exec(text)) {
+    if (m[0].length === 0) {
+      re.lastIndex++;
+      continue;
+    }
+    const label = m[0].trim();
+    if (!label) continue;
+    advanceTo(m.index);
+    // page 为字符数估算值，会与真实分页产生累积偏差，仅作行号缺失时的兜底
+    const entry: TocEntry = { label, href: '', page: Math.floor(m.index / 3000), line };
+    if (lastEnd >= 0 && m.index - lastEnd <= TOC_HIT_MIN_GAP) {
+      // 密排命中：前置目录页里章节名挤在一起，该段最后一个命中才是正文首章
+      if (entries.length === 1) leadingRunLast = entry;
+      continue;
+    }
+    lastEnd = m.index + m[0].length;
+    if (leadingRunLast) {
+      entries[0] = leadingRunLast;
+      leadingRunLast = null;
+    }
+    entries.push(entry);
   }
   return entries;
 }
@@ -226,11 +374,11 @@ function readTextHead(filePath: string, maxBytes = 65536): string {
   return decodeTextAuto(buffer.subarray(0, maxBytes));
 }
 
-function extractTxtToc(filePath: string): TocEntry[] {
+function extractTxtToc(filePath: string, options?: TxtTocOptions): TocEntry[] {
   // 全量读取：章节可能出现在文件任意位置，按头部截断会让后半本书没有目录。
   // 实测 140MB 中文 TXT 解析耗时约 0.5s，且仅导入时执行一次，无需分块。
   const buffer = fs.readFileSync(filePath);
-  return parseTxtChapters(decodeTextAuto(buffer));
+  return parseTxtChapters(decodeTextAuto(buffer), options);
 }
 
 async function extractPdfToc(filePath: string): Promise<TocEntry[]> {

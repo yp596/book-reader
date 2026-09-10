@@ -17,6 +17,7 @@ import {
   pruneSnapshots,
 } from '../services/local-backup';
 import { ModelService } from '../services/model-service';
+import { listComicPages, readComicPage } from '../services/comic';
 import { contentHash } from '../services/file-hash';
 
 const sanitizeFileName = (name: string) => name.replace(/[\\/:*?"<>|]/g, '_');
@@ -55,7 +56,7 @@ async function fetchChapterContent(
 /** 单文件导入复用逻辑（对话框/拖拽共用） */
 async function importOneFile(db: DatabaseService, filePath: string) {
   const ext = path.extname(filePath).toLowerCase();
-  if (!['.epub', '.txt', '.pdf', '.docx'].includes(ext)) {
+  if (!['.epub', '.txt', '.pdf', '.docx', '.cbz'].includes(ext)) {
     throw new Error(`不支持的格式：${ext || '(无后缀)'}`);
   }
   const fileName = path.basename(filePath, path.extname(filePath));
@@ -131,7 +132,7 @@ export function registerIpcHandlers() {
     const result = await dialog.showOpenDialog(win!, {
       title: '导入书籍',
       filters: [
-        { name: '电子书', extensions: ['epub', 'txt', 'pdf', 'docx'] },
+        { name: '电子书', extensions: ['epub', 'txt', 'pdf', 'docx', 'cbz'] },
         { name: '所有文件', extensions: ['*'] },
       ],
       properties: ['openFile', 'multiSelections'],
@@ -259,6 +260,15 @@ export function registerIpcHandlers() {
     db.setBookLock(id, locked);
   });
 
+  // 阅读状态与星级评分
+  ipcMain.handle('books:setStatus', (_event, id: number, status: string) => {
+    db.setBookStatus(id, status);
+  });
+
+  ipcMain.handle('books:setRating', (_event, id: number, rating: number) => {
+    db.setBookRating(id, rating);
+  });
+
   // ============ 多进度断点 ============
 
   ipcMain.handle('positions:list', (_event, bookId: number) => {
@@ -313,6 +323,20 @@ export function registerIpcHandlers() {
   // 保存手动编辑后的目录
   ipcMain.handle('books:saveToc', (_event, id: number, entries: unknown[]) => {
     db.setBookToc(id, JSON.stringify(Array.isArray(entries) ? entries : []), 'manual');
+  });
+
+  // 漫画包页面清单（按自然序）
+  ipcMain.handle('books:comicPages', async (_event, id: number) => {
+    const book = db.getBookById(id) as any;
+    if (!book) throw new Error('书籍不存在');
+    return listComicPages(book.file_path);
+  });
+
+  // 漫画单页数据：{ data: base64, mime }，条目不存在返回 null
+  ipcMain.handle('books:comicPage', async (_event, id: number, name: string) => {
+    const book = db.getBookById(id) as any;
+    if (!book) throw new Error('书籍不存在');
+    return readComicPage(book.file_path, name);
   });
 
   // 全屏切换

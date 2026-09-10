@@ -118,6 +118,9 @@ export function Reader({ book, onBack, initialTarget, initialPosition }: ReaderP
   const [txtToc, setTxtToc] = useState<TocEntry[]>([]);
   /** 每页起始段落行号，用于目录行号 ↔ 页码互转 */
   const txtPageStartRef = useRef<number[]>([]);
+  /** 漫画（CBZ）：页面条目名清单与当前页图片数据，按页拉取，不整包驻留 */
+  const [comicPages, setComicPages] = useState<string[]>([]);
+  const [comicPageData, setComicPageData] = useState<{ data: string; mime: string } | null>(null);
   const [pdfReady, setPdfReady] = useState(false);
 
   // EPUB 版式
@@ -733,24 +736,32 @@ export function Reader({ book, onBack, initialTarget, initialPosition }: ReaderP
     setTxtPages([]);
     setPageIndex(0);
     setTotalPages(0);
+    setComicPages([]);
+    setComicPageData(null);
     setSel(null);
     setNoteDraft(null);
     setHits([]);
     try {
       const api = window.electronAPI;
       if (!api) throw new Error('系统接口未就绪，请重启应用');
-      const base64 = await api.getBookFileData(book.id);
-      const bytes = Uint8Array.from(atob(base64), c => c.charCodeAt(0));
 
-      if (book.file_type === 'epub') {
-        await loadEpub(bytes.buffer as ArrayBuffer);
-      } else if (book.file_type === 'txt') {
-        loadTxt(bytes);
-        setTxtToc(((await api.getBookToc(book.id)) as TocEntry[]) || []);
-      } else if (book.file_type === 'pdf') {
-        await loadPdf(bytes);
+      if (book.file_type === 'cbz') {
+        // 漫画按页取用，不把整个压缩包读进渲染进程
+        await loadComic();
       } else {
-        throw new Error(`不支持的文件格式：${book.file_type}`);
+        const base64 = await api.getBookFileData(book.id);
+        const bytes = Uint8Array.from(atob(base64), c => c.charCodeAt(0));
+
+        if (book.file_type === 'epub') {
+          await loadEpub(bytes.buffer as ArrayBuffer);
+        } else if (book.file_type === 'txt') {
+          loadTxt(bytes);
+          setTxtToc(((await api.getBookToc(book.id)) as TocEntry[]) || []);
+        } else if (book.file_type === 'pdf') {
+          await loadPdf(bytes);
+        } else {
+          throw new Error(`不支持的文件格式：${book.file_type}`);
+        }
       }
       await refreshMarks();
     } catch (err) {
@@ -996,6 +1007,25 @@ export function Reader({ book, onBack, initialTarget, initialPosition }: ReaderP
     );
     setTxtToc(next);
     await window.electronAPI?.saveToc(book.id, next);
+  };
+
+  /** 漫画：取页面清单并恢复上次页码，图片由下方 effect 按需拉取 */
+  const loadComic = async () => {
+    const api = window.electronAPI;
+    if (!api) return;
+    const pages = await api.getComicPages(book.id);
+    const total = pages.length || 1;
+    const savedPage = savedPosRef.current?.page;
+    // 目录跳转页码从 0 起，保存的页码同样从 0 起，clampPage 入参为 1 起
+    const startPage =
+      initialTarget?.page != null
+        ? clampPage(initialTarget.page + 1, total) - 1
+        : savedPage != null
+          ? clampPage(savedPage + 1, total) - 1
+          : 0;
+    setComicPages(pages);
+    setTotalPages(total);
+    setPageIndex(startPage);
   };
 
   const loadPdf = async (bytes: Uint8Array) => {
@@ -1754,7 +1784,7 @@ export function Reader({ book, onBack, initialTarget, initialPosition }: ReaderP
         case 'fontUp': changeFontSize(2); break;
         case 'fontDown': changeFontSize(-2); break;
         case 'openToc': if (book.file_type === 'epub') togglePanel('toc'); break;
-        case 'openSearch': if (book.file_type !== 'pdf') togglePanel('search'); break;
+        case 'openSearch': if (book.file_type === 'epub' || book.file_type === 'txt') togglePanel('search'); break;
         case 'openNotes': togglePanel('notes'); break;
         case 'openPositions': togglePanel('positions'); break;
         case 'highlight': if (sel) handleHighlight(); break;
@@ -1887,8 +1917,26 @@ export function Reader({ book, onBack, initialTarget, initialPosition }: ReaderP
 
   const readerThemeClass =
     settings.theme === 'light' ? 'reader-light' : settings.theme === 'sepia' ? 'reader-sepia' : '';
-  const txtHtml = book.file_type === 'txt' ? renderTxtHtml() : null;
+  /** 支持文本类操作（朗读/检索/笔记/双栏/脑图）的格式；漫画与 PDF 不适用 */
+  const supportsTextOps = book.file_type === 'epub' || book.file_type === 'txt';
 
+  // 漫画翻页：按需拉取当前页图片，翻页时丢弃上一页，避免整包驻留内存
+  useEffect(() => {
+    if (book.file_type !== 'cbz') return;
+    const name = comicPages[pageIndex];
+    if (!name) {
+      setComicPageData(null);
+      return;
+    }
+    let alive = true;
+    window.electronAPI
+      ?.getComicPage(book.id, name)
+      .then(page => { if (alive) setComicPageData(page); })
+      .catch(() => { if (alive) setComicPageData(null); });
+    return () => { alive = false; };
+  }, [book.file_type, book.id, comicPages, pageIndex]);
+
+  const txtHtml = book.file_type === 'txt' ? renderTxtHtml() : null;
   return (
     <div className={`reader ${view.autoHideBar ? 'bar-auto-hide' : ''}`}>
       {view.autoHideBar && (
@@ -1918,7 +1966,7 @@ export function Reader({ book, onBack, initialTarget, initialPosition }: ReaderP
           <button onClick={() => changeTheme('dark')} className={settings.theme === 'dark' ? 'active' : ''}>🌙</button>
           <button onClick={() => changeTheme('light')} className={settings.theme === 'light' ? 'active' : ''}>☀️</button>
           <button onClick={() => changeTheme('sepia')} className={settings.theme === 'sepia' ? 'active' : ''}>📜</button>
-          {book.file_type !== 'pdf' && (
+          {supportsTextOps && (
             <button onClick={handleHeaderSpeak} className={speaking ? 'active' : ''} title={speaking ? '停止朗读' : '朗读'}>
               {speaking ? '⏹' : '🔊'}
             </button>
@@ -1964,17 +2012,17 @@ export function Reader({ book, onBack, initialTarget, initialPosition }: ReaderP
           <button onClick={() => togglePanel('positions')} className={panel === 'positions' ? 'active' : ''} title="阅读位置">
             📍{positions.length > 0 ? ` ${positions.length}` : ''}
           </button>
-          {book.file_type !== 'pdf' && (
+          {supportsTextOps && (
             <button onClick={() => togglePanel('search')} className={panel === 'search' ? 'active' : ''} title="书内检索">
               🔍
             </button>
           )}
-          {book.file_type !== 'pdf' && (
+          {supportsTextOps && (
             <button onClick={() => togglePanel('ai')} className={panel === 'ai' ? 'active' : ''} title="AI 助手">
               ✨
             </button>
           )}
-          {book.file_type !== 'pdf' && (
+          {supportsTextOps && (
             <button
               onClick={toggleDualColumn}
               className={dualColumn ? 'active' : ''}
@@ -2205,7 +2253,7 @@ export function Reader({ book, onBack, initialTarget, initialPosition }: ReaderP
               <button className="btn-secondary small" onClick={handleAiMindmap} disabled={aiLoading}>
                 🧠 脑图
               </button>
-              {book.file_type !== 'pdf' && (
+              {supportsTextOps && (
                 <button className="btn-secondary small" onClick={handleBookMindmap} disabled={aiLoading}>
                   📚 本书脑图
                 </button>
@@ -2295,6 +2343,29 @@ export function Reader({ book, onBack, initialTarget, initialPosition }: ReaderP
                 <div>{error}</div>
                 <button className="btn-primary" style={{ marginTop: 16 }} onClick={loadBook}>重新加载</button>
               </div>
+            </div>
+          )}
+          {!loading && !error && book.file_type === 'cbz' && totalPages > 0 && (
+            <div
+              style={{
+                flex: 1,
+                display: 'flex',
+                justifyContent: 'center',
+                alignItems: 'flex-start',
+                overflow: 'auto',
+                padding: 8,
+                minWidth: 0,
+              }}
+            >
+              {comicPageData ? (
+                <img
+                  src={`data:${comicPageData.mime};base64,${comicPageData.data}`}
+                  alt={`第 ${pageIndex + 1} 页`}
+                  style={{ maxWidth: '100%', height: 'auto', objectFit: 'contain' }}
+                />
+              ) : (
+                <p className="empty-text">加载中…</p>
+              )}
             </div>
           )}
           {!loading && !error && book.file_type === 'txt' && txtPages.length > 0 && (

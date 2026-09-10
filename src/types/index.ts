@@ -4,7 +4,7 @@ export interface Book {
   author?: string;
   cover_path?: string;
   file_path: string;
-  file_type: 'epub' | 'txt' | 'pdf';
+  file_type: 'epub' | 'txt' | 'pdf' | 'cbz';
   progress: number;
   last_read_at?: string;
   created_at: string;
@@ -13,6 +13,10 @@ export interface Book {
   toc?: string;
   locations?: string;
   locked?: number;
+  /** 阅读状态：''=按进度推断 / reading / finished / shelved */
+  status?: string;
+  /** 星级评分：0 未评分，1-5 有效 */
+  rating?: number;
 }
 
 export interface ReadingPosition {
@@ -148,6 +152,8 @@ declare global {
       toggleFavorite: (id: number) => Promise<number>;
       toggleBookLock: (id: number) => Promise<number>;
       setBookLock: (id: number, locked: boolean) => Promise<void>;
+      setBookStatus: (id: number, status: string) => Promise<void>;
+      setBookRating: (id: number, rating: number) => Promise<void>;
       getReadingPositions: (bookId: number) => Promise<ReadingPosition[]>;
       addReadingPosition: (p: {
         book_id: number;
@@ -163,6 +169,8 @@ declare global {
       getTocRules: (id: number) => Promise<{ rules: string[]; current: string; source: string }>;
       reparseToc: (id: number, ruleName?: string) => Promise<TocEntry[]>;
       saveToc: (id: number, entries: TocEntry[]) => Promise<void>;
+      getComicPages: (id: number) => Promise<string[]>;
+      getComicPage: (id: number, name: string) => Promise<{ data: string; mime: string } | null>;
       getAllBooks: () => Promise<Book[]>;
       getBookById: (id: number) => Promise<Book>;
       deleteBook: (id: number) => Promise<void>;

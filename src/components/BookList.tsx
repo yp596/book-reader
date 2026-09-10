@@ -12,8 +12,9 @@ interface BookListProps {
 }
 
 type ViewMode = 'grid' | 'list';
-type SortBy = 'recent' | 'title' | 'author';
-type Filter = 'all' | 'reading' | 'finished' | 'favorite';
+type SortBy = SortByWithRating;
+type Filter = 'all' | 'reading' | 'finished' | 'favorite' | 'shelved';
+type SortByWithRating = 'recent' | 'title' | 'author' | 'rating';
 
 export function BookList({ books, searchQuery, onSelectBook, onShowDetail, onRefresh, onImport }: BookListProps) {
   const [viewMode, setViewMode] = useState<ViewMode>('grid');
@@ -44,6 +45,9 @@ export function BookList({ books, searchQuery, onSelectBook, onShowDetail, onRef
         case 'favorite':
           if (!book.favorite) return false;
           break;
+        case 'shelved':
+          if (book.status !== 'shelved') return false;
+          break;
         default:
           break;
       }
@@ -61,6 +65,8 @@ export function BookList({ books, searchQuery, onSelectBook, onShowDetail, onRef
           return a.title.localeCompare(b.title);
         case 'author':
           return (a.author || '').localeCompare(b.author || '');
+        case 'rating':
+          return (b.rating ?? 0) - (a.rating ?? 0);
         case 'recent':
         default:
           return (b.last_read_at || '').localeCompare(a.last_read_at || '');
@@ -149,6 +155,53 @@ export function BookList({ books, searchQuery, onSelectBook, onShowDetail, onRef
       }
       closeMenu();
     }
+  };
+
+  const STATUS_OPTIONS = [
+    { v: '', label: '清除标记（按进度推断）' },
+    { v: 'reading', label: '在读' },
+    { v: 'finished', label: '已读完' },
+    { v: 'shelved', label: '搁置（暂时不读）' },
+  ];
+
+  const handleSetStatus = async () => {
+    if (!contextMenu) return;
+    const cur = contextMenu.book.status ?? '';
+    const menu = STATUS_OPTIONS.map((o, i) => `${i}=${o.label}`).join('  ');
+    const input = prompt(`设置阅读状态（${menu}）：`, String(Math.max(0, STATUS_OPTIONS.findIndex(o => o.v === cur))));
+    if (input === null) return;
+    const idx = Number(input);
+    const picked = STATUS_OPTIONS[idx];
+    if (!picked) {
+      alert('请输入列表中的序号');
+      return;
+    }
+    try {
+      await window.electronAPI?.setBookStatus(contextMenu.book.id, picked.v);
+    } catch (err) {
+      alert(err instanceof Error ? err.message : '操作失败');
+    }
+    closeMenu();
+    onRefresh();
+  };
+
+  const handleSetRating = async () => {
+    if (!contextMenu) return;
+    const cur = contextMenu.book.rating ?? 0;
+    const input = prompt(`给《${contextMenu.book.title}》评分（0-5，0 表示清除）：`, String(cur));
+    if (input === null) return;
+    const r = Number(input);
+    if (Number.isNaN(r) || r < 0 || r > 5) {
+      alert('请输入 0 到 5 之间的数字');
+      return;
+    }
+    try {
+      await window.electronAPI?.setBookRating(contextMenu.book.id, r);
+    } catch (err) {
+      alert(err instanceof Error ? err.message : '操作失败');
+    }
+    closeMenu();
+    onRefresh();
   };
 
   const handleReveal = async () => {
@@ -294,6 +347,7 @@ export function BookList({ books, searchQuery, onSelectBook, onShowDetail, onRef
     { key: 'reading', label: '正在读' },
     { key: 'finished', label: '已读完' },
     { key: 'favorite', label: '⭐ 收藏' },
+    { key: 'shelved', label: '📦 搁置' },
   ];
 
   return (
@@ -326,6 +380,7 @@ export function BookList({ books, searchQuery, onSelectBook, onShowDetail, onRef
             <option value="recent">最近阅读</option>
             <option value="title">按书名</option>
             <option value="author">按作者</option>
+            <option value="rating">按评分</option>
           </select>
           <button
             className={`view-btn ${viewMode === 'grid' ? 'active' : ''}`}
@@ -466,10 +521,16 @@ export function BookList({ books, searchQuery, onSelectBook, onShowDetail, onRef
                 )}
                 {book.favorite ? <span className="fav-badge">⭐</span> : null}
                 {book.locked ? <span className="lock-badge" title="已锁定">🔒</span> : null}
+                {book.status === 'shelved' ? <span className="shelf-badge" title="已搁置">📦</span> : null}
               </div>
               <div className="book-info">
                 <h3 className="book-title">{book.title}</h3>
                 {book.author && <p className="book-author">{book.author}</p>}
+                {book.rating ? (
+                  <p className="book-rating" title={`评分 ${book.rating}/5`}>
+                    {'★'.repeat(book.rating)}{'☆'.repeat(5 - book.rating)}
+                  </p>
+                ) : null}
                 {book.category && <p className="book-category">{book.category}</p>}
                 {book.progress > 0 && (
                   <div className="book-progress">
@@ -523,6 +584,8 @@ export function BookList({ books, searchQuery, onSelectBook, onShowDetail, onRef
             {contextMenu.book.locked ? '🔓 解锁书籍' : '🔒 锁定书籍'}
           </div>
           <div className="context-menu-item" onClick={handleSetCategory}>设置分类</div>
+          <div className="context-menu-item" onClick={handleSetStatus}>阅读状态</div>
+          <div className="context-menu-item" onClick={handleSetRating}>评分</div>
           <div className="context-menu-item" onClick={handleRename}>重命名</div>
           <div className="context-menu-item" onClick={handleRefreshMetadata}>重新识别标题</div>
           <div className="context-menu-item" onClick={handleFileInfo}>属性</div>

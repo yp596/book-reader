@@ -90,20 +90,77 @@ describe('兜底', () => {  it('未知格式返回 null', async () => {
 });
 
 describe('parseTxtChapters', () => {
+  /** 章节之间的正文，长度超过命中间距阈值（1000 字符），模拟真实长篇 */
+  const gap = '正文内容'.repeat(300);
+
   it('识别第X章标题', () => {
-    const text = '三体\n\n第一章 科学边界\n正文正文\n\n第二章 台球\n更多正文';
+    const text = '三体\n\n第一章 科学边界\n' + gap + '\n第二章 台球\n更多正文';
     const toc = parseTxtChapters(text);
     expect(toc.map(t => t.label)).toEqual(['第一章 科学边界', '第二章 台球']);
   });
 
   it('识别序言尾声番外', () => {
-    const text = '序言\nxxx\n第一章 开始\nxxx\n尾声\nxxx';
+    const text = '序言\n' + gap + '\n第一章 开始\n' + gap + '\n尾声\n' + gap;
     const toc = parseTxtChapters(text);
     expect(toc.map(t => t.label)).toEqual(['序言', '第一章 开始', '尾声']);
   });
 
+  it('识别阿拉伯数字与分隔符标题', () => {
+    const text = '1、这个就是标题\n' + gap + '\n02美好的明天\n' + gap;
+    const toc = parseTxtChapters(text);
+    expect(toc.map(t => t.label)).toEqual(['1、这个就是标题', '02美好的明天']);
+  });
+
+  it('识别符号开头的标题', () => {
+    const text = '☆、第一个标题\n' + gap + '\n☆、第二个标题\n' + gap;
+    const toc = parseTxtChapters(text);
+    expect(toc).toHaveLength(2);
+    expect(toc[0].label).toContain('第一个标题');
+  });
+
+  it('前置目录页里密排的章节名不重复计入', () => {
+    const tocPage = '目录\n第一章 开始\n第二章 继续\n第三章 结束\n';
+    const body = '第一章 开始\n' + gap + '\n第二章 继续\n' + gap + '\n第三章 结束\n' + gap;
+    const toc = parseTxtChapters(tocPage + body);
+    // 不加间距守卫会同时命中目录页与正文，得到 6 条
+    expect(toc.map(t => t.label)).toEqual(['第一章 开始', '第二章 继续', '第三章 结束']);
+  });
+
+  it('识别章回体与轻小说标题', () => {
+    const hui = parseTxtChapters(
+      '第一回 甄士隐梦幻识通灵\n' + gap + '\n第二回 贾夫人仙逝扬州城\n' + gap,
+    );
+    expect(hui.map(t => t.label)).toEqual(['第一回 甄士隐梦幻识通灵', '第二回 贾夫人仙逝扬州城']);
+
+    const hua = parseTxtChapters('第一话 开始\n' + gap + '\n第二话 继续\n' + gap);
+    expect(hua.map(t => t.label)).toEqual(['第一话 开始', '第二话 继续']);
+  });
+
+  it('正文行首出现「第一回」但不构成章节时不误报', () => {
+    const text =
+      '第一章 开始\n' + gap + '\n第一回见到他时，她还很年轻，想不到后面会发生这么多事。\n' + gap;
+    const toc = parseTxtChapters(text);
+    expect(toc.map(t => t.label)).toEqual(['第一章 开始']);
+  });
+
+  it('短章书（每章数百字）不被间距守卫吃掉章节', () => {
+    const chs = Array.from({ length: 30 }, (_, i) => `第${i + 1}章 标${i + 1}`);
+    const text = chs.map(c => c + '\n' + '短短的一节内容。'.repeat(60) + '\n').join('');
+    expect(parseTxtChapters(text)).toHaveLength(30);
+  });
+
+  it('前置目录页时首条位置落在正文首章，而非目录页', () => {
+    const chs = Array.from({ length: 10 }, (_, i) => `第${i + 1}章 标题${i + 1}`);
+    const head = '我的小说\n\n目录\n' + chs.join('\n') + '\n\n';
+    const text = head + chs.map(c => c + '\n' + gap + '\n').join('');
+    const toc = parseTxtChapters(text);
+    expect(toc).toHaveLength(10);
+    // 目录页占满 head 的全部行，首章必须落在其之后
+    expect(toc[0].line).toBeGreaterThanOrEqual(head.split('\n').length - 1);
+  });
+
   it('超长行不算章节', () => {
-    const text = '第一章 ' + 'x'.repeat(50) + '\n正文';
+    const text = '第一章 ' + 'x'.repeat(50) + '\n普通内容';
     expect(parseTxtChapters(text)).toEqual([]);
   });
 
@@ -119,9 +176,11 @@ describe('parseTxtChapters', () => {
   });
 
   it('记录章节所在段落行号', () => {
-    const text = '书名\n\n第一章 开始\n正文\n\n第二章 继续\n正文';
+    const text = '书名\n\n第一章 开始\n' + gap + '\n第二章 继续\n正文';
+    const lines = text.split('\n');
+    const expected = ['第一章 开始', '第二章 继续'].map(l => lines.findIndex(x => x === l));
     const toc = parseTxtChapters(text);
-    expect(toc.map(t => t.line)).toEqual([2, 5]);
+    expect(toc.map(t => t.line)).toEqual(expected);
   });
 
   it('标题尾部 30 字以内识别，超过则不算章节', () => {
@@ -137,17 +196,60 @@ describe('parseTxtChapters', () => {
   });
 });
 
+describe('TXT 目录解析配置', () => {
+  const gap = '正文内容'.repeat(300);
+
+  it('关键字方式：行首命中关键字即视为章节', () => {
+    const text = 'Star 1 起点\n' + gap + '\nStar 2 继续\n' + gap;
+    const toc = parseTxtChapters(text, { mode: 'keyword', keyword: 'Star' });
+    expect(toc.map(t => t.label)).toEqual(['Star 1 起点', 'Star 2 继续']);
+  });
+
+  it('关键字支持 | 分隔多个', () => {
+    const text = '甲 开头\n' + gap + '\n乙 开头\n' + gap;
+    expect(parseTxtChapters(text, { mode: 'keyword', keyword: '甲|乙' })).toHaveLength(2);
+  });
+
+  it('关键字按字面量匹配，特殊字符不当作正则', () => {
+    const text = '（一）开头\n' + gap + '\n（二）继续\n' + gap;
+    expect(parseTxtChapters(text, { mode: 'keyword', keyword: '（一）|（二）' })).toHaveLength(2);
+  });
+
+  it('正则方式', () => {
+    const text = '== 第一节 ==\n' + gap + '\n== 第二节 ==\n' + gap;
+    const toc = parseTxtChapters(text, { mode: 'regex', regex: '^== .+ ==$' });
+    expect(toc.map(t => t.label)).toEqual(['== 第一节 ==', '== 第二节 ==']);
+  });
+
+  it('指定内置规则名', () => {
+    const text = '一、只有前面的数字有差别\n' + gap + '\n二、也差不多\n' + gap;
+    const toc = parseTxtChapters(text, { ruleName: '大写数字 分隔符 标题名称' });
+    expect(toc).toHaveLength(2);
+  });
+
+  it('正则非法时回退到默认择优', () => {
+    const text = '第一章 开始\n' + gap + '\n第二章 继续\n' + gap;
+    const toc = parseTxtChapters(text, { mode: 'regex', regex: '[' });
+    expect(toc.map(t => t.label)).toEqual(['第一章 开始', '第二章 继续']);
+  });
+
+  it('规则名不存在时回退到默认择优', () => {
+    const text = '第一章 开始\n' + gap + '\n第二章 继续\n' + gap;
+    expect(parseTxtChapters(text, { ruleName: '不存在的规则' })).toHaveLength(2);
+  });
+});
+
 describe('TXT 目录提取', () => {
   it('超过 4MB 的 UTF-8 文件全量识别章节（不截断、不误判编码）', async () => {
     const p = path.join(tmpDir, 'big.txt');
     let s = '';
     let i = 0;
-    // 行长度递增变化，使原先的 4MB 截断点落在多字节字符中间
+    // 每章之间留足正文（超过 1000 字符的命中间距阈值），长度带变化以覆盖不同字节边界
     while (s.length < 5 * 1024 * 1024) {
       i++;
-      s += '第' + i + '章 标题' + '字'.repeat(i % 37) + '\n' + '正文内容'.repeat(1 + (i % 53)) + '\n';
+      s += '第' + i + '章 标题\n' + '字'.repeat(i % 37) + '正文内容'.repeat(300 + (i % 53)) + '\n';
     }
-    // 末尾追加特征章节，验证 4MB 之后的内容同样被解析
+    // 末尾追加特征章节，验证中段与结尾的内容都被解析
     s += '第九九九九章 末尾章节\n正文\n';
     fs.writeFileSync(p, s, 'utf-8');
     const toc = await extractToc(p, '.txt');

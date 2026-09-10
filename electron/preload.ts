@@ -34,6 +34,10 @@ contextBridge.exposeInMainWorld('electronAPI', {
     ipcRenderer.invoke('books:toggleLock', id),
   setBookLock: (id: number, locked: boolean) =>
     ipcRenderer.invoke('books:setLock', id, locked),
+  setBookStatus: (id: number, status: string) =>
+    ipcRenderer.invoke('books:setStatus', id, status),
+  setBookRating: (id: number, rating: number) =>
+    ipcRenderer.invoke('books:setRating', id, rating),
   getReadingPositions: (bookId: number) => ipcRenderer.invoke('positions:list', bookId),
   addReadingPosition: (p: any) => ipcRenderer.invoke('positions:add', p),
   deleteReadingPosition: (id: number) => ipcRenderer.invoke('positions:delete', id),
@@ -49,6 +53,10 @@ contextBridge.exposeInMainWorld('electronAPI', {
     ipcRenderer.invoke('books:reparseToc', id, ruleName),
   saveToc: (id: number, entries: unknown[]) =>
     ipcRenderer.invoke('books:saveToc', id, entries),
+  getComicPages: (id: number) =>
+    ipcRenderer.invoke('books:comicPages', id),
+  getComicPage: (id: number, name: string) =>
+    ipcRenderer.invoke('books:comicPage', id, name),
 
   // Sources
   getAllSources: () => ipcRenderer.invoke('sources:getAll'),
