@@ -204,6 +204,8 @@ export class DatabaseService {
       `ALTER TABLE books ADD COLUMN hash TEXT DEFAULT ''`,
       // 标注样式：highlight=高亮底色 / underline=下划线
       `ALTER TABLE bookmarks ADD COLUMN style TEXT DEFAULT 'highlight'`,
+      // 系列分组（同一套书 / 同一作者的作品集）
+      `ALTER TABLE books ADD COLUMN series TEXT DEFAULT ''`,
       // 阅读状态（''=按进度推断 / reading / finished / shelved）与星级评分
       `ALTER TABLE books ADD COLUMN status TEXT DEFAULT ''`,
       `ALTER TABLE books ADD COLUMN rating INTEGER DEFAULT 0`,
@@ -356,6 +358,23 @@ export class DatabaseService {
     this.assertUnlocked(id, '修改评分');
     const r = Math.max(0, Math.min(5, Math.floor(Number(rating) || 0)));
     this.run('UPDATE books SET rating = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?', [r, id]);
+  }
+
+  /** 设置所属系列（空串=取消分组） */
+  setBookSeries(id: number, series: string) {
+    this.assertUnlocked(id, '修改系列');
+    this.run('UPDATE books SET series = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?', [
+      series.trim(),
+      id,
+    ]);
+  }
+
+  /** 已使用的系列列表 */
+  getSeriesList(): string[] {
+    const rows = this.all(
+      `SELECT DISTINCT series FROM books WHERE series IS NOT NULL AND series != '' ORDER BY series`,
+    );
+    return rows.map(r => r.series as string);
   }
 
   getCategories(): string[] {

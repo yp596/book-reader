@@ -17,6 +17,8 @@ export interface Book {
   status?: string;
   /** 星级评分：0 未评分，1-5 有效 */
   rating?: number;
+  /** 所属系列（空=未分组） */
+  series?: string;
 }
 
 export interface ReadingPosition {
@@ -155,6 +157,8 @@ declare global {
       toggleBookLock: (id: number) => Promise<number>;
       setBookLock: (id: number, locked: boolean) => Promise<void>;
       setBookStatus: (id: number, status: string) => Promise<void>;
+      setBookSeries: (id: number, series: string) => Promise<void>;
+      getSeriesList: () => Promise<string[]>;
       setBookRating: (id: number, rating: number) => Promise<void>;
       exportBookList: () => Promise<{ filePath: string; count: number } | null>;
       exportOneBook: (id: number) => Promise<{ filePath: string; count: number } | null>;

@@ -322,6 +322,15 @@ export function registerIpcHandlers() {
     db.setBookLock(id, locked);
   });
 
+  // 系列分组
+  ipcMain.handle('books:setSeries', (_event, id: number, series: string) => {
+    db.setBookSeries(id, series);
+  });
+
+  ipcMain.handle('books:seriesList', () => {
+    return db.getSeriesList();
+  });
+
   // 阅读状态与星级评分
   ipcMain.handle('books:setStatus', (_event, id: number, status: string) => {
     db.setBookStatus(id, status);

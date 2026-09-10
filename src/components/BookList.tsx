@@ -22,6 +22,8 @@ export function BookList({ books, searchQuery, onSelectBook, onShowDetail, onRef
   const [filter, setFilter] = useState<Filter>('all');
   const [categoryFilter, setCategoryFilter] = useState('');
   const [categories, setCategories] = useState<string[]>([]);
+  const [seriesList, setSeriesList] = useState<string[]>([]);
+  const [seriesFilter, setSeriesFilter] = useState('');
   const [contextMenu, setContextMenu] = useState<{ book: Book; x: number; y: number } | null>(null);
   const [dragOver, setDragOver] = useState(false);
   /** 闲置判定天数（设置页可调，默认 90 天） */
@@ -33,6 +35,7 @@ export function BookList({ books, searchQuery, onSelectBook, onShowDetail, onRef
   useEffect(() => {
     onRefresh();
     window.electronAPI?.getCategories().then(setCategories).catch(() => {});
+    window.electronAPI?.getSeriesList().then(setSeriesList).catch(() => {});
     window.electronAPI?.getSetting('idleDays').then(v => {
       const d = Number(v);
       if (Number.isFinite(d) && d > 0) setIdleDays(d);
@@ -65,6 +68,7 @@ export function BookList({ books, searchQuery, onSelectBook, onShowDetail, onRef
           break;
       }
       if (categoryFilter && book.category !== categoryFilter) return false;
+      if (seriesFilter && book.series !== seriesFilter) return false;
       if (!searchQuery) return true;
       const q = searchQuery.toLowerCase();
       return (
@@ -237,6 +241,40 @@ ${r.filePath}`);
       alert(err instanceof Error ? err.message : '导出失败');
     }
     closeMenu();
+  };
+
+  const handleSetSeries = async () => {
+    if (!contextMenu) return;
+    const hint = seriesList.length > 0 ? `（已有：${seriesList.join('、')}）` : '';
+    const val = prompt(`设置所属系列${hint}，留空取消分组：`, contextMenu.book.series || '');
+    if (val === null) return;
+    try {
+      await window.electronAPI?.setBookSeries(contextMenu.book.id, val.trim());
+      setSeriesList((await window.electronAPI?.getSeriesList()) ?? []);
+      onRefresh();
+    } catch (err) {
+      alert(err instanceof Error ? err.message : '操作失败');
+    }
+    closeMenu();
+  };
+
+  const handleBatchSeries = async () => {
+    const api = window.electronAPI;
+    if (!api || selectedIds.size === 0) return;
+    const hint = seriesList.length > 0 ? `（已有：${seriesList.join('、')}）` : '';
+    const val = prompt(`把所选 ${selectedIds.size} 本归入系列${hint}，留空取消分组：`, '');
+    if (val === null) return;
+    const targets = batchTargets();
+    for (const b of targets) {
+      try {
+        await api.setBookSeries(b.id, val.trim());
+      } catch { /* 单本失败不中断 */ }
+    }
+    const skipped = selectedIds.size - targets.length;
+    setSeriesList((await api.getSeriesList()) ?? []);
+    exitBatch();
+    onRefresh();
+    if (skipped > 0) alert(`已处理 ${targets.length} 本；${skipped} 本因锁定被跳过`);
   };
 
   const handleReveal = async () => {
@@ -463,6 +501,18 @@ ${r.filePath}`);
             {f.label}
           </button>
         ))}
+        {seriesList.length > 0 && (
+          <select
+            value={seriesFilter}
+            onChange={e => setSeriesFilter(e.target.value)}
+            className="category-select"
+          >
+            <option value="">全部系列</option>
+            {seriesList.map(x => (
+              <option key={x} value={x}>{x}</option>
+            ))}
+          </select>
+        )}
         {categories.length > 0 && (
           <select
             value={categoryFilter}
@@ -495,6 +545,13 @@ ${r.filePath}`);
             disabled={selectedIds.size === 0}
           >
             设分类
+          </button>
+          <button
+            className="btn-secondary small"
+            onClick={handleBatchSeries}
+            disabled={selectedIds.size === 0}
+          >
+            设系列
           </button>
           <button
             className="btn-secondary small"
@@ -570,7 +627,13 @@ ${r.filePath}`);
                     {'★'.repeat(book.rating)}{'☆'.repeat(5 - book.rating)}
                   </p>
                 ) : null}
-                {book.category && <p className="book-category">{book.category}</p>}
+                {(book.series || book.category) && (
+                  <p className="book-category">
+                    {book.series ? `📚 ${book.series}` : ''}
+                    {book.series && book.category ? ' · ' : ''}
+                    {book.category || ''}
+                  </p>
+                )}
                 {book.progress > 0 && (
                   <div className="book-progress">
                     <div className="progress-bar">
@@ -623,6 +686,7 @@ ${r.filePath}`);
             {contextMenu.book.locked ? '🔓 解锁书籍' : '🔒 锁定书籍'}
           </div>
           <div className="context-menu-item" onClick={handleSetCategory}>设置分类</div>
+          <div className="context-menu-item" onClick={handleSetSeries}>设置系列</div>
           <div className="context-menu-item" onClick={handleSetStatus}>阅读状态</div>
           <div className="context-menu-item" onClick={handleSetRating}>评分</div>
           <div className="context-menu-item" onClick={handleRename}>重命名</div>

@@ -13,6 +13,9 @@ interface StatsData {
 }
 
 export function Statistics() {
+  /** 每日目标（分钟），0 表示未设目标 */
+  const [goalMinutes, setGoalMinutes] = useState(0);
+
   const [stats, setStats] = useState<StatsData>({
     totalBooks: 0,
     readingBooks: 0,
@@ -23,7 +26,13 @@ export function Statistics() {
   });
   const [weekSeries, setWeekSeries] = useState<DayStat[]>([]);
 
-  useEffect(() => { loadStats(); }, []);
+  useEffect(() => {
+    loadStats();
+    window.electronAPI?.getSetting('dailyGoalMinutes').then(v => {
+      const n = Number(v);
+      if (Number.isFinite(n) && n > 0) setGoalMinutes(n);
+    }).catch(() => {});
+  }, []);
 
   const loadStats = async () => {
     const api = window.electronAPI;
@@ -101,6 +110,30 @@ export function Statistics() {
           <div className="stats-label">累计阅读</div>
         </div>
       </div>
+
+      {goalMinutes > 0 && (() => {
+        const todayMin = Math.round(stats.todayMinutes / 60);
+        const pct = Math.min(100, Math.round((todayMin / goalMinutes) * 100));
+        const done = todayMin >= goalMinutes;
+        return (
+          <section className="stats-section">
+            <h2>今日目标 {done ? '✅ 已达成' : ''}</h2>
+            <div className="goal-row">
+              <div className="goal-bar">
+                <div className="goal-fill" style={{ width: `${pct}%` }} />
+              </div>
+              <span className="goal-text">
+                {todayMin} / {goalMinutes} 分钟 · {pct}%
+              </span>
+            </div>
+            {!done && (
+              <p className="section-desc" style={{ marginTop: 10, marginBottom: 0 }}>
+                还差 {goalMinutes - todayMin} 分钟达成今日目标
+              </p>
+            )}
+          </section>
+        );
+      })()}
 
       <section className="stats-section">
         <h2>近 7 天阅读趋势（分钟）</h2>

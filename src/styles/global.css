@@ -1725,3 +1725,33 @@ button:focus-visible, input:focus-visible, select:focus-visible, textarea:focus-
   display: flex;
   gap: 10px;
 }
+
+/* 阅读目标进度 */
+.goal-row {
+  display: flex;
+  align-items: center;
+  gap: 16px;
+}
+
+.goal-bar {
+  flex: 1;
+  height: 10px;
+  border-radius: 5px;
+  background: rgba(255, 255, 255, 0.08);
+  overflow: hidden;
+}
+
+.goal-fill {
+  height: 100%;
+  border-radius: 5px;
+  background: var(--gradient);
+  transition: width 0.5s ease;
+}
+
+.goal-text {
+  font-size: 13px;
+  color: var(--text-secondary);
+  white-space: nowrap;
+  min-width: 150px;
+  text-align: right;
+}

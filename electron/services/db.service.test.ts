@@ -342,3 +342,38 @@ describe('标注样式', () => {
     expect(db.getBookmarkByPosition(bid, 'p-bad').style).toBe('highlight');
   });
 });
+
+describe('系列分组', () => {
+  let a: number;
+  let b: number;
+
+  beforeAll(() => {
+    a = db.insertBook({ title: '系列书甲', file_path: '/tmp/s1.epub', file_type: 'epub' });
+    b = db.insertBook({ title: '系列书乙', file_path: '/tmp/s2.epub', file_type: 'epub' });
+  });
+
+  it('默认未分组', () => {
+    expect(db.getBookById(a).series ?? '').toBe('');
+  });
+
+  it('设置与清除系列', () => {
+    db.setBookSeries(a, '银河系漫游');
+    expect(db.getBookById(a).series).toBe('银河系漫游');
+    db.setBookSeries(a, '   ');
+    expect(db.getBookById(a).series ?? '').toBe('');
+  });
+
+  it('系列列表去重且忽略空值', () => {
+    db.setBookSeries(a, '三体三部曲');
+    db.setBookSeries(b, '三体三部曲');
+    const list = db.getSeriesList();
+    expect(list.filter((s: string) => s === '三体三部曲')).toHaveLength(1);
+    expect(list).not.toContain('');
+  });
+
+  it('锁定的书籍拒绝改系列', () => {
+    db.setBookLock(a, true);
+    expect(() => db.setBookSeries(a, 'x')).toThrow(/已锁定/);
+    db.setBookLock(a, false);
+  });
+});

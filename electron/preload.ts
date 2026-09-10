@@ -36,6 +36,9 @@ contextBridge.exposeInMainWorld('electronAPI', {
     ipcRenderer.invoke('books:setLock', id, locked),
   setBookStatus: (id: number, status: string) =>
     ipcRenderer.invoke('books:setStatus', id, status),
+  setBookSeries: (id: number, series: string) =>
+    ipcRenderer.invoke('books:setSeries', id, series),
+  getSeriesList: () => ipcRenderer.invoke('books:seriesList'),
   setBookRating: (id: number, rating: number) =>
     ipcRenderer.invoke('books:setRating', id, rating),
   exportBookList: () => ipcRenderer.invoke('books:exportList'),
