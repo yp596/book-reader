@@ -2,7 +2,7 @@ import { useState, useEffect, useRef, type CSSProperties } from 'react';
 import ePub from 'epubjs';
 import * as pdfjsLib from 'pdfjs-dist';
 import PdfWorkerUrl from 'pdfjs-dist/build/pdf.worker.min.mjs?url';
-import { Book, Bookmark, Note, TocEntry } from '../types';
+import { Book, Bookmark, Note, TocEntry, ReadingPosition } from '../types';
 import { escapeHtml, excerptAround, clampPage, parseSavedPosition, serializeSavedPosition, SavedPosition } from '../utils/text';
 import { fontStackOf, highlightColorOf, HIGHLIGHT_COLORS, type ThemeName } from '../utils/reader-options';
 import { resolveThemeByClock, type AutoThemeConfig } from '../utils/auto-theme';
@@ -25,7 +25,7 @@ interface ReaderProps {
   initialTarget?: TocEntry | null;
 }
 
-type Panel = 'toc' | 'notes' | 'marks' | 'search' | 'ai' | null;
+type Panel = 'toc' | 'notes' | 'marks' | 'search' | 'ai' | 'positions' | null;
 
 interface SelPopup {
   x: number;
@@ -129,6 +129,8 @@ export function Reader({ book, onBack, initialTarget }: ReaderProps) {
   const [aiContext, setAiContext] = useState('');
   /** 查词模式：答案可存入生词本 */
   const [aiWord, setAiWord] = useState('');
+  /** 多进度断点：本书已保存的阅读位置 */
+  const [positions, setPositions] = useState<ReadingPosition[]>([]);
   /** 思维导图 */
   const [mindNodes, setMindNodes] = useState<MindNode[] | null>(null);
   const [mindTitle, setMindTitle] = useState('');
@@ -442,6 +444,44 @@ export function Reader({ book, onBack, initialTarget }: ReaderProps) {
       renditionRef.current = null;
       pdfDocRef.current?.destroy();
       pdfDocRef.current = null;
+    };
+  }, [book.id]);
+
+  /**
+   * 多进度断点：进入时识别上次是否异常退出，退出时记录断点。
+   * 用会话标记区分正常/异常——正常退出会清掉标记，
+   * 下次打开若标记仍在，说明上轮没走完清理流程（崩溃或强杀）。
+   */
+  useEffect(() => {
+    let alive = true;
+    (async () => {
+      const api = window.electronAPI;
+      if (!api) return;
+      try {
+        const raw = await api.getSetting(`readingSession:${book.id}`);
+        if (raw) {
+          const last = await api.getSetting(`lastPos:${book.id}`);
+          const p = parseSavedPosition(last);
+          if (p) {
+            await api.addReadingPosition({
+              book_id: book.id,
+              position: serializeSavedPosition(p),
+              label: '上次异常退出时',
+              source: 'crash',
+            });
+          }
+        }
+        await api.setSetting(`readingSession:${book.id}`, String(Date.now()));
+        if (alive) await refreshPositions();
+      } catch { /* 忽略 */ }
+    })();
+    return () => {
+      alive = false;
+      const api = window.electronAPI;
+      if (!api) return;
+      const d = describeCurrentPos();
+      if (d) api.addReadingPosition({ book_id: book.id, ...d, source: 'exit' });
+      api.setSetting(`readingSession:${book.id}`, '');
     };
   }, [book.id]);
 
@@ -867,6 +907,65 @@ export function Reader({ book, onBack, initialTarget }: ReaderProps) {
   };
 
   // ---------- 笔记书签 ----------
+
+  // ---------- 多进度断点 ----------
+
+  const refreshPositions = async () => {
+    const api = window.electronAPI;
+    if (!api) return;
+    setPositions(await api.getReadingPositions(book.id));
+  };
+
+  /** 当前位置的可序列化形式 + 人类可读标签（直接用实时状态，不依赖可能未更新的 ref） */
+  const describeCurrentPos = (): { position: string; label: string; progress: number } | null => {
+    try {
+      if (book.file_type === 'epub') {
+        const loc = renditionRef.current?.currentLocation?.();
+        const cfi: string | undefined = loc?.start?.cfi;
+        if (!cfi) return null;
+        const idx = chapterIdxRef.current;
+        const label = idx != null && chaptersRef.current[idx] ? chaptersRef.current[idx].label : '当前页';
+        return {
+          position: serializeSavedPosition({ cfi }),
+          label: label.slice(0, 60),
+          progress: locationRef.current.progress,
+        };
+      }
+      return {
+        position: serializeSavedPosition({ page: pageIndex }),
+        label: totalPages > 0 ? `第 ${pageIndex + 1}/${totalPages} 页` : '当前页',
+        progress: totalPages > 0 ? pageIndex / totalPages : 0,
+      };
+    } catch {
+      return null;
+    }
+  };
+
+  const handleMarkPosition = async () => {
+    const api = window.electronAPI;
+    if (!api) return;
+    const d = describeCurrentPos();
+    if (!d) return;
+    await api.addReadingPosition({ book_id: book.id, ...d, source: 'manual' });
+    await refreshPositions();
+  };
+
+  const handleDeletePosition = async (id: number) => {
+    await window.electronAPI?.deleteReadingPosition(id);
+    await refreshPositions();
+  };
+
+  const handleJumpPosition = (p: ReadingPosition) => {
+    const pos = parseSavedPosition(p.position);
+    if (!pos) {
+      alert('该位置已失效（可能书籍已更换或重新解析过）');
+      return;
+    }
+    pushHistory();
+    if (book.file_type === 'epub' && pos.cfi) renditionRef.current?.display(pos.cfi);
+    else if (pos.page != null) setPageIndex(pos.page);
+    setPanel(null);
+  };
 
   const refreshMarks = async () => {
     const api = window.electronAPI;
@@ -1618,6 +1717,9 @@ export function Reader({ book, onBack, initialTarget }: ReaderProps) {
           <button onClick={() => togglePanel('marks')} className={panel === 'marks' ? 'active' : ''} title="书签">
             🔖{bookmarks.length > 0 ? ` ${bookmarks.length}` : ''}
           </button>
+          <button onClick={() => togglePanel('positions')} className={panel === 'positions' ? 'active' : ''} title="阅读位置">
+            📍{positions.length > 0 ? ` ${positions.length}` : ''}
+          </button>
           {book.file_type !== 'pdf' && (
             <button onClick={() => togglePanel('search')} className={panel === 'search' ? 'active' : ''} title="书内检索">
               🔍
@@ -1767,6 +1869,37 @@ export function Reader({ book, onBack, initialTarget }: ReaderProps) {
                   <div className="mark-actions">
                     <button onClick={() => jumpToMark(n.position)}>跳转</button>
                     <button className="danger" onClick={() => handleDeleteNote(n.id)}>删除</button>
+                  </div>
+                </div>
+              ))
+            )}
+          </div>
+        )}
+
+        {panel === 'positions' && (
+          <div className="toc-panel">
+            <h3>阅读位置（{positions.length}）</h3>
+            <button
+              className="btn-primary small"
+              style={{ width: '100%', marginBottom: 14 }}
+              onClick={handleMarkPosition}
+            >
+              ＋ 标记当前位置
+            </button>
+            {positions.length === 0 ? (
+              <p className="empty-text">还没有保存的位置</p>
+            ) : (
+              positions.map(p => (
+                <div key={p.id} className="mark-item">
+                  <p className="mark-label">
+                    {p.source === 'crash' ? '⚠ 异常退出时' : p.source === 'exit' ? '退出时' : '手动标记'}
+                    {p.progress > 0 ? ` · ${Math.round(p.progress * 100)}%` : ''}
+                  </p>
+                  <p className="mark-note">{p.label || '未命名位置'}</p>
+                  <p className="book-meta">{new Date(p.created_at).toLocaleString()}</p>
+                  <div className="mark-actions">
+                    <button onClick={() => handleJumpPosition(p)}>跳转</button>
+                    <button className="danger" onClick={() => handleDeletePosition(p.id)}>删除</button>
                   </div>
                 </div>
               ))

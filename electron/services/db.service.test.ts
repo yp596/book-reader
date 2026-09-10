@@ -98,3 +98,74 @@ describe('解锁后恢复可写', () => {
     expect(db.getBookById(bookId).title).toBe('解锁后的名字');
   });
 });
+
+describe('多进度断点', () => {
+  let pid: number;
+
+  beforeAll(() => {
+    pid = db.insertBook({ title: '断点测试书', file_path: '/tmp/p.epub', file_type: 'epub' });
+  });
+
+  it('新增位置并回读', () => {
+    const id = db.addReadingPosition({
+      book_id: pid,
+      position: 'epubcfi(/6/4!/2)',
+      label: '第一章',
+      progress: 0.1,
+      source: 'manual',
+    });
+    const list = db.getReadingPositions(pid);
+    expect(list).toHaveLength(1);
+    expect(list[0].label).toBe('第一章');
+    expect(list[0].id).toBe(id);
+  });
+
+  it('同书同位置不堆叠，改为刷新', () => {
+    db.addReadingPosition({ book_id: pid, position: 'epubcfi(/6/4!/2)', label: '改名了', progress: 0.2 });
+    const list = db.getReadingPositions(pid);
+    expect(list).toHaveLength(1);
+    expect(list[0].label).toBe('改名了');
+    expect(list[0].progress).toBeCloseTo(0.2);
+  });
+
+  it('不同位置各存一条', () => {
+    db.addReadingPosition({ book_id: pid, position: 'epubcfi(/6/8!/2)', label: '第二章', source: 'manual' });
+    expect(db.getReadingPositions(pid)).toHaveLength(2);
+  });
+
+  it('删除单条', () => {
+    const before = db.getReadingPositions(pid).length;
+    const target = db.getReadingPositions(pid)[0];
+    db.deleteReadingPosition(target.id);
+    expect(db.getReadingPositions(pid)).toHaveLength(before - 1);
+  });
+
+  it('自动来源按上限裁剪，手动标记永不被裁', () => {
+    // 手动标记 1 条
+    db.addReadingPosition({ book_id: pid, position: 'manual-1', source: 'manual' });
+    // 自动记录 8 条
+    for (let i = 0; i < 8; i++) {
+      db.addReadingPosition({ book_id: pid, position: `exit-${i}`, source: 'exit' });
+    }
+    db.pruneReadingPositions(pid, 3);
+
+    const list = db.getReadingPositions(pid, 100);
+    const auto = list.filter((r: any) => r.source === 'exit');
+    const manual = list.filter((r: any) => r.source === 'manual');
+    expect(auto).toHaveLength(3);
+    expect(manual.some((r: any) => r.position === 'manual-1')).toBe(true);
+  });
+
+  it('fail: 裁剪不会误删手动标记', () => {
+    const manual = db.getReadingPositions(pid, 100).filter((r: any) => r.source === 'manual');
+    expect(manual.length).toBeGreaterThan(0);
+  });
+
+  it('书籍删除时级联清理位置', () => {
+    const tmpId = db.insertBook({ title: '待删书', file_path: '/tmp/z.epub', file_type: 'epub' });
+    db.addReadingPosition({ book_id: tmpId, position: 'x' });
+    expect(db.getReadingPositions(tmpId)).toHaveLength(1);
+    db.deleteBook(tmpId);
+    expect(db.getReadingPositions(tmpId)).toHaveLength(0);
+  });
+});

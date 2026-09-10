@@ -15,6 +15,17 @@ export interface Book {
   locked?: number;
 }
 
+export interface ReadingPosition {
+  id: number;
+  book_id: number;
+  position: string;
+  label: string;
+  progress: number;
+  /** manual=手动标记 / exit=正常退出 / crash=异常退出恢复 */
+  source: 'manual' | 'exit' | 'crash';
+  created_at: string;
+}
+
 export interface TocEntry {
   label: string;
   href: string;
@@ -126,6 +137,15 @@ declare global {
       renameBook: (id: number, title: string) => Promise<void>;
       toggleFavorite: (id: number) => Promise<number>;
       toggleBookLock: (id: number) => Promise<number>;
+      getReadingPositions: (bookId: number) => Promise<ReadingPosition[]>;
+      addReadingPosition: (p: {
+        book_id: number;
+        position: string;
+        label?: string;
+        progress?: number;
+        source?: 'manual' | 'exit' | 'crash';
+      }) => Promise<number>;
+      deleteReadingPosition: (id: number) => Promise<void>;
       setCategory: (id: number, category: string) => Promise<void>;
       getCategories: () => Promise<string[]>;
       getBookToc: (id: number) => Promise<TocEntry[]>;

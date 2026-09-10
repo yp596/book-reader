@@ -32,6 +32,9 @@ contextBridge.exposeInMainWorld('electronAPI', {
     ipcRenderer.invoke('books:toggleFavorite', id),
   toggleBookLock: (id: number) =>
     ipcRenderer.invoke('books:toggleLock', id),
+  getReadingPositions: (bookId: number) => ipcRenderer.invoke('positions:list', bookId),
+  addReadingPosition: (p: any) => ipcRenderer.invoke('positions:add', p),
+  deleteReadingPosition: (id: number) => ipcRenderer.invoke('positions:delete', id),
   setCategory: (id: number, category: string) =>
     ipcRenderer.invoke('books:setCategory', id, category),
   getCategories: () =>

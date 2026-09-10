@@ -166,6 +166,18 @@ export class DatabaseService {
         created_at DATETIME DEFAULT CURRENT_TIMESTAMP
       )`,
       `CREATE INDEX IF NOT EXISTS idx_vectors_book ON book_vectors(book_id)`,
+      // 多进度断点：一本书可保存多个阅读位置
+      `CREATE TABLE IF NOT EXISTS reading_positions (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        book_id INTEGER NOT NULL,
+        position TEXT NOT NULL,
+        label TEXT NOT NULL DEFAULT '',
+        progress REAL DEFAULT 0,
+        source TEXT NOT NULL DEFAULT 'manual',
+        created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+        FOREIGN KEY (book_id) REFERENCES books(id) ON DELETE CASCADE
+      )`,
+      `CREATE INDEX IF NOT EXISTS idx_positions_book ON reading_positions(book_id)`,
     ];
     for (const sql of tables) this.db.run(sql);
     // 存量库迁移：书源表加规则列
@@ -310,6 +322,11 @@ export class DatabaseService {
 
   deleteBook(id: number) {
     this.assertUnlocked(id, '删除');
+    // 显式清理关联数据：实测 ON DELETE CASCADE 在 sql.js 下未生效，
+    // 不清理会留下孤儿书签/笔记/断点，污染后续查询与备份
+    for (const t of ['bookmarks', 'notes', 'reading_positions', 'book_vectors', 'reading_stats']) {
+      this.run(`DELETE FROM ${t} WHERE book_id = ?`, [id]);
+    }
     this.run('DELETE FROM books WHERE id = ?', [id]);
   }
 
@@ -581,6 +598,65 @@ export class DatabaseService {
 
   setSetting(key: string, value: string) {
     this.run('INSERT OR REPLACE INTO settings (key, value) VALUES (?, ?)', [key, value]);
+  }
+
+  // ============ 多进度断点 ============
+
+  /**
+   * 记录阅读位置。同书同位置视为一条（刷新而非堆叠）。
+   * source：manual=手动标记 / exit=正常退出 / crash=异常退出恢复
+   */
+  addReadingPosition(p: {
+    book_id: number;
+    position: string;
+    label?: string;
+    progress?: number;
+    source?: 'manual' | 'exit' | 'crash';
+  }): number {
+    const dup = this.get(
+      'SELECT id FROM reading_positions WHERE book_id = ? AND position = ?',
+      [p.book_id, p.position],
+    ) as { id: number } | undefined;
+    if (dup) {
+      this.run(
+        'UPDATE reading_positions SET label = ?, progress = ?, source = ?, created_at = CURRENT_TIMESTAMP WHERE id = ?',
+        [p.label ?? '', p.progress ?? 0, p.source ?? 'manual', dup.id],
+      );
+      return dup.id;
+    }
+    this.run(
+      'INSERT INTO reading_positions (book_id, position, label, progress, source) VALUES (?, ?, ?, ?, ?)',
+      [p.book_id, p.position, p.label ?? '', p.progress ?? 0, p.source ?? 'manual'],
+    );
+    const row = this.get('SELECT last_insert_rowid() as id');
+    return Number(row?.id);
+  }
+
+  getReadingPositions(bookId: number, limit = 20) {
+    return this.all(
+      'SELECT * FROM reading_positions WHERE book_id = ? ORDER BY created_at DESC LIMIT ?',
+      [bookId, limit],
+    );
+  }
+
+  deleteReadingPosition(id: number) {
+    this.run('DELETE FROM reading_positions WHERE id = ?', [id]);
+  }
+
+  /** 自动来源只保留最近若干条，避免退出记录无限堆积 */
+  pruneReadingPositions(bookId: number, keepAuto = 5) {
+    for (const src of ['exit', 'crash'] as const) {
+      this.run(
+        `DELETE FROM reading_positions
+         WHERE book_id = ? AND source = ?
+           AND id NOT IN (
+             SELECT id FROM reading_positions
+             WHERE book_id = ? AND source = ?
+             ORDER BY created_at DESC LIMIT ?
+           )`,
+        [bookId, src, bookId, src, keepAuto],
+      );
+    }
   }
 
   // ============ 增量备份支持 ============

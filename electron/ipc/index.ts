@@ -224,6 +224,25 @@ export function registerIpcHandlers() {
     return db.toggleBookLock(id);
   });
 
+  // ============ 多进度断点 ============
+
+  ipcMain.handle('positions:list', (_event, bookId: number) => {
+    return db.getReadingPositions(bookId);
+  });
+
+  ipcMain.handle('positions:add', (_event, p: any) => {
+    const id = db.addReadingPosition(p);
+    // 自动来源定期裁剪，手动标记永久保留
+    if (p?.source === 'exit' || p?.source === 'crash') {
+      db.pruneReadingPositions(p.book_id, 5);
+    }
+    return id;
+  });
+
+  ipcMain.handle('positions:delete', (_event, id: number) => {
+    db.deleteReadingPosition(id);
+  });
+
   // 书籍目录（读导入时缓存，无缓存则实时解析）
   ipcMain.handle('books:toc', async (_event, id: number) => {
     const book = db.getBookById(id) as any;
