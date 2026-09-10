@@ -40,3 +40,55 @@ export function lookupMark(
     markId: mark?.id,
   };
 }
+
+/**
+ * 批注位置排序键。
+ * TXT 的位置串形如 `txt:页:起:止`，按页码排（数字序，
+ * 不能按字符串——否则第 10 页会排在第 2 页前面）；
+ * EPUB 的 CFI 无页码，交给 compareCfi 逐段比较。
+ */
+export function posKey(position: string): [number, string] {
+  if (position.startsWith('txt:')) {
+    const page = Number(position.split(':')[1]);
+    return [Number.isFinite(page) ? page : 0, position];
+  }
+  return [0, position];
+}
+
+/**
+ * 把 CFI 拆成可比较片段：数字段转成数值，其余保留字符串。
+ * 直接按字符串比会把 /6/12 排到 /6/4 前面——CFI 的路径段是十进制数，
+ * 词法序与文档顺序不一致。
+ */
+export function cfiParts(cfi: string): (number | string)[] {
+  const body = cfi.replace(/^epubcfi\(/, '').replace(/\)$/, '');
+  return body
+    .split(/(\d+)/)
+    .filter(x => x !== '')
+    .map(x => (/^\d+$/.test(x) ? Number(x) : x));
+}
+
+/** 逐段比较两个 CFI，近似文档顺序 */
+export function compareCfi(a: string, b: string): number {
+  const fa = cfiParts(a);
+  const fb = cfiParts(b);
+  const len = Math.max(fa.length, fb.length);
+  for (let i = 0; i < len; i++) {
+    const x = fa[i];
+    const y = fb[i];
+    if (x === y) continue;
+    if (x === undefined) return -1;
+    if (y === undefined) return 1;
+    if (typeof x === 'number' && typeof y === 'number') return x - y;
+    return String(x).localeCompare(String(y));
+  }
+  return 0;
+}
+
+/** 按位置排序的通用比较器（时间排序由调用方保持原序） */
+export function compareByPosition<T extends { position: string }>(a: T, b: T): number {
+  const [pa, sa] = posKey(a.position);
+  const [pb, sb] = posKey(b.position);
+  if (pa !== pb) return pa - pb;
+  return compareCfi(sa, sb);
+}

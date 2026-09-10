@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { lookupMark } from './mark-lookup';
+import { lookupMark, posKey, compareByPosition, compareCfi } from './mark-lookup';
 import type { Bookmark, Note } from '../types';
 
 const bm = (id: number, position: string, text?: string): Bookmark => ({
@@ -67,5 +67,55 @@ describe('lookupMark', () => {
     expect(hit?.position).toBe('cfi-b');
     // 笔记按传入位置匹配到 cfi-a
     expect(hit?.noteId).toBe(10);
+  });
+});
+
+describe('批注位置排序', () => {
+  it('TXT 按页码排序，而非字符串顺序（否则第 10 页会排在第 2 页前）', () => {
+    const list = [
+      { position: 'txt:10:0:5' },
+      { position: 'txt:2:0:5' },
+      { position: 'txt:1:0:5' },
+    ];
+    list.sort(compareByPosition);
+    expect(list.map(x => x.position)).toEqual(['txt:1:0:5', 'txt:2:0:5', 'txt:10:0:5']);
+  });
+
+  it('TXT 页码非法时回退到字符串比较而不抛错', () => {
+    const list = [{ position: 'txt:x:0:5' }, { position: 'txt:1:0:5' }];
+    expect(() => list.sort(compareByPosition)).not.toThrow();
+  });
+
+  it('EPUB 的 CFI 按路径数字比较（字典序会把 /6/12 排到 /6/4 前）', () => {
+    const list = [
+      { position: 'epubcfi(/6/8!/4/2)' },
+      { position: 'epubcfi(/6/4!/4/2)' },
+      { position: 'epubcfi(/6/12!/4/2)' },
+    ];
+    list.sort(compareByPosition);
+    expect(list[0].position).toBe('epubcfi(/6/4!/4/2)');
+    expect(list[2].position).toBe('epubcfi(/6/12!/4/2)');
+  });
+
+  it('posKey 对空串安全', () => {
+    expect(() => posKey('')).not.toThrow();
+  });
+});
+
+describe('compareCfi', () => {
+  it('路径段按数值而非字符串比较', () => {
+    expect(compareCfi('epubcfi(/6/4!/4/2)', 'epubcfi(/6/12!/4/2)')).toBeLessThan(0);
+  });
+
+  it('相同 CFI 返回 0', () => {
+    expect(compareCfi('epubcfi(/6/4!/4)', 'epubcfi(/6/4!/4)')).toBe(0);
+  });
+
+  it('前缀更短的排前面', () => {
+    expect(compareCfi('epubcfi(/6/4)', 'epubcfi(/6/4/2)')).toBeLessThan(0);
+  });
+
+  it('空串不抛错', () => {
+    expect(() => compareCfi('', 'epubcfi(/6/4)')).not.toThrow();
   });
 });

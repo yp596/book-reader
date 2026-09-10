@@ -1054,6 +1054,12 @@ export function registerIpcHandlers() {
     return restored;
   });
 
+  // 外部链接：交给系统浏览器打开（仅放行 http/https）
+  ipcMain.handle('app:openExternal', async (_event, url: string) => {
+    if (!/^https?:\/\//i.test(url)) throw new Error('只允许打开 http/https 链接');
+    await shell.openExternal(url);
+  });
+
   // ============ 应用信息（静态只读，不联网） ============
 
   ipcMain.handle('app:info', () => {

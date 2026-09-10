@@ -119,6 +119,8 @@ contextBridge.exposeInMainWorld('electronAPI', {
   syncBackup: () => ipcRenderer.invoke('sync:backup'),
   syncRestore: () => ipcRenderer.invoke('sync:restore'),
 
+  openExternal: (url: string) => ipcRenderer.invoke('app:openExternal', url),
+
   // 文件夹监视
   startWatch: (dir: string) => ipcRenderer.invoke('watch:start', dir),
   stopWatch: () => ipcRenderer.invoke('watch:stop'),

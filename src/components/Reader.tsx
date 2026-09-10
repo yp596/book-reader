@@ -14,7 +14,7 @@ import {
   type ReaderPrefs,
 } from '../utils/book-prefs';
 import { parseMindmap, MindNode } from '../utils/mindmap';
-import { lookupMark } from '../utils/mark-lookup';
+import { lookupMark, compareByPosition } from '../utils/mark-lookup';
 import { normalizeText } from '../utils/text-normalize';
 import { getPreset, resolveAction, DEFAULT_SHORTCUT_PRESET } from '../utils/shortcuts';
 import { MindmapView } from './Mindmap';
@@ -157,6 +157,8 @@ export function Reader({ book, onBack, initialTarget, initialPosition }: ReaderP
   /** 排版自定义：背景色 / 文字色 / 页边距 / 段间距 */
   const [typo, setTypo] = useState({ bgColor: '', textColor: '', pagePadding: 56, paraSpacing: 0 });
   const typoRef = useRef(typo);
+  /** 批注排序：按时间（默认）或按位置 */
+  const [markSort, setMarkSort] = useState<'time' | 'position'>('time');
   /** 显示/隐藏全部批注（只影响渲染，不删数据） */
   const [hideMarks, setHideMarks] = useState(false);
   /** 全局强制统一字体：压过电子书自带的奇葩字体 */
@@ -810,6 +812,38 @@ export function Reader({ book, onBack, initialTarget, initialPosition }: ReaderP
 
     renditionRef.current = rendition;
     applyTheme(rendition);
+
+    // 书内超链接：脚注、交叉引用、章末跳转在 EPUB 里很常见，
+    // 默认点击无反应，这里接管并区分「书内跳转」与「外部链接」
+    rendition.hooks.content.register((contents: any) => {
+      const doc: Document = contents.document;
+      doc.addEventListener('click', (e: MouseEvent) => {
+        const anchor = (e.target as HTMLElement)?.closest?.('a[href]') as HTMLAnchorElement | null;
+        if (!anchor) return;
+        const href = anchor.getAttribute('href') || '';
+        if (!href) return;
+
+        // 纯锚点：章内定位，交给浏览器默认行为
+        if (href.startsWith('#')) return;
+
+        if (/^https?:/i.test(href)) {
+          e.preventDefault();
+          window.electronAPI?.openExternal(anchor.href).catch(() => {});
+          return;
+        }
+
+        // 书内相对链接：相对当前章节所在目录解析
+        e.preventDefault();
+        const base = (contents.section?.href as string) || '';
+        const dir = base.includes('/') ? base.slice(0, base.lastIndexOf('/') + 1) : '';
+        const target = href.startsWith('/')
+          ? href.slice(1)
+          : dir + href.split('#')[0];
+        try {
+          rendition.display(target);
+        } catch { /* 目标不存在则忽略 */ }
+      });
+    });
     // 跳转优先级：目录/检索指定位置 > 上次阅读位置 > 从头开始
     const savedCfi = savedPosRef.current?.cfi;
     if (initialTarget?.href) {
@@ -1131,6 +1165,9 @@ export function Reader({ book, onBack, initialTarget, initialPosition }: ReaderP
     else if (pos.page != null) setPageIndex(pos.page);
     setPanel(null);
   };
+
+  const sortMarks = <T extends { position: string }>(list: T[]): T[] =>
+    markSort === 'time' ? list : [...list].sort(compareByPosition);
 
   const refreshMarks = async () => {
     const api = window.electronAPI;
@@ -2406,14 +2443,23 @@ ${body}</body></html>`;
           <div className="toc-panel">
             <div className="panel-title-row">
               <h3>我的笔记（{notes.length}）</h3>
-              {(notes.length > 0 || bookmarks.length > 0) && (
-                <button className="link-btn" onClick={handleExportNotes}>导出</button>
-              )}
+              <div style={{ display: 'flex', gap: 6, alignItems: 'center' }}>
+                <button
+                  className="link-btn"
+                  onClick={() => setMarkSort(s => (s === 'time' ? 'position' : 'time'))}
+                  title="切换排序方式"
+                >
+                  {markSort === 'time' ? '按时间' : '按位置'}
+                </button>
+                {(notes.length > 0 || bookmarks.length > 0) && (
+                  <button className="link-btn" onClick={handleExportNotes}>导出</button>
+                )}
+              </div>
             </div>
             {notes.length === 0 ? (
               <p className="empty-text">选中正文后可写笔记</p>
             ) : (
-              notes.map(n => (
+              sortMarks(notes).map(n => (
                 <div key={n.id} className="mark-item">
                   <p className="mark-quote">{n.selected_text}</p>
                   <p className="mark-note">{n.note}</p>
@@ -2464,7 +2510,7 @@ ${body}</body></html>`;
             {bookmarks.length === 0 ? (
               <p className="empty-text">选中正文后可添加高亮书签</p>
             ) : (
-              bookmarks.map(b => (
+              sortMarks(bookmarks).map(b => (
                 <div key={b.id} className="mark-item">
                   <p className="mark-quote">{b.text}</p>
                   <div className="mark-actions">

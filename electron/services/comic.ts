@@ -1,8 +1,7 @@
 import fs from 'fs';
 import path from 'path';
-import { pathToFileURL } from 'url';
+import { createRequire } from 'module';
 import { Worker } from 'worker_threads';
-import { app } from 'electron';
 import JSZip from 'jszip';
 
 type LibarchiveModule = typeof import('libarchive.js/dist/libarchive-node.mjs');
@@ -117,17 +116,63 @@ async function loadZip(archivePath: string): Promise<JSZip> {
  * `D:\D:\%E6%A1%8C...`（盘符重复且未解码），worker 起不来。
  * 这里用官方提供的 getWorker 扩展点，改成我们解析出的绝对路径。
  */
+/**
+ * libarchive 的 Node 入口用 getWorker + createClient 两个回调组装 worker，
+ * 且 worker 的返回值会直接交给 Comlink——而 Comlink 要的是浏览器风格的
+ * postMessage / addEventListener，Node 的 Worker 是 EventEmitter，对不上。
+ * 库内置的 createClient 正是做这层适配的，但覆写 getWorker 会把 options 整个换掉、
+ * 连带丢掉它，所以这里自己补一层等价适配。
+ */
+function createBrowserLikeWorker(workerPath: string) {
+  const worker = new Worker(workerPath);
+  const listeners = new WeakMap<object, (data: unknown) => void>();
+  return {
+    postMessage: (message: unknown, transfer?: unknown[]) =>
+      worker.postMessage(message, transfer as never),
+    addEventListener: (_type: string, listener: any) => {
+      // Comlink 统一按 { data } 取载荷
+      const handler = (data: unknown) =>
+        'handleEvent' in listener ? listener.handleEvent({ data }) : listener({ data });
+      worker.on('message', handler);
+      listeners.set(listener, handler);
+    },
+    removeEventListener: (_type: string, listener: any) => {
+      const handler = listeners.get(listener);
+      if (handler) {
+        worker.off('message', handler);
+        listeners.delete(listener);
+      }
+    },
+  };
+}
+
 let libarchiveReady: Promise<void> | null = null;
 async function ensureLibarchive(): Promise<void> {
   if (!libarchiveReady) {
     libarchiveReady = (async () => {
       const { Archive } = await loadLibarchive();
-      const distDir = path.join(app.getAppPath(), 'node_modules', 'libarchive.js', 'dist');
-      const workerUrl = pathToFileURL(path.join(distDir, 'worker-bundle-node.mjs')).href;
-      Archive.init({ getWorker: () => new Worker(workerUrl) });
+      // 用 createRequire 从当前 bundle 位置向上找包：app.getAppPath() 在开发态返回的是
+      // dist-electron 而非应用根目录，靠它拼路径会指错地方。
+      const require_ = createRequire(__filename);
+      const distDir = path.join(path.dirname(require_.resolve('libarchive.js/package.json')), 'dist');
+      // Worker 只接受绝对路径或 URL 对象，传 file:// 字符串会被拒
+      Archive.init({
+        getWorker: () => createBrowserLikeWorker(path.join(distDir, 'worker-bundle-node.mjs')),
+      });
     })();
   }
   return libarchiveReady;
+}
+
+/** libarchive 的 worker 一旦起不来会静默挂住，给个上限让调用方拿到错误而不是卡死 */
+const LIBARCHIVE_TIMEOUT_MS = 20000;
+function withTimeout<T>(promise: Promise<T>, what: string): Promise<T> {
+  return Promise.race([
+    promise,
+    new Promise<T>((_, reject) =>
+      setTimeout(() => reject(new Error(`${what}超时，压缩包可能不受支持`)), LIBARCHIVE_TIMEOUT_MS),
+    ),
+  ]);
 }
 
 async function loadArchive(archivePath: string): Promise<any> {
@@ -135,9 +180,9 @@ async function loadArchive(archivePath: string): Promise<any> {
   if (archiveCache && archiveCache.path === archivePath && archiveCache.mtimeMs === stat.mtimeMs) {
     return archiveCache.archive;
   }
-  await ensureLibarchive();
+  await withTimeout(ensureLibarchive(), '加载解压引擎');
   const { Archive } = await loadLibarchive();
-  const archive = await (Archive as any).open(archivePath);
+  const archive = await withTimeout((Archive as any).open(archivePath), '打开压缩包');
   zipCache = null;
   archiveCache = { path: archivePath, mtimeMs: stat.mtimeMs, archive };
   return archive;
@@ -177,8 +222,19 @@ export async function readComicPage(
   const entries = await archive.getFilesArray();
   const entry = entries.find((e: any) => e.path === name);
   if (!entry) return null;
-  const extracted = await entry.file.extract();
-  const buffer = Buffer.from(await extracted.arrayBuffer());
+  const extracted: any = await entry.file.extract();
+  // 不同运行时下 extract() 的返回形态不一致：浏览器/Node 是 File（有 arrayBuffer），
+  // 跨 worker 序列化后可能是裸数据。逐个形态兜住，避免因取不到字节整页失败。
+  let buffer: Buffer;
+  if (typeof extracted?.arrayBuffer === 'function') {
+    buffer = Buffer.from(await extracted.arrayBuffer());
+  } else if (extracted instanceof Uint8Array || Buffer.isBuffer(extracted)) {
+    buffer = Buffer.from(extracted);
+  } else if (extracted?.fileData) {
+    buffer = Buffer.from(extracted.fileData);
+  } else {
+    throw new Error('压缩包解出的数据格式无法识别');
+  }
   return { data: buffer.toString('base64'), mime };
 }
 

@@ -250,6 +250,7 @@ declare global {
       deleteWord: (id: number) => Promise<void>;
       syncBackup: () => Promise<boolean>;
       syncRestore: () => Promise<number>;
+      openExternal: (url: string) => Promise<void>;
       startWatch: (dir: string) => Promise<{ dir: string; ok: boolean }>;
       stopWatch: () => Promise<boolean>;
       watchStatus: () => Promise<{ watching: boolean; dir: string; savedDir: string }>;
