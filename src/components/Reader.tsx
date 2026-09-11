@@ -17,9 +17,20 @@ import { parseMindmap, MindNode } from '../utils/mindmap';
 import { lookupMark, compareByPosition } from '../utils/mark-lookup';
 import { normalizeText } from '../utils/text-normalize';
 import { getPreset, resolveAction, DEFAULT_SHORTCUT_PRESET } from '../utils/shortcuts';
+import { STYLE_PRESETS, resolveCustomCss, validateCustomCss, MAX_CSS_LEN } from '../utils/reading-styles';
 import { MindmapView } from './Mindmap';
 
 pdfjsLib.GlobalWorkerOptions.workerSrc = PdfWorkerUrl;
+
+/** 本地导入字体的 key 前缀：family 取自文件名 */
+const LOCAL_FONT_PREFIX = 'local:';
+
+/** 阅读样式注入用的 style 节点 id：同一章节反复注入时复用同一个节点 */
+const STYLE_NODE_ID = 'reader-style-preset';
+
+/** 字体 key → CSS font-family：本地导入的字体直接用其 family，预设走原有映射 */
+const stackOfFontKey = (key: string) =>
+  key.startsWith(LOCAL_FONT_PREFIX) ? `'${key.slice(LOCAL_FONT_PREFIX.length)}'` : fontStackOf(key);
 
 interface ReaderProps {
   book: Book;
@@ -84,6 +95,8 @@ export function Reader({ book, onBack, initialTarget, initialPosition }: ReaderP
   // B 批：字体 / 双栏 / 自动翻页 / 检索词高亮
   const [fontKey, setFontKey] = useState('system');
   const fontKeyRef = useRef('system');
+  /** 用户导入的本地字体：family 取自文件名，靠注入的 @font-face 生效 */
+  const [localFonts, setLocalFonts] = useState<{ name: string; family: string }[]>([]);
   const [dualColumn, setDualColumn] = useState(false);
   const [autoPlay, setAutoPlay] = useState(false);
   const [searchMark, setSearchMark] = useState('');
@@ -125,6 +138,9 @@ export function Reader({ book, onBack, initialTarget, initialPosition }: ReaderP
   const [comicNextData, setComicNextData] = useState<{ data: string; mime: string } | null>(null);
   const [comicSpread, setComicSpread] = useState(false);
   const [comicRtl, setComicRtl] = useState(false);
+  /** 竖排阅读：只对文字类格式生效 */
+  const [vertical, setVertical] = useState(false);
+  const verticalRef = useRef(false);
   /** 快捷键分发要同步读取翻页方向，用 ref 避免闭包拿到旧值 */
   const comicRtlRef = useRef(false);
   const [pdfReady, setPdfReady] = useState(false);
@@ -157,6 +173,13 @@ export function Reader({ book, onBack, initialTarget, initialPosition }: ReaderP
   /** 排版自定义：背景色 / 文字色 / 页边距 / 段间距 */
   const [typo, setTypo] = useState({ bgColor: '', textColor: '', pagePadding: 56, paraSpacing: 0 });
   const typoRef = useRef(typo);
+  /** 阅读样式预设：styleCssRef 存当前要注入的 CSS，切换时免去异步读设置 */
+  const [stylePreset, setStylePreset] = useState('none');
+  const styleCssRef = useRef('');
+  /** 自定义 CSS：切预设时要用它重新解析，所以留一份；草稿是输入框里的内容 */
+  const customCssRef = useRef('');
+  const [customCssDraft, setCustomCssDraft] = useState('');
+  const [showCustomCss, setShowCustomCss] = useState(false);
   /** 批注排序：按时间（默认）或按位置 */
   const [markSort, setMarkSort] = useState<'time' | 'position'>('time');
   /** 显示/隐藏全部批注（只影响渲染，不删数据） */
@@ -458,6 +481,8 @@ export function Reader({ book, onBack, initialTarget, initialPosition }: ReaderP
   const [pdfRotation, setPdfRotation] = useState(0);
   const pdfBaseWidthRef = useRef(0);
   const pdfWrapRef = useRef<HTMLDivElement>(null);
+  /** 高分屏用的设备像素比（上限 2），变化时重渲染当前页 */
+  const [dpr, setDpr] = useState(() => Math.min(2, Math.max(1, window.devicePixelRatio || 1)));
   const [jumpInput, setJumpInput] = useState('');
   const [ttsRate, setTtsRate] = useState(1);
 
@@ -680,7 +705,7 @@ export function Reader({ book, onBack, initialTarget, initialPosition }: ReaderP
       return;
     }
     try {
-      const [tts, font, fontSize, lineHeight, theme, pos, autoOn, autoDayStart, autoNightStart, autoDay, autoNight, bookPrefsRaw, presetKey, forceFont, readonly] = await Promise.all([
+      const [tts, font, fontSize, lineHeight, theme, pos, autoOn, autoDayStart, autoNightStart, autoDay, autoNight, bookPrefsRaw, presetKey, forceFont, readonly, styleKey, customCss] = await Promise.all([
         api.getSetting('ttsRate'),
         api.getSetting('fontFamily'),
         api.getSetting('fontSize'),
@@ -696,9 +721,15 @@ export function Reader({ book, onBack, initialTarget, initialPosition }: ReaderP
         api.getSetting('shortcutPreset'),
         api.getSetting('forceFont'),
         api.getSetting('annotationsReadonly'),
+        api.getSetting('readingStylePreset'),
+        api.getSetting('customReadingCss'),
       ]);
       forceFontRef.current = forceFont === 'true' || forceFont === '1';
       readonlyMarksRef.current = readonly === 'true' || readonly === '1';
+      // 阅读样式：全局设置只当默认值，本书记过就按本书的来（下面 mergePrefs）
+      const globalStyle = STYLE_PRESETS.some(p => p.key === styleKey) ? String(styleKey) : 'none';
+      customCssRef.current = customCss ?? '';
+      setCustomCssDraft(customCssRef.current);
       if (presetKey) presetRef.current = getPreset(presetKey);
       const rate = Number(tts);
       if (!Number.isNaN(rate) && rate >= 0.5 && rate <= 2) setTtsRate(rate);
@@ -720,11 +751,18 @@ export function Reader({ book, onBack, initialTarget, initialPosition }: ReaderP
         theme: (theme === 'light' || theme === 'sepia' ? theme : 'dark') as ThemeName,
         fontSize: Number.isFinite(size) && size >= 12 && size <= 32 ? size : DEFAULT_READER_PREFS.fontSize,
         lineHeight: Number.isFinite(lh) && lh >= 1 && lh <= 3 ? lh : DEFAULT_READER_PREFS.lineHeight,
-        fontFamily: font && fontStackOf(font) ? font : DEFAULT_READER_PREFS.fontFamily,
+        fontFamily: font && stackOfFontKey(font) ? font : DEFAULT_READER_PREFS.fontFamily,
+        readingStyle: globalStyle,
       };
       const saved = parseBookPrefs(bookPrefsRaw);
       bookPrefsRef.current = saved;
       const merged = mergePrefs(base, saved);
+      // 阅读样式：预设名不认识就回落「跟随主题」；自定义 CSS 非空时优先
+      const styleName = STYLE_PRESETS.some(p => p.key === merged.readingStyle)
+        ? merged.readingStyle
+        : 'none';
+      styleCssRef.current = resolveCustomCss(customCssRef.current, styleName);
+      setStylePreset(styleName);
       // 自动护眼是用户显式开启的全局开关，优先于书籍专属主题
       if (autoCfg.enabled) merged.theme = resolveThemeByClock(new Date(), autoCfg);
 
@@ -746,6 +784,8 @@ export function Reader({ book, onBack, initialTarget, initialPosition }: ReaderP
       setComicSpread(merged.comicSpread);
       setComicRtl(merged.comicRtl);
       comicRtlRef.current = merged.comicRtl;
+      setVertical(merged.vertical);
+      verticalRef.current = merged.vertical;
       savedPosRef.current = parseSavedPosition(pos);
     } catch {
       /* 读取失败按默认值走 */
@@ -817,6 +857,8 @@ export function Reader({ book, onBack, initialTarget, initialPosition }: ReaderP
     // 默认点击无反应，这里接管并区分「书内跳转」与「外部链接」
     rendition.hooks.content.register((contents: any) => {
       const doc: Document = contents.document;
+      // 每章渲染时注入一次，翻页与跳章都自动带上
+      applyReadingStyleTo(contents, styleCssRef.current);
       doc.addEventListener('click', (e: MouseEvent) => {
         const anchor = (e.target as HTMLElement)?.closest?.('a[href]') as HTMLAnchorElement | null;
         if (!anchor) return;
@@ -1463,6 +1505,62 @@ export function Reader({ book, onBack, initialTarget, initialPosition }: ReaderP
 
   // ---------- 版式 / 主题 ----------
 
+  /**
+   * 把阅读样式写进某个章节文档。
+   * 自建 style 节点，没用 epub.js 的 addStylesheetCss——后者遇到空串会直接返回、
+   * 不清掉旧样式，切回「跟随主题」时就擦不掉了。
+   */
+  const applyReadingStyleTo = (contents: any, css: string) => {
+    const doc: Document | undefined = contents?.document;
+    if (!doc?.head) return;
+    let el = doc.getElementById(STYLE_NODE_ID) as HTMLStyleElement | null;
+    if (!el) {
+      el = doc.createElement('style');
+      el.id = STYLE_NODE_ID;
+    }
+    el.textContent = css;
+    // 每次都挪到 head 末尾：主题与排版样式同样带 !important，只能靠 DOM 顺序压过它们
+    doc.head.appendChild(el);
+  };
+
+  /** 把当前样式刷到已经渲染出来的章节上（切预设、改自定义 CSS 都走它） */
+  const applyReadingStyleNow = (css: string) => {
+    styleCssRef.current = css;
+    const contents = renditionRef.current?.getContents?.();
+    const list: any[] = Array.isArray(contents) ? contents : contents ? [contents] : [];
+    for (const c of list) applyReadingStyleTo(c, css);
+  };
+
+  /** 切换阅读样式预设：立即作用于已渲染的章节，并按书记住 */
+  const changeReadingStyle = (key: string) => {
+    setStylePreset(key);
+    applyReadingStyleNow(resolveCustomCss(customCssRef.current, key));
+    queueSaveBookPrefs({ readingStyle: key });
+  };
+
+  /** 应用自定义 CSS：校验不通过就原样退回，不静默吞掉 */
+  const saveCustomCss = () => {
+    const check = validateCustomCss(customCssDraft);
+    if (!check.ok) {
+      showToast(check.reason ?? '自定义样式不可用');
+      return;
+    }
+    const css = customCssDraft.trim();
+    customCssRef.current = css;
+    applyReadingStyleNow(resolveCustomCss(css, stylePreset));
+    window.electronAPI?.setSetting('customReadingCss', css).catch(() => {});
+    showToast(css ? '自定义样式已应用' : '已停用自定义样式');
+  };
+
+  /** 清空自定义 CSS，回到当前预设 */
+  const clearCustomCss = () => {
+    setCustomCssDraft('');
+    customCssRef.current = '';
+    applyReadingStyleNow(resolveCustomCss('', stylePreset));
+    window.electronAPI?.setSetting('customReadingCss', '').catch(() => {});
+    showToast('已停用自定义样式');
+  };
+
   const applyTheme = (rendition: any) => {
     const themes: Record<string, { bg: string; fg: string }> = {
       dark: { bg: '#1a1a2e', fg: '#eaeaea' },
@@ -1470,7 +1568,7 @@ export function Reader({ book, onBack, initialTarget, initialPosition }: ReaderP
       sepia: { bg: '#f4ecd8', fg: '#5b4636' },
     };
     const { theme, fontSize, lineHeight } = cfgRef.current;
-    const stack = fontStackOf(fontKeyRef.current);
+    const stack = stackOfFontKey(fontKeyRef.current);
     const force = forceFontRef.current;
     const t = typoRef.current;
     // 自定义颜色优先于主题预设；留空则跟随主题
@@ -1480,6 +1578,7 @@ export function Reader({ book, onBack, initialTarget, initialPosition }: ReaderP
       'body':
         ` background: ${bg} !important; color: ${fg} !important;` +
         ` line-height: ${lineHeight} !important;` +
+        (verticalRef.current ? ' writing-mode: vertical-rl;' : '') +
         (stack ? ` font-family: ${stack}${force ? ' !important' : ''};` : ''),
       'p, div, span': { 'font-size': `${fontSize}px !important` },
     });
@@ -1561,6 +1660,33 @@ ${body}</body></html>`;
     }
   };
 
+  /**
+   * 导出当前页为图片。
+   * 用 Electron 截窗口可见区域，TXT / EPUB / PDF / 漫画一套逻辑走通——
+   * 不用把正文转成 canvas，也就不必引 html2canvas 之类的依赖。
+   * 截的是屏幕上看得见的部分：正文长到需要滚动时，超出视口的内容不会入镜。
+   */
+  const handleExportPageImage = async () => {
+    const api = window.electronAPI;
+    const el = viewerRef.current as HTMLElement | null;
+    if (!api?.exportPageImage || !el) return;
+    try {
+      const box = el.getBoundingClientRect();
+      const filePath = await api.exportPageImage(
+        {
+          x: Math.round(box.left),
+          y: Math.round(box.top),
+          width: Math.round(box.width),
+          height: Math.round(box.height),
+        },
+        book.title,
+      );
+      if (filePath) showToast(`已导出到：${filePath}`);
+    } catch (err) {
+      showToast(err instanceof Error ? err.message : '导出失败');
+    }
+  };
+
   /** 漫画双页合并开关 */
   const toggleComicSpread = () => {    const next = !comicSpread;
     setComicSpread(next);
@@ -1568,11 +1694,19 @@ ${body}</body></html>`;
   };
 
   /** 漫画右向左翻页开关（日漫） */
-  const toggleComicRtl = () => {
-    const next = !comicRtl;
+  const toggleComicRtl = () => {    const next = !comicRtl;
     setComicRtl(next);
     comicRtlRef.current = next;
     queueSaveBookPrefs({ comicRtl: next });
+  };
+
+  /** 竖排阅读开关：改完要重刷版式，EPUB 走主题、TXT 走容器样式 */
+  const toggleVertical = () => {
+    const next = !vertical;
+    setVertical(next);
+    verticalRef.current = next;
+    queueSaveBookPrefs({ vertical: next });
+    if (renditionRef.current) applyTheme(renditionRef.current);
   };
 
   /** 循环切换主题（快捷键用） */
@@ -1655,16 +1789,30 @@ ${body}</body></html>`;
 
   // ---------- 翻页 ----------
 
+  /** 设备像素比：窗口在不同缩放率的显示器之间移动时会变，跟着重渲染当前页 */
+  useEffect(() => {
+    const mq = window.matchMedia(`(resolution: ${dpr}dppx)`);
+    const onChange = () => setDpr(Math.min(2, Math.max(1, window.devicePixelRatio || 1)));
+    mq.addEventListener('change', onChange);
+    return () => mq.removeEventListener('change', onChange);
+  }, [dpr]);
+
   const renderPdfPage = async (pdfDoc: any, pageNum: number, scale: number, rotation = 0) => {
     if (!canvasRef.current) return;
     const page = await pdfDoc.getPage(pageNum);
     if (!pdfBaseWidthRef.current) {
       pdfBaseWidthRef.current = page.getViewport({ scale: 1 }).width;
     }
-    const viewport = page.getViewport({ scale, rotation });
+    // 高分屏：画布背衬按设备像素比放大，再按 CSS 像素指定显示宽度，
+    // 否则 4K/200% 缩放下 PDF 会被拉糊。不写死高度——宽度交给样式里的
+    // max-width:100% 去夹，高度靠 height:auto 跟比例，窄窗口才不会被压扁。
+    // 上限取 2：200% 已经足够清晰，再高只是白吃内存（一页背衬能到几十 MB）。
+    const dpr = Math.min(2, Math.max(1, window.devicePixelRatio || 1));
+    const viewport = page.getViewport({ scale: scale * dpr, rotation });
     const canvas = canvasRef.current;
-    canvas.height = viewport.height;
-    canvas.width = viewport.width;
+    canvas.width = Math.floor(viewport.width);
+    canvas.height = Math.floor(viewport.height);
+    canvas.style.width = `${Math.round(viewport.width / dpr)}px`;
     const ctx = canvas.getContext('2d')!;
     await page.render({ canvasContext: ctx, viewport }).promise;
   };
@@ -1673,7 +1821,7 @@ ${body}</body></html>`;
     if (book.file_type === 'pdf' && pdfReady && pdfDocRef.current && !loading && !pdfReflow) {
       renderPdfPage(pdfDocRef.current, pageIndex + 1, pdfScale, pdfRotation);
     }
-  }, [pdfReady, pageIndex, loading, pdfScale, pdfReflow, pdfRotation]);
+  }, [pdfReady, pageIndex, loading, pdfScale, pdfReflow, pdfRotation, dpr]);
 
   // TXT / PDF：页码变化即记录阅读位置（加载完成前不写，避免覆盖上次位置）
   useEffect(() => {
@@ -2111,6 +2259,31 @@ ${body}</body></html>`;
     return () => { alive = false; };
   }, [book.file_type, book.id, comicPages, pageIndex, comicSpread]);
 
+  // 本地字体：取回列表并注入 @font-face。字体文件经 bookfile:// 协议读取，
+  // 与封面同一条通道；URL 里的路径是 base64url，不经过 URL 结构规整。
+  useEffect(() => {
+    const api = window.electronAPI;
+    if (!api) return;
+    let alive = true;
+    api
+      .listFonts()
+      .then(fonts => {
+        if (!alive || fonts.length === 0) return;
+        setLocalFonts(fonts);
+        const style = document.createElement('style');
+        style.dataset.localFonts = '1';
+        style.textContent = fonts
+          .map(f => `@font-face{font-family:'${f.family}';src:url('${f.url}');font-display:swap;}`)
+          .join('\n');
+        document.head.appendChild(style);
+      })
+      .catch(() => { /* 取不到按无本地字体处理 */ });
+    return () => {
+      alive = false;
+      document.querySelector('style[data-local-fonts]')?.remove();
+    };
+  }, []);
+
   const txtHtml = book.file_type === 'txt' ? renderTxtHtml() : null;
   return (
     <div className={`reader ${view.autoHideBar ? 'bar-auto-hide' : ''}`}>
@@ -2135,6 +2308,11 @@ ${body}</body></html>`;
             <option value="sans">黑体</option>
             <option value="kai">楷体</option>
             <option value="mono">等宽</option>
+            {localFonts.map(f => (
+              <option key={f.name} value={`${LOCAL_FONT_PREFIX}${f.family}`}>
+                {f.family}
+              </option>
+            ))}
           </select>
           <button onClick={() => changeFontSize(-2)} title="缩小字号">A-</button>
           <button onClick={() => changeFontSize(2)} title="放大字号">A+</button>
@@ -2152,8 +2330,18 @@ ${body}</body></html>`;
             </button>
           )}
           <button onClick={handlePrint} title="打印 / 打印预览">🖨</button>
+          <button onClick={handleExportPageImage} title="导出当前页为图片（PNG）">🖼</button>
           {(book.file_type === 'epub' || book.file_type === 'txt') && (
             <button onClick={() => togglePanel('toc')} className={panel === 'toc' ? 'active' : ''}>📑 目录</button>
+          )}
+          {(book.file_type === 'epub' || book.file_type === 'txt') && (
+            <button
+              onClick={toggleVertical}
+              className={vertical ? 'active' : ''}
+              title={vertical ? '切换为横排' : '切换为竖排（从右向左）'}
+            >
+              {vertical ? '⬍' : '⬌'}
+            </button>
           )}
           {book.file_type === 'cbz' && (
             <>
@@ -2381,6 +2569,43 @@ ${body}</body></html>`;
             <h3>排版自定义</h3>
 
             <div className="form-row">
+              <label>阅读样式</label>
+              <select
+                value={stylePreset}
+                onChange={e => changeReadingStyle(e.target.value)}
+              >
+                {STYLE_PRESETS.map(p => (
+                  <option key={p.key} value={p.key}>{p.name}</option>
+                ))}
+              </select>
+            </div>
+            <p className="section-desc" style={{ marginTop: -6 }}>
+              {STYLE_PRESETS.find(p => p.key === stylePreset)?.desc}
+            </p>
+
+            <div className="form-row" style={{ marginBottom: 8 }}>
+              <button className="link-btn" onClick={() => setShowCustomCss(v => !v)}>
+                {showCustomCss ? '收起自定义 CSS' : '自定义 CSS…'}
+              </button>
+            </div>
+            {showCustomCss && (
+              <>
+                <textarea
+                  value={customCssDraft}
+                  onChange={e => setCustomCssDraft(e.target.value)}
+                  maxLength={MAX_CSS_LEN}
+                  rows={6}
+                  spellCheck={false}
+                  placeholder="p { text-indent: 2em; }（仅 EPUB，留空即停用）"
+                />
+                <div style={{ display: 'flex', gap: 4, marginBottom: 8 }}>
+                  <button className="link-btn" onClick={saveCustomCss}>应用</button>
+                  <button className="link-btn" onClick={clearCustomCss}>清除</button>
+                </div>
+              </>
+            )}
+
+            <div className="form-row">
               <label>背景色</label>
               <div className="color-row">
                 <input
@@ -2433,8 +2658,8 @@ ${body}</body></html>`;
             </div>
 
             <p className="section-desc" style={{ marginBottom: 0 }}>
-              段落间距对 EPUB 生效；TXT 以空行分段，不受此项影响。
-              设置按书记忆，下次打开自动还原。
+              阅读样式与段落间距对 EPUB 生效，TXT 以空行分段、不受这两项影响。
+              以上设置按书记忆，下次打开自动还原；自定义 CSS 是全局的，对所有书生效。
             </p>
           </div>
         )}
@@ -2685,13 +2910,14 @@ ${body}</body></html>`;
               style={{
                 fontSize: settings.fontSize,
                 lineHeight: settings.lineHeight,
-                fontFamily: fontStackOf(fontKey) || undefined,
+                fontFamily: stackOfFontKey(fontKey) || undefined,
                 background: typo.bgColor || undefined,
                 color: typo.textColor || undefined,
                 paddingLeft: typo.pagePadding,
                 paddingRight: typo.pagePadding,
                 columnCount: dualColumn ? 2 : undefined,
                 columnGap: dualColumn ? '48px' : undefined,
+                writingMode: vertical ? 'vertical-rl' : undefined,
               } as CSSProperties}
               onMouseUp={handleTxtMouseUp}
               onClick={handleTxtMarkClick}

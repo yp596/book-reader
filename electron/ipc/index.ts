@@ -2,7 +2,7 @@ import { ipcMain, dialog, BrowserWindow, app, shell, Notification, clipboard } f
 import fs from 'fs';
 import path from 'path';
 import { DatabaseService } from '../services/db.service';
-import { extractMetadata, extractToc, docxToChapters, mdToChapters, extractBookSections, TXT_TOC_RULE_NAMES, type TxtTocOptions } from '../services/metadata';
+import { extractMetadata, extractToc, docxToChapters, mdToChapters, extractBookSections, readPlainTextFile, TXT_TOC_RULE_NAMES, type TxtTocOptions } from '../services/metadata';
 import { buildCrawlerFromRow, applyTextFilters } from '../services/book-source';
 import { splitText, cosine, embedTexts } from '../services/rag';
 import { buildEpub } from '../services/epub-export';
@@ -23,6 +23,16 @@ import { contentHash } from '../services/file-hash';
 import { dirSize, clearSnapshots } from '../services/cache';
 import { folderWatcher } from '../services/watch-folder';
 import { loadRenderer } from '../renderer-window';
+import { fontsDir, localFileUrl } from '../services/local-file';
+import {
+  mergePdfs,
+  extractPages,
+  deletePages,
+  rotatePages,
+  cropPages,
+  addWatermark,
+  addPageNumbers,
+} from '../services/pdf-edit';
 import { buildBookListMarkdown, buildBookBackup, backupFileName, localDateStamp } from '../services/book-export';
 
 /**
@@ -40,6 +50,21 @@ async function backfillCovers(db: DatabaseService) {
 }
 
 const sanitizeFileName = (name: string) => name.replace(/[\\/:*?"<>|]/g, '_');
+
+/** 列出用户导入的本地字体；family 取文件名，渲染进程据此声明 @font-face */
+function listLocalFonts(): { name: string; family: string; url: string }[] {
+  const dir = fontsDir();
+  if (!fs.existsSync(dir)) return [];
+  return fs
+    .readdirSync(dir)
+    .filter(f => /\.(ttf|otf|woff2?|ttc)$/i.test(f))
+    .sort()
+    .map(f => ({
+      name: f,
+      family: path.basename(f, path.extname(f)),
+      url: localFileUrl(path.join(dir, f)),
+    }));
+}
 
 /** 章节内容统一入口：缓存 → 抓取 → 净化 → 回写缓存 */
 async function fetchChapterContent(
@@ -133,6 +158,24 @@ async function importOneFile(db: DatabaseService, filePath: string) {
     if (toc.length > 0) db.setBookToc(Number(id), JSON.stringify(toc));
   } catch { /* 目录失败不阻塞导入 */ }
   return { id: Number(id), path: storePath };
+}
+
+/** 文档比较：单侧最多取这么多行，超出部分截断并在界面提示 */
+const COMPARE_MAX_LINES = 20000;
+
+/** 取一本书的文本行用于比较；不支持的格式返回 null */
+async function bookTextLines(book: any): Promise<string[] | null> {
+  const ext = ('.' + book.file_type) as string;
+  try {
+    if (ext === '.txt') {
+      return readPlainTextFile(book.file_path).split('\n');
+    }
+    if (ext === '.epub') {
+      const sections = await extractBookSections(book.file_path, ext, book.toc ?? '');
+      return sections.map((s: any) => s.text).join('\n').split('\n');
+    }
+  } catch { /* 解析失败按不可比处理 */ }
+  return null;
 }
 
 export function registerIpcHandlers() {
@@ -415,6 +458,7 @@ export function registerIpcHandlers() {
       },
     });
     loadRenderer(win, bookId);
+    if (db.getSetting('screenProtection') === 'true') win.setContentProtection(true);
   });
 
   // 打印预览：把渲染进程生成的打印页开在独立窗口里，由该窗口的「打印」按钮调用系统打印
@@ -434,6 +478,27 @@ export function registerIpcHandlers() {
     await win.loadFile(tmpFile);
     return true;
   });
+
+  // 阅读截图：直接截窗口可见区域，TXT / EPUB / PDF / 漫画一套逻辑通用。
+  // 高分屏下 capturePage 按显示器缩放率出图，导出的 PNG 是原始像素而非拉大的。
+  ipcMain.handle(
+    'reader:exportImage',
+    async (event, rect: { x: number; y: number; width: number; height: number }, title: string) => {
+      const win = BrowserWindow.fromWebContents(event.sender);
+      if (!win) throw new Error('窗口已关闭');
+      const image = await win.webContents.capturePage(rect);
+      // 书名里的 : * ? 等在 Windows 上是非法文件名字符，先替掉
+      const safe = (title || '阅读截图').replace(/[\\/:*?"<>|]/g, '_').trim().slice(0, 60) || '阅读截图';
+      const { canceled, filePath } = await dialog.showSaveDialog(win, {
+        title: '导出当前页为图片',
+        defaultPath: `${safe}.png`,
+        filters: [{ name: 'PNG 图片', extensions: ['png'] }],
+      });
+      if (canceled || !filePath) return null;
+      fs.writeFileSync(filePath, image.toPNG());
+      return filePath;
+    },
+  );
 
   // 漫画包页面清单（按自然序）
   ipcMain.handle('books:comicPages', async (_event, id: number) => {
@@ -464,6 +529,15 @@ export function registerIpcHandlers() {
     if (!win) return false;
     win.setAlwaysOnTop(!!flag);
     return win.isAlwaysOnTop();
+  });
+
+  // 防截屏：窗口内容在截图/录屏中不显示（Windows 由系统合成器屏蔽）。
+  // 只做截屏防护——复制与打印是本阅读器的正经功能，全局屏蔽会把它自己砍掉。
+  ipcMain.handle('window:setContentProtection', (_event, flag: boolean) => {
+    for (const win of BrowserWindow.getAllWindows()) {
+      win.setContentProtection(!!flag);
+    }
+    return !!flag;
   });
 
   // EPUB 位置索引缓存
@@ -1061,6 +1135,117 @@ export function registerIpcHandlers() {
   });
 
   // ============ 应用信息（静态只读，不联网） ============
+
+  // ============ 本地字体 ============
+
+  ipcMain.handle('fonts:list', () => listLocalFonts());
+
+  // 导入本地字体：拷进用户字体目录，之后按文件名当 family 用（无需解析字体内部元数据）
+  ipcMain.handle('fonts:import', async () => {
+    const win = BrowserWindow.getFocusedWindow();
+    const result = await dialog.showOpenDialog(win!, {
+      title: '导入字体',
+      filters: [{ name: '字体文件', extensions: ['ttf', 'otf', 'woff', 'woff2', 'ttc'] }],
+      properties: ['openFile', 'multiSelections'],
+    });
+    if (result.canceled) return listLocalFonts();
+    const dir = fontsDir();
+    if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
+    for (const filePath of result.filePaths) {
+      // 用原文件名落盘，重名直接覆盖
+      fs.copyFileSync(filePath, path.join(dir, sanitizeFileName(path.basename(filePath))));
+    }
+    return listLocalFonts();
+  });
+
+  ipcMain.handle('fonts:remove', (_event, name: string) => {
+    const dir = fontsDir();
+    // 只接受文件名，挡掉 ../ 之类的路径穿越
+    const target = path.join(dir, path.basename(name));
+    if (fs.existsSync(target)) fs.unlinkSync(target);
+    return listLocalFonts();
+  });
+
+  // ============ PDF 编辑 ============
+
+  /** 输出文件名的中文后缀 */
+  const PDF_OP_LABEL: Record<string, string> = {
+    merge: '合并',
+    extract: '抽取',
+    deletePages: '删页',
+    rotate: '旋转',
+    crop: '裁剪',
+    watermark: '水印',
+    pageNumbers: '页码',
+  };
+
+  ipcMain.handle('pdf:run', async (_event, payload: any) => {
+    const op = String(payload?.op ?? '');
+    const ids: number[] = Array.isArray(payload?.sourceIds) ? payload.sourceIds : [];
+    if (ids.length === 0) throw new Error('请先选择文件');
+    const books = ids.map(id => db.getBookById(id) as any).filter(Boolean);
+    if (books.length === 0) throw new Error('文件不存在');
+    if (books.some(b => b.file_type !== 'pdf')) throw new Error('PDF 工具只支持 PDF 文件');
+
+    // 输出位置交给用户选，避免直接改到书库里的原件
+    const win = BrowserWindow.getFocusedWindow();
+    const picked = await dialog.showSaveDialog(win!, {
+      title: '选择输出位置',
+      defaultPath: op === 'merge'
+        ? `合并结果-${localDateStamp()}.pdf`
+        : `${books[0].title}-${PDF_OP_LABEL[op] ?? '输出'}.pdf`,
+      filters: [{ name: 'PDF', extensions: ['pdf'] }],
+    });
+    if (picked.canceled || !picked.filePath) return null;
+
+    const out = picked.filePath;
+    const paths = books.map(b => b.file_path);
+    let pages = 0;
+    switch (op) {
+      case 'merge':
+        pages = await mergePdfs(paths, out);
+        break;
+      case 'extract':
+        pages = await extractPages(paths[0], payload.pages ?? '', out);
+        break;
+      case 'deletePages':
+        pages = await deletePages(paths[0], payload.pages ?? '', out);
+        break;
+      case 'rotate':
+        pages = await rotatePages(paths[0], payload.pages ?? '', Number(payload.angle) || 90, out);
+        break;
+      case 'crop':
+        pages = await cropPages(paths[0], payload.pages ?? '', Number(payload.marginPercent) || 5, out);
+        break;
+      case 'watermark':
+        pages = await addWatermark(paths[0], String(payload.text ?? ''), out);
+        break;
+      case 'pageNumbers':
+        pages = await addPageNumbers(paths[0], out);
+        break;
+      default:
+        throw new Error(`未知的操作：${op}`);
+    }
+    return { filePath: out, pages };
+  });
+
+  // 文档比较：一次取两本书的文本行，差异在渲染进程算（纯函数，可单测）
+  ipcMain.handle('compare:load', async (_event, idA: number, idB: number) => {
+    const a = db.getBookById(idA) as any;
+    const b = db.getBookById(idB) as any;
+    if (!a || !b) throw new Error('书籍不存在');
+    const [left, right] = await Promise.all([bookTextLines(a), bookTextLines(b)]);
+    if (!left || !right) throw new Error('该格式暂不支持比较（目前支持 TXT / EPUB）');
+    const clip = (lines: string[]) => ({
+      lines: lines.slice(0, COMPARE_MAX_LINES),
+      total: lines.length,
+      truncated: lines.length > COMPARE_MAX_LINES,
+    });
+    return {
+      left: { title: a.title, ...clip(left) },
+      right: { title: b.title, ...clip(right) },
+    };
+  });
 
   ipcMain.handle('app:info', () => {
     return {

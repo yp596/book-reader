@@ -20,6 +20,8 @@ describe('parseBookPrefs', () => {
       pdfScale: 2,
       comicSpread: true,
       comicRtl: true,
+      vertical: true,
+      readingStyle: 'none',
       bgColor: '#1a1a2e',
       textColor: '#eaeaea',
       pagePadding: 72,
@@ -29,10 +31,11 @@ describe('parseBookPrefs', () => {
   });
 
   it('漫画开关须为布尔值，非布尔一律丢弃', () => {
-    expect(parseBookPrefs(JSON.stringify({ comicSpread: 'yes', comicRtl: 1 }))).toEqual({});
-    expect(parseBookPrefs(JSON.stringify({ comicSpread: false, comicRtl: true }))).toEqual({
+    expect(parseBookPrefs(JSON.stringify({ comicSpread: 'yes', comicRtl: 1, vertical: 'on' }))).toEqual({});
+    expect(parseBookPrefs(JSON.stringify({ comicSpread: false, comicRtl: true, vertical: true }))).toEqual({
       comicSpread: false,
       comicRtl: true,
+      vertical: true,
     });
   });
 
@@ -46,6 +49,9 @@ describe('parseBookPrefs', () => {
 
   it('丢弃非法枚举值', () => {
     expect(parseBookPrefs(JSON.stringify({ theme: 'neon', flowMode: 'zigzag' }))).toEqual({});
+    // 阅读样式预设须在 reading-styles 的白名单内：脏值会让面板下拉出现空白项
+    expect(parseBookPrefs(JSON.stringify({ readingStyle: 'neon' }))).toEqual({});
+    expect(parseBookPrefs(JSON.stringify({ readingStyle: 'paper' }))).toEqual({ readingStyle: 'paper' });
   });
 
   it('丢弃越界数值', () => {

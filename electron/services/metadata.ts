@@ -1,10 +1,16 @@
 import fs from 'fs';
+import path from 'path';
 import JSZip from 'jszip';
 import * as pdfjsLib from 'pdfjs-dist';
 import mammoth from 'mammoth';
 import * as cheerio from 'cheerio/slim';
 import { marked } from 'marked';
 import { TXT_TOC_RULES, type TxtTocRule } from './txt-toc-rules';
+
+// pdfjs 解析 PDF 需要 worker 伴随文件。不显式指定的话它按包内相对路径找，
+// 打包后找不到就静默失败——PDF 目录会变成空的，且错误被上层 catch 吞掉。
+// 该文件由 vite 构建时拷到主进程产物目录（见 vite.config.ts）。
+pdfjsLib.GlobalWorkerOptions.workerSrc = path.join(__dirname, 'pdf.worker.mjs');
 
 export interface BookMetadata {
   title: string;
@@ -375,6 +381,11 @@ function decodeTextAuto(buffer: Buffer): string {
 function readTextHead(filePath: string, maxBytes = 65536): string {
   const buffer = fs.readFileSync(filePath);
   return decodeTextAuto(buffer.subarray(0, maxBytes));
+}
+
+/** 读取整份文本文件，自动判编码。供文档比较等需要原文的场景使用 */
+export function readPlainTextFile(filePath: string): string {
+  return decodeTextAuto(fs.readFileSync(filePath));
 }
 
 function extractTxtToc(filePath: string, options?: TxtTocOptions): TocEntry[] {

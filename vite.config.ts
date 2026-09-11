@@ -2,6 +2,23 @@ import { defineConfig } from 'vite';
 import react from '@vitejs/plugin-react';
 import electron from 'vite-plugin-electron';
 import renderer from 'vite-plugin-electron-renderer';
+import fs from 'fs';
+import path from 'path';
+
+/**
+ * 主进程用 pdfjs 解析 PDF 时需要 worker 伴随文件。
+ * vite 只打包代码，不会把这个文件带出来；缺了它 PDF 目录会静默变成空数组。
+ */
+function copyPdfWorker() {
+  return {
+    name: 'copy-pdf-worker',
+    closeBundle() {
+      const from = path.resolve(process.cwd(), 'node_modules/pdfjs-dist/build/pdf.worker.mjs');
+      const to = path.resolve(process.cwd(), 'dist-electron/pdf.worker.mjs');
+      if (fs.existsSync(from)) fs.copyFileSync(from, to);
+    },
+  };
+}
 
 export default defineConfig({
   plugins: [
@@ -10,6 +27,7 @@ export default defineConfig({
       {
         entry: 'electron/main.ts',
         vite: {
+          plugins: [copyPdfWorker()],
           build: {
             outDir: 'dist-electron',
             rollupOptions: {

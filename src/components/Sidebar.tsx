@@ -1,4 +1,4 @@
-type View = 'library' | 'reader' | 'sources' | 'rag' | 'vocab' | 'notes' | 'models' | 'settings' | 'stats' | 'help';
+type View = 'library' | 'reader' | 'sources' | 'rag' | 'vocab' | 'notes' | 'models' | 'settings' | 'stats' | 'help' | 'compare' | 'pdf';
 
 interface SidebarProps {
   currentView: View;
@@ -64,6 +64,20 @@ export function Sidebar({ currentView, onNavigate, onOpenFile, onSearch }: Sideb
         >
           <span className="nav-icon">🧠</span>
           <span className="nav-label">语义检索</span>
+        </button>
+        <button
+          className={`nav-item ${currentView === 'compare' ? 'active' : ''}`}
+          onClick={() => onNavigate('compare')}
+        >
+          <span className="nav-icon">⚖️</span>
+          <span className="nav-label">文档比较</span>
+        </button>
+        <button
+          className={`nav-item ${currentView === 'pdf' ? 'active' : ''}`}
+          onClick={() => onNavigate('pdf')}
+        >
+          <span className="nav-icon">📐</span>
+          <span className="nav-label">PDF 工具</span>
         </button>
         <button
           className={`nav-item ${currentView === 'models' ? 'active' : ''}`}

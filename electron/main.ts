@@ -1,4 +1,4 @@
-import { app, BrowserWindow, globalShortcut, clipboard, protocol, net, ipcMain, Tray, Menu, nativeImage } from 'electron';
+import { app, BrowserWindow, globalShortcut, clipboard, protocol, net, ipcMain, Tray, Menu, nativeImage, screen } from 'electron';
 import fs from 'fs';
 import path from 'path';
 import { pathToFileURL } from 'url';
@@ -8,7 +8,7 @@ import { disposeEngine } from './services/llama-engine';
 import { registerIpcHandlers } from './ipc';
 import { folderWatcher } from './services/watch-folder';
 import { loadRenderer } from './renderer-window';
-import { LOCAL_FILE_SCHEME, filePathFromUrl, isInsideBooksDir } from './services/local-file';
+import { LOCAL_FILE_SCHEME, filePathFromUrl, isInsideAllowedDir } from './services/local-file';
 
 // 必须在 app ready 之前声明为特权协议，否则渲染进程的 CSP 与跨源策略会拦掉封面请求
 protocol.registerSchemesAsPrivileged([
@@ -82,22 +82,42 @@ app.on('second-instance', (_event, argv) => {
 function registerLocalFileProtocol() {
   protocol.handle(LOCAL_FILE_SCHEME, async (request) => {
     const filePath = filePathFromUrl(request.url);
-    if (!isInsideBooksDir(filePath) || !fs.existsSync(filePath)) {
+    if (!isInsideAllowedDir(filePath) || !fs.existsSync(filePath)) {
       return new Response('forbidden', { status: 403 });
     }
     return net.fetch(pathToFileURL(filePath).toString());
   });
 }
 
+/**
+ * 上次的窗口位置可能来自已拔掉的显示器，或另一台缩放率不同的屏（4K/200% 与 1080p 混用很常见）。
+ * 钳到当前显示器的工作区内，免得窗口开在屏幕外点不到。
+ */
+function restoreWindowBounds(saved: { x?: number; y?: number; width: number; height: number } | null) {
+  if (!saved) return { width: 1200, height: 800, x: undefined, y: undefined };
+  const box = { x: saved.x ?? 0, y: saved.y ?? 0, width: saved.width, height: saved.height };
+  const area = screen.getDisplayMatching(box).workArea;
+  const width = Math.min(box.width, area.width);
+  const height = Math.min(box.height, area.height);
+  // 没有坐标就交给系统居中
+  if (saved.x === undefined || saved.y === undefined) return { width, height, x: undefined, y: undefined };
+  return {
+    width,
+    height,
+    x: Math.min(Math.max(box.x, area.x), area.x + area.width - width),
+    y: Math.min(Math.max(box.y, area.y), area.y + area.height - height),
+  };
+}
+
 function createWindow() {
   const db = DatabaseService.getInstance();
-  const bounds = db.getWindowBounds();
+  const bounds = restoreWindowBounds(db.getWindowBounds());
 
   mainWindow = new BrowserWindow({
-    width: bounds?.width ?? 1200,
-    height: bounds?.height ?? 800,
-    x: bounds?.x,
-    y: bounds?.y,
+    width: bounds.width,
+    height: bounds.height,
+    x: bounds.x,
+    y: bounds.y,
     minWidth: 800,
     minHeight: 600,
     webPreferences: {
@@ -183,6 +203,12 @@ app.whenReady().then(async () => {
   } catch { /* 目录已不存在则忽略 */ }
   registerShortcuts();
   createTray();
+  // 恢复防截屏设置：设置页改过之后重启也要继续生效
+  try {
+    if (DatabaseService.getInstance().getSetting('screenProtection') === 'true') {
+      for (const win of BrowserWindow.getAllWindows()) win.setContentProtection(true);
+    }
+  } catch { /* 忽略 */ }
   // 推理走进程内引擎（懒加载，首次 AI 调用时载入模型）；
   // 边车仅作手动回退，不再开机自启，避免模型双份占内存
   if (mainWindow) {

@@ -27,11 +27,20 @@ export const localFileUrl = (filePath: string) =>
 export const filePathFromUrl = (url: string) =>
   Buffer.from(new URL(url).pathname.replace(/^\//, ''), 'base64url').toString('utf8');
 
-/** 书库目录：封面等本机资源只允许从这里读取 */
+/** 书库目录：封面等本机资源 */
 export const booksDir = () => path.join(app.getPath('userData'), 'books');
 
-/** 路径是否位于书库目录内（协议处理器的访问边界） */
-export const isInsideBooksDir = (filePath: string) => {
-  const rel = path.relative(booksDir(), path.resolve(filePath));
+/** 用户导入的字体目录 */
+export const fontsDir = () => path.join(app.getPath('userData'), 'fonts');
+
+const isInside = (dir: string, filePath: string) => {
+  const rel = path.relative(dir, path.resolve(filePath));
   return rel !== '' && !rel.startsWith('..') && !path.isAbsolute(rel);
 };
+
+/**
+ * 协议处理器的访问边界：只放行书库与字体两个目录。
+ * 路径必须落在其中之一，否则等于把整个磁盘暴露给渲染进程。
+ */
+export const isInsideAllowedDir = (filePath: string) =>
+  isInside(booksDir(), filePath) || isInside(fontsDir(), filePath);

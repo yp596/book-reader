@@ -1,4 +1,5 @@
 import type { ThemeName } from './reader-options';
+import { STYLE_PRESETS } from './reading-styles';
 
 /** 单本书的阅读排版偏好（缺项回退全局默认） */
 export interface ReaderPrefs {
@@ -16,6 +17,8 @@ export interface ReaderPrefs {
   comicSpread: boolean;
   /** 漫画：右向左翻页（日漫阅读方向） */
   comicRtl: boolean;
+  /** 竖排阅读（古籍从右向左），只对文字类格式有效 */
+  vertical: boolean;
   /** 自定义背景色（空串=跟随主题） */
   bgColor: string;
   /** 自定义文字色（空串=跟随主题） */
@@ -24,6 +27,8 @@ export interface ReaderPrefs {
   pagePadding: number;
   /** 段落间距（em） */
   paraSpacing: number;
+  /** 阅读样式预设（EPUB 正文），值取自 reading-styles 的预设名 */
+  readingStyle: string;
 }
 
 export const DEFAULT_READER_PREFS: ReaderPrefs = {
@@ -36,10 +41,12 @@ export const DEFAULT_READER_PREFS: ReaderPrefs = {
   pdfScale: 1.5,
   comicSpread: false,
   comicRtl: false,
+  vertical: false,
   bgColor: '',
   textColor: '',
   pagePadding: 56,
   paraSpacing: 0,
+  readingStyle: 'none',
 };
 
 /** 每本书的偏好存这个 key 下 */
@@ -79,11 +86,16 @@ export function parseBookPrefs(raw: string | null | undefined): Partial<ReaderPr
   if (numIn(parsed.pdfScale, 0.5, 3)) out.pdfScale = parsed.pdfScale;
   if (typeof parsed.comicSpread === 'boolean') out.comicSpread = parsed.comicSpread;
   if (typeof parsed.comicRtl === 'boolean') out.comicRtl = parsed.comicRtl;
+  if (typeof parsed.vertical === 'boolean') out.vertical = parsed.vertical;
   // 颜色只接受 #rgb / #rrggbb：脏值会直接把阅读区搞花，宁可丢弃回退主题
   if (isHexColor(parsed.bgColor)) out.bgColor = parsed.bgColor;
   if (isHexColor(parsed.textColor)) out.textColor = parsed.textColor;
   if (numIn(parsed.pagePadding, 0, 200)) out.pagePadding = parsed.pagePadding;
   if (numIn(parsed.paraSpacing, 0, 3)) out.paraSpacing = parsed.paraSpacing;
+  // 预设名要在白名单里：脏值会让面板下拉显示空白项
+  if (typeof parsed.readingStyle === 'string' && STYLE_PRESETS.some(p => p.key === parsed.readingStyle)) {
+    out.readingStyle = parsed.readingStyle;
+  }
   return out;
 }
 

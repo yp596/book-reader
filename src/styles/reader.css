@@ -105,6 +105,26 @@
   letter-spacing: 1px;
 }
 
+/* 自定义阅读样式输入框：与笔记弹窗同一套观感，面板窄所以允许纵向拉伸 */
+.toc-panel textarea {
+  width: 100%;
+  padding: 10px 12px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  background: var(--bg-input);
+  color: var(--text-primary);
+  font-family: ui-monospace, Consolas, monospace;
+  font-size: 12px;
+  line-height: 1.6;
+  outline: none;
+  resize: vertical;
+}
+
+.toc-panel textarea:focus {
+  border-color: var(--accent);
+  box-shadow: 0 0 0 3px var(--accent-glow);
+}
+
 .toc-item {
   padding: 10px 14px;
   font-size: 13px;

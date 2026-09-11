@@ -32,6 +32,10 @@ interface SettingsData {
   autoThemeNight: 'dark' | 'light' | 'sepia';
   /** 退出软件时自动清理临时隐私数据 */
   privacyAutoClear: boolean;
+  /** 关闭窗口时最小化到托盘，应用继续驻留 */
+  closeToTray: boolean;
+  /** 防截屏：窗口内容在截图/录屏中不显示 */
+  screenProtection: boolean;
   /** 当前快捷键预设 key */
   shortcutPreset: string;
   /** 全局强制统一字体（压过电子书自带字体） */
@@ -71,6 +75,8 @@ export function Settings() {
     autoThemeDay: DEFAULT_AUTO_THEME.dayTheme,
     autoThemeNight: DEFAULT_AUTO_THEME.nightTheme,
     privacyAutoClear: false,
+    closeToTray: false,
+    screenProtection: false,
     shortcutPreset: DEFAULT_SHORTCUT_PRESET,
     forceFont: false,
     annotationsReadonly: false,
@@ -91,6 +97,7 @@ export function Settings() {
     loadLastBackup();
     loadCacheStats();
     loadWatch();
+    loadFonts();
   }, []);
 
   const loadLastSync = async () => {
@@ -103,7 +110,7 @@ export function Settings() {
   const loadSettings = async () => {
     const api = window.electronAPI;
     if (!api) return;
-    const BOOL_KEYS: (keyof SettingsData)[] = ['autoTheme', 'privacyAutoClear', 'forceFont', 'annotationsReadonly'];
+    const BOOL_KEYS: (keyof SettingsData)[] = ['autoTheme', 'privacyAutoClear', 'forceFont', 'annotationsReadonly', 'closeToTray', 'screenProtection'];
     const NUM_KEYS: (keyof SettingsData)[] = [
       'fontSize', 'lineHeight', 'ttsRate', 'autoThemeDayStart', 'autoThemeNightStart', 'idleDays', 'dailyGoalMinutes',
     ];
@@ -138,6 +145,39 @@ export function Settings() {
 
   const handleChange = (key: keyof SettingsData, value: any) => {
     setSettings(s => ({ ...s, [key]: value }));
+  };
+
+  // ---------- 本地字体 ----------
+
+  const [localFonts, setLocalFonts] = useState<{ name: string; family: string }[]>([]);
+
+  const loadFonts = async () => {
+    const api = window.electronAPI;
+    if (!api) return;
+    try {
+      setLocalFonts(await api.listFonts());
+    } catch { /* 读取失败按无字体处理 */ }
+  };
+
+  const handleImportFont = async () => {
+    const api = window.electronAPI;
+    if (!api) return;
+    try {
+      setLocalFonts(await api.importFonts());
+    } catch (err) {
+      alert(`导入失败：${err instanceof Error ? err.message : '未知错误'}`);
+    }
+  };
+
+  const handleRemoveFont = async (name: string) => {
+    const api = window.electronAPI;
+    if (!api) return;
+    if (!confirm(`删除字体「${name}」？已使用该字体的书会回退到默认字体。`)) return;
+    try {
+      setLocalFonts(await api.removeFont(name));
+    } catch (err) {
+      alert(`删除失败：${err instanceof Error ? err.message : '未知错误'}`);
+    }
   };
 
   // ---------- 本地备份（纯离线） ----------
@@ -526,6 +566,26 @@ export function Settings() {
       </section>
 
       <section className="settings-section">
+        <h2>本地字体</h2>
+        <p className="section-desc">
+          导入本机字体文件后，可在阅读器的字体下拉里选用。字体只存在本机，不随书库同步。
+        </p>
+        <div className="form-row">
+          <button className="btn-secondary" onClick={handleImportFont}>导入字体文件</button>
+        </div>
+        {localFonts.length === 0 ? (
+          <p className="section-desc">尚未导入字体</p>
+        ) : (
+          localFonts.map(f => (
+            <div className="form-row" key={f.name}>
+              <label style={{ fontFamily: `'${f.family}'` }}>{f.family}</label>
+              <button className="danger" onClick={() => handleRemoveFont(f.name)}>删除</button>
+            </div>
+          ))
+        )}
+      </section>
+
+      <section className="settings-section">
         <h2>TXT 目录解析</h2>
         <p className="section-desc">
           决定 TXT 书籍如何识别章节标题。改动对之后导入的书生效；已导入的书可在书籍详情页重新解析。
@@ -790,6 +850,37 @@ export function Settings() {
             <span>
               退出软件时自动清理
               <em className="privacy-hint">仅清章节缓存与剪贴板；笔记、书签、进度一律保留</em>
+            </span>
+          </label>
+        </div>
+
+        <div className="form-row" style={{ marginTop: 10 }}>
+          <label className="checkbox-row">
+            <input
+              type="checkbox"
+              checked={settings.closeToTray}
+              onChange={e => handleChange('closeToTray', e.target.checked)}
+            />
+            <span>
+              关闭窗口时最小化到托盘
+              <em className="privacy-hint">开启后关窗口不退出，从托盘菜单「退出」才真正退出</em>
+            </span>
+          </label>
+        </div>
+
+        <div className="form-row" style={{ marginTop: 10 }}>
+          <label className="checkbox-row">
+            <input
+              type="checkbox"
+              checked={settings.screenProtection}
+              onChange={e => {
+                handleChange('screenProtection', e.target.checked);
+                window.electronAPI?.setContentProtection(e.target.checked);
+              }}
+            />
+            <span>
+              防截屏保护
+              <em className="privacy-hint">开启后截图与录屏中不显示窗口内容，立即生效</em>
             </span>
           </label>
         </div>

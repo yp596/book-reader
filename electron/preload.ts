@@ -62,8 +62,14 @@ contextBridge.exposeInMainWorld('electronAPI', {
     ipcRenderer.invoke('books:comicPages', id),
   getComicPage: (id: number, name: string) =>
     ipcRenderer.invoke('books:comicPage', id, name),
+  setContentProtection: (flag: boolean) =>
+    ipcRenderer.invoke('window:setContentProtection', flag),
   printPreview: (html: string, title: string) =>
     ipcRenderer.invoke('books:printPreview', html, title),
+  exportPageImage: (
+    rect: { x: number; y: number; width: number; height: number },
+    title: string,
+  ) => ipcRenderer.invoke('reader:exportImage', rect, title),
   openReaderWindow: (bookId: number) =>
     ipcRenderer.invoke('window:openReader', bookId),
 
@@ -136,6 +142,18 @@ contextBridge.exposeInMainWorld('electronAPI', {
   getCacheStats: () => ipcRenderer.invoke('cache:stats'),
   clearCache: (opts: { snapshots?: boolean; chapterCache?: boolean }) =>
     ipcRenderer.invoke('cache:clear', opts),
+
+  // PDF 编辑
+  runPdfOp: (payload: any) => ipcRenderer.invoke('pdf:run', payload),
+
+  // 文档比较
+  compareLoad: (idA: number, idB: number) =>
+    ipcRenderer.invoke('compare:load', idA, idB),
+
+  // 本地字体
+  listFonts: () => ipcRenderer.invoke('fonts:list'),
+  importFonts: () => ipcRenderer.invoke('fonts:import'),
+  removeFont: (name: string) => ipcRenderer.invoke('fonts:remove', name),
 
   // 应用信息
   getAppInfo: () => ipcRenderer.invoke('app:info'),

@@ -1755,3 +1755,160 @@ button:focus-visible, input:focus-visible, select:focus-visible, textarea:focus-
   min-width: 150px;
   text-align: right;
 }
+
+/* ---------- 文档比较 ---------- */
+
+.compare-page {
+  padding: 24px 28px;
+  height: 100%;
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+}
+
+.compare-toolbar {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex-wrap: wrap;
+  margin: 14px 0;
+}
+
+.compare-toolbar select {
+  min-width: 180px;
+}
+
+.compare-vs {
+  opacity: 0.6;
+  font-size: 13px;
+}
+
+.compare-only-diff {
+  margin-left: auto;
+}
+
+.compare-stats {
+  display: flex;
+  gap: 16px;
+  align-items: center;
+  flex-wrap: wrap;
+  font-size: 13px;
+  margin-bottom: 10px;
+}
+
+.diff-add { color: #4ade80; }
+.diff-del { color: #f87171; }
+.diff-warn { color: #fbbf24; }
+
+.compare-head {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 12px;
+  font-weight: 600;
+  font-size: 13px;
+  padding: 8px 0;
+  border-bottom: 1px solid rgba(255, 255, 255, 0.12);
+}
+
+.compare-body {
+  flex: 1;
+  overflow: auto;
+  min-height: 0;
+  font-family: 'JetBrains Mono', Consolas, monospace;
+  font-size: 12.5px;
+  line-height: 1.7;
+}
+
+.compare-row {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 12px;
+}
+
+.compare-cell {
+  white-space: pre-wrap;
+  word-break: break-word;
+  padding: 0 6px;
+}
+
+/* 删除只标在左栏、新增只标在右栏，一眼能看出改动方向 */
+.compare-row.del .compare-left { background: rgba(248, 113, 113, 0.16); }
+.compare-row.add .compare-right { background: rgba(74, 222, 128, 0.16); }
+.compare-row.del .compare-right,
+.compare-row.add .compare-left { background: rgba(255, 255, 255, 0.03); }
+
+/* ---------- PDF 工具 ---------- */
+
+.pdf-tools {
+  padding: 24px 28px;
+  overflow: auto;
+  height: 100%;
+}
+
+.pdf-pick {
+  margin: 14px 0;
+  border: 1px solid rgba(255, 255, 255, 0.12);
+  border-radius: 8px;
+  padding: 10px 12px;
+  max-height: 220px;
+  overflow: auto;
+}
+
+.pdf-pick-head {
+  font-size: 13px;
+  opacity: 0.75;
+  margin-bottom: 8px;
+}
+
+.pdf-pick-head em {
+  font-style: normal;
+  opacity: 0.6;
+  font-size: 12px;
+}
+
+.pdf-pick-item {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 4px 0;
+  cursor: pointer;
+  font-size: 13px;
+}
+
+.pdf-op-row {
+  display: flex;
+  gap: 8px;
+  flex-wrap: wrap;
+  margin: 14px 0 6px;
+}
+
+.pdf-op {
+  padding: 6px 14px;
+  border-radius: 6px;
+  border: 1px solid rgba(255, 255, 255, 0.16);
+  background: transparent;
+  color: inherit;
+  cursor: pointer;
+  font-size: 13px;
+}
+
+.pdf-op.active {
+  background: rgba(99, 102, 241, 0.28);
+  border-color: rgba(99, 102, 241, 0.6);
+}
+
+.pdf-params {
+  margin: 14px 0;
+  max-width: 520px;
+}
+
+.pdf-run {
+  margin-top: 8px;
+}
+
+.pdf-result {
+  margin-top: 12px;
+  font-size: 13px;
+  color: #4ade80;
+  word-break: break-all;
+}

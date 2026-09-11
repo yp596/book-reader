@@ -13,8 +13,10 @@ import { Onboarding } from './components/Onboarding';
 import { Models } from './components/Models';
 import { Settings } from './components/Settings';
 import { Statistics } from './components/Statistics';
+import { Compare } from './components/Compare';
+import { PdfTools } from './components/PdfTools';
 
-type View = 'library' | 'detail' | 'reader' | 'sources' | 'rag' | 'vocab' | 'notes' | 'models' | 'settings' | 'stats' | 'help';
+type View = 'library' | 'detail' | 'reader' | 'sources' | 'rag' | 'vocab' | 'notes' | 'models' | 'settings' | 'stats' | 'help' | 'compare' | 'pdf';
 
 // 安全获取 electronAPI，preload 未就绪时返回空实现
 const api = window.electronAPI ?? {
@@ -215,6 +217,10 @@ function App() {
         return <Settings />;
       case 'stats':
         return <Statistics />;
+      case 'compare':
+        return <Compare books={books} />;
+      case 'pdf':
+        return <PdfTools books={books} />;
       default:
         return null;
     }

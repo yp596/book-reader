@@ -179,8 +179,28 @@ declare global {
       saveToc: (id: number, entries: TocEntry[]) => Promise<void>;
       getComicPages: (id: number) => Promise<string[]>;
       getComicPage: (id: number, name: string) => Promise<{ data: string; mime: string } | null>;
+      setContentProtection: (flag: boolean) => Promise<boolean>;
+      runPdfOp: (payload: {
+        op: 'merge' | 'extract' | 'deletePages' | 'rotate' | 'crop' | 'watermark' | 'pageNumbers';
+        sourceIds: number[];
+        pages?: string;
+        angle?: number;
+        marginPercent?: number;
+        text?: string;
+      }) => Promise<{ filePath: string; pages: number } | null>;
+      compareLoad: (idA: number, idB: number) => Promise<{
+        left: { title: string; lines: string[]; total: number; truncated: boolean };
+        right: { title: string; lines: string[]; total: number; truncated: boolean };
+      }>;
       printPreview: (html: string, title: string) => Promise<boolean>;
+      exportPageImage: (
+        rect: { x: number; y: number; width: number; height: number },
+        title: string,
+      ) => Promise<string | null>;
       openReaderWindow: (bookId: number) => Promise<void>;
+      listFonts: () => Promise<{ name: string; family: string; url: string }[]>;
+      importFonts: () => Promise<{ name: string; family: string; url: string }[]>;
+      removeFont: (name: string) => Promise<{ name: string; family: string; url: string }[]>;
       getAllBooks: () => Promise<Book[]>;
       getBookById: (id: number) => Promise<Book>;
       deleteBook: (id: number) => Promise<void>;
