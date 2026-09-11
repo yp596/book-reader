@@ -177,6 +177,56 @@ export function splitColumns(lines: LayoutLine[], split: number | null): LayoutL
 }
 
 /**
+ * 页眉页脚判据用的文本归一化。
+ * 页码每页都不同（「第 1 页」「第 2 页」），数字统一替换成 # 才可能匹配上；
+ * 空白也压平，避免字间距差异导致同一页眉被判成两串。
+ */
+export function normalizeForRepeat(text: string): string {
+  return text
+    .replace(/\d+/g, '#')
+    .replace(/\s+/g, ' ')
+    .trim();
+}
+
+/**
+ * 找出跨页重复的页眉页脚。
+ *
+ * 只看页面上下边缘的一条带（正文极少出现在那里），并要求在足够多的页面上出现过，
+ * 避免把正文里反复出现的句子误删。返回需剔除的归一化文本集合。
+ */
+export function findRepeatingLines(
+  pages: LayoutLine[][],
+  pageHeights: number[],
+  options: { bandRatio?: number; minPages?: number; minRatio?: number } = {},
+): Set<string> {
+  const { bandRatio = 0.12, minPages = 3, minRatio = 0.3 } = options;
+  if (pages.length < minPages) return new Set();
+
+  const seenOnPages = new Map<string, Set<number>>();
+  pages.forEach((lines, pageIndex) => {
+    const height = pageHeights[pageIndex] ?? 0;
+    if (height <= 0) return;
+    for (const line of lines) {
+      const nearTop = line.y > height * (1 - bandRatio);
+      const nearBottom = line.y < height * bandRatio;
+      if (!nearTop && !nearBottom) continue;
+      const key = normalizeForRepeat(line.text);
+      if (!key) continue;
+      const pages_ = seenOnPages.get(key) ?? new Set<number>();
+      pages_.add(pageIndex);
+      seenOnPages.set(key, pages_);
+    }
+  });
+
+  const threshold = Math.max(minPages, Math.ceil(pages.length * minRatio));
+  const repeated = new Set<string>();
+  for (const [key, pagesSeen] of seenOnPages) {
+    if (pagesSeen.size >= threshold) repeated.add(key);
+  }
+  return repeated;
+}
+
+/**
  * 行 → 段落。
  * 另起一段的判据：上一行以句末标点收尾且明显短于栏宽、行距突然变大、
  * 当前行有缩进、或是标题。
@@ -239,18 +289,4 @@ export function linesToParagraphs(lines: LayoutLine[]): string[] {
   });
   if (current) paragraphs.push(current);
   return paragraphs;
-}
-
-/**
- * 一页的完整处理：片段 → 行 → 分栏 → 段落。
- * @param pageWidth 页面宽度（与 transform 同一坐标系）
- */
-export function pageTextToParagraphs(
-  items: PdfTextItem[],
-  pageWidth: number,
-): string[] {
-  const lines = itemsToLines(items);
-  if (lines.length === 0) return [];
-  const split = detectColumnSplit(lines, pageWidth);
-  return linesToParagraphs(splitColumns(lines, split));
 }

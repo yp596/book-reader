@@ -16,7 +16,15 @@ import {
 import { parseMindmap, MindNode } from '../utils/mindmap';
 import { lookupMark, compareByPosition } from '../utils/mark-lookup';
 import { normalizeText } from '../utils/text-normalize';
-import { pageTextToParagraphs } from '../utils/pdf-layout';
+import {
+  itemsToLines,
+  detectColumnSplit,
+  splitColumns,
+  linesToParagraphs,
+  findRepeatingLines,
+  normalizeForRepeat,
+  type LayoutLine,
+} from '../utils/pdf-layout';
 import { getPreset, resolveAction, buildKeyMap, parseShortcutOverrides, DEFAULT_SHORTCUT_PRESET } from '../utils/shortcuts';
 import { STYLE_PRESETS, resolveCustomCss, validateCustomCss, MAX_CSS_LEN } from '../utils/reading-styles';
 import { MindmapView } from './Mindmap';
@@ -1864,24 +1872,42 @@ ${body}</body></html>`;
     if (!doc) return;
     setReflowBusy(true);
     try {
-      const pages: string[] = [];
-      let buf = '';
+      // 第一遍：取出每页的文本行与页面尺寸。
+      // 页眉页脚必须跨页统计才能识别——页码每页都不同，单页看不出重复。
+      const perPageLines: LayoutLine[][] = [];
+      const pageSizes: { width: number; height: number }[] = [];
       for (let i = 1; i <= doc.numPages; i++) {
         const page = await doc.getPage(i);
         const tc = await page.getTextContent();
-        // 用坐标做版面分析：行聚类 → 分栏检测 → 段落合并（见 utils/pdf-layout）。
-        // 单纯按返回顺序拼字符串会把双栏论文交错、把每个原始行都切成一段。
-        const paragraphs = pageTextToParagraphs(
-          (tc.items as any[]).filter(it => typeof it.str === 'string'),
-          page.getViewport({ scale: 1 }).width,
+        const vp = page.getViewport({ scale: 1 });
+        perPageLines.push(
+          itemsToLines((tc.items as any[]).filter(it => typeof it.str === 'string')),
         );
-        if (paragraphs.length === 0) continue;
+        pageSizes.push({ width: vp.width, height: vp.height });
+      }
+
+      // 贴在上下边缘且跨页重复的行判为页眉页脚，重排时丢掉，免得混进正文
+      const skip = findRepeatingLines(
+        perPageLines,
+        pageSizes.map(s => s.height),
+      );
+
+      const pages: string[] = [];
+      let buf = '';
+      perPageLines.forEach((lines, i) => {
+        const kept =
+          skip.size > 0 ? lines.filter(l => !skip.has(normalizeForRepeat(l.text))) : lines;
+        if (kept.length === 0) return;
+        // 分栏要在剔除页眉页脚之后判：残留的页眉会污染空白带的统计
+        const split = detectColumnSplit(kept, pageSizes[i].width);
+        const paragraphs = linesToParagraphs(splitColumns(kept, split));
+        if (paragraphs.length === 0) return;
         buf += paragraphs.join('\n\n') + '\n\n';
         if (buf.length >= 3000) {
           pages.push(buf);
           buf = '';
         }
-      }
+      });
       if (buf) pages.push(buf);
 
       if (pages.length === 0) {

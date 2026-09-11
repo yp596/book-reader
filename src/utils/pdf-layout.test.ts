@@ -1,10 +1,12 @@
 import { describe, it, expect } from 'vitest';
 import {
   itemsToLines,
+  normalizeForRepeat,
+  findRepeatingLines,
+  type LayoutLine,
   detectColumnSplit,
   splitColumns,
   linesToParagraphs,
-  pageTextToParagraphs,
   type PdfTextItem,
 } from './pdf-layout';
 
@@ -132,20 +134,67 @@ describe('linesToParagraphs', () => {
   });
 });
 
-describe('pageTextToParagraphs', () => {
+describe('整页组合（行 → 分栏 → 段落）', () => {
   it('双栏页面的段落不会左右串在一起', () => {
     const items = [
       ...Array.from({ length: 6 }, (_, i) => item(`左栏第${i}行的内容，`, 50, 700 - i * 20)),
       ...Array.from({ length: 6 }, (_, i) => item(`右栏第${i}行的内容，`, 320, 700 - i * 20)),
     ];
-    const paragraphs = pageTextToParagraphs(items, 600);
+    const lines = itemsToLines(items);
+    const paragraphs = linesToParagraphs(splitColumns(lines, detectColumnSplit(lines, 600)));
     // 左栏的内容必须整体排在右栏之前
     const text = paragraphs.join('\n');
     expect(text.indexOf('左栏第0行')).toBeLessThan(text.indexOf('右栏第0行'));
     expect(text.indexOf('左栏第5行')).toBeLessThan(text.indexOf('右栏第0行'));
   });
 
-  it('扫描件（无文字层）返回空数组', () => {
-    expect(pageTextToParagraphs([], 600)).toEqual([]);
+  it('扫描件（无文字层）得到空结果', () => {
+    expect(linesToParagraphs(splitColumns(itemsToLines([]), null))).toEqual([]);
+  });
+});
+
+describe('页眉页脚剔除', () => {
+  const line = (text: string, y: number): LayoutLine => ({
+    text, y, x: 50, right: 50 + text.length * 6, fontSize: 10,
+  });
+  /** 一页：页眉在顶、页脚在底、正文在中间 */
+  const page = (header: string, footer: string, body: string) => [
+    line(header, 780),
+    line(body, 400),
+    line(footer, 20),
+  ];
+  const HEIGHT = 800;
+
+  it('页码不同也能识别成同一个页眉', () => {
+    expect(normalizeForRepeat('第 12 页')).toBe(normalizeForRepeat('第 13 页'));
+    expect(normalizeForRepeat('  Page   7  ')).toBe('Page #');
+  });
+
+  it('跨页重复的页眉页脚被标出', () => {
+    const pages = [1, 2, 3, 4].map(n => page(`我的书 第 ${n} 页`, `第 ${n} 页`, `这是第 ${n} 章的正文`));
+    const repeated = findRepeatingLines(pages, pages.map(() => HEIGHT));
+    // 页眉与页脚都该命中（归一化后形如 "# 我的书 第 # 页" / "第 # 页"）
+    expect(repeated.size).toBeGreaterThanOrEqual(2);
+    expect([...repeated].some(k => k.includes('我的书'))).toBe(true);
+  });
+
+  it('正文里重复出现的句子不会被误删（不在上下边缘带）', () => {
+    const pages = [1, 2, 3, 4].map(() => page('页眉', '页脚', '这句话每页都有'));
+    const repeated = findRepeatingLines(pages, pages.map(() => HEIGHT));
+    expect(repeated.has('这句话每页都有')).toBe(false);
+  });
+
+  it('页数太少时不做剔除', () => {
+    const pages = [1, 2].map(n => page('页眉', '页脚', `正文 ${n}`));
+    expect(findRepeatingLines(pages, pages.map(() => HEIGHT)).size).toBe(0);
+  });
+
+  it('出现页数不足阈值时不剔除（避免误删偶发重复）', () => {
+    // 20 页里只有 3 页带同一页眉，阈值应为 max(3, 6) = 6
+    const pages = Array.from({ length: 20 }, (_, i) =>
+      i < 3 ? page('偶发页眉', '页脚', `正文 ${i}`) : page('', '', `正文 ${i}`),
+    );
+    const repeated = findRepeatingLines(pages, pages.map(() => HEIGHT));
+    expect(repeated.has(normalizeForRepeat('偶发页眉'))).toBe(false);
   });
 });
