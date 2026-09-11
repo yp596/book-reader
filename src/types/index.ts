@@ -216,6 +216,8 @@ declare global {
         progress: number;
       }>;
       revealBookFile: (id: number) => Promise<void>;
+      copyBookPath: (id: number) => Promise<string>;
+      openBookWithSystem: (id: number) => Promise<void>;
       clearReadingHistory: () => Promise<void>;
       toggleFullscreen: () => Promise<boolean>;
       setAlwaysOnTop: (flag: boolean) => Promise<boolean>;

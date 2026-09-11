@@ -338,6 +338,24 @@ export function registerIpcHandlers() {
     shell.showItemInFolder(book.file_path);
   });
 
+  // 分享/发送文件：Windows 没有通用分享面板，实用的两步是复制路径与交给默认程序
+  ipcMain.handle('books:copyPath', (_event, id: number) => {
+    const book = db.getBookById(id) as any;
+    if (!book) throw new Error('书籍不存在');
+    if (!fs.existsSync(book.file_path)) throw new Error('书籍文件已丢失');
+    clipboard.writeText(book.file_path);
+    return book.file_path;
+  });
+
+  ipcMain.handle('books:openWithSystem', async (_event, id: number) => {
+    const book = db.getBookById(id) as any;
+    if (!book) throw new Error('书籍不存在');
+    if (!fs.existsSync(book.file_path)) throw new Error('书籍文件已丢失');
+    // openPath 不抛异常，失败时把原因当字符串返回
+    const err = await shell.openPath(book.file_path);
+    if (err) throw new Error(err);
+  });
+
   // 清除全部阅读记录
   ipcMain.handle('books:clearHistory', () => {
     db.clearReadingHistory();

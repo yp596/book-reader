@@ -16,6 +16,8 @@ contextBridge.exposeInMainWorld('electronAPI', {
     ipcRenderer.invoke('books:fileInfo', id),
   revealBookFile: (id: number) =>
     ipcRenderer.invoke('books:reveal', id),
+  copyBookPath: (id: number) => ipcRenderer.invoke('books:copyPath', id),
+  openBookWithSystem: (id: number) => ipcRenderer.invoke('books:openWithSystem', id),
   clearReadingHistory: () =>
     ipcRenderer.invoke('books:clearHistory'),
   toggleFullscreen: (): Promise<boolean> =>

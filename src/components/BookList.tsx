@@ -288,6 +288,29 @@ ${r.filePath}`);
     }
   };
 
+  /** 复制文件路径：分享给别的软件或人时最常用的一步 */
+  const handleCopyPath = async () => {
+    if (!contextMenu) return;
+    try {
+      const p = await window.electronAPI?.copyBookPath(contextMenu.book.id);
+      if (p) alert(`已复制文件路径：\n${p}`);
+    } catch (err) {
+      alert(err instanceof Error ? err.message : '复制失败');
+    }
+    closeMenu();
+  };
+
+  /** 交给系统默认程序打开（Windows 没有通用分享面板，这是最接近「发送到」的做法） */
+  const handleOpenWithSystem = async () => {
+    if (!contextMenu) return;
+    try {
+      await window.electronAPI?.openBookWithSystem(contextMenu.book.id);
+    } catch (err) {
+      alert(err instanceof Error ? err.message : '打开失败');
+    }
+    closeMenu();
+  };
+
   const handleFileInfo = async () => {
     if (contextMenu) {
       try {
@@ -694,6 +717,8 @@ ${r.filePath}`);
           <div className="context-menu-item" onClick={handleFileInfo}>属性</div>
           <div className="context-menu-item" onClick={handleExportOne}>导出批注与笔记</div>
           <div className="context-menu-item" onClick={handleReveal}>打开所在位置</div>
+          <div className="context-menu-item" onClick={handleCopyPath}>复制文件路径</div>
+          <div className="context-menu-item" onClick={handleOpenWithSystem}>用默认程序打开</div>
           <div className="context-menu-item danger" onClick={handleDelete}>删除</div>
         </div>
       )}
