@@ -1,28 +1,29 @@
 import { useState } from 'react';
+import { Icon, type IconName } from './Icon';
 
 interface OnboardingProps {
   onImport: () => void;
   onClose: () => void;
 }
 
-const HIGHLIGHTS = [
+const HIGHLIGHTS: { icon: IconName; title: string; desc: string }[] = [
   {
-    icon: '🔒',
+    icon: 'lock',
     title: '纯本地离线',
     desc: '书籍、笔记、阅读记录全部存在本机，不需要账号，也不上传任何文件。',
   },
   {
-    icon: '📚',
+    icon: 'library',
     title: '多种格式',
     desc: 'EPUB、TXT、PDF、DOCX、CBZ 漫画都能读，导入后自动识别书名与目录。',
   },
   {
-    icon: '🖍',
+    icon: 'edit',
     title: '标注与笔记',
     desc: '选中正文即可高亮、加下划线、写笔记；笔记跨书汇总，可按标签归类。',
   },
   {
-    icon: '🔍',
+    icon: 'search',
     title: '检索与智能辅助',
     desc: '书内关键词检索、跨书语义检索；可选装本地模型做翻译摘要，全程不联网。',
   },
@@ -46,14 +47,17 @@ export function Onboarding({ onImport, onClose }: OnboardingProps) {
     <div className={`modal-mask onboarding-mask${closing ? ' closing' : ''}`}>
       <div className="onboarding" onClick={e => e.stopPropagation()}>
         <div className="onboarding-head">
-          <h1>📖 欢迎使用</h1>
+          <h1>
+            <Icon name="book-open" size={20} />
+            欢迎使用
+          </h1>
           <p>一款纯离线、本地优先的电子书阅读器</p>
         </div>
 
         <div className="onboarding-grid">
           {HIGHLIGHTS.map(h => (
             <div key={h.title} className="onboarding-card">
-              <div className="onboarding-icon">{h.icon}</div>
+              <div className="onboarding-icon"><Icon name={h.icon} size={17} /></div>
               <div className="onboarding-text">
                 <h3>{h.title}</h3>
                 <p>{h.desc}</p>
@@ -71,6 +75,7 @@ export function Onboarding({ onImport, onClose }: OnboardingProps) {
               随便看看
             </button>
             <button className="btn-primary" onClick={() => finish(onImport)}>
+              <Icon name="plus" size={15} />
               导入第一本书
             </button>
           </div>

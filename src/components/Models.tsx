@@ -1,5 +1,6 @@
 import { useState, useEffect, useCallback } from 'react';
 import { ModelStatus, ModelProgressInfo } from '../types';
+import { Icon } from './Icon';
 
 export function Models() {
   const [models, setModels] = useState<ModelStatus[]>([]);
@@ -86,14 +87,15 @@ export function Models() {
         <h1>本地模型</h1>
       </div>
 
-      <div className="source-info">
-        <p>🤖 AI 翻译 / 问答 / 语义检索都由本地模型驱动，无需联网。首次使用点下载（走国内镜像），之后打开软件自动启动。</p>
+      <div className="info-bar">
+        <Icon name="info" size={15} />
+        <p>AI 翻译 / 问答 / 语义检索都由本地模型驱动，无需联网。首次使用点下载（走国内镜像），之后打开软件自动启动。</p>
       </div>
 
       {error && <p className="search-error">{error}</p>}
 
       {binProgress != null && (
-        <div className="source-info">
+        <div className="info-bar">
           <p>正在下载 llama-server 运行环境：{binProgress}%</p>
           <div className="progress-bar">
             <div style={{ width: `${binProgress}%` }} />

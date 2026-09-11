@@ -1,6 +1,7 @@
 import { useState, useEffect, useMemo } from 'react';
 import { NoteWithBook } from '../types';
 import { parseTags, matchesTags, countTags, normalizeTags } from '../utils/note-tags';
+import { Icon } from './Icon';
 
 interface NotesProps {
   /** 跳回原文：打开对应书籍并定位到批注位置 */
@@ -66,15 +67,17 @@ export function Notes({ onOpenNote }: NotesProps) {
         </div>
       </div>
 
-      <div className="source-info">
-        <p>📚 笔记不依附单本书：跨书汇总，打标签归类，点「跳转」回到原文位置。</p>
+      <div className="info-bar">
+        <Icon name="info" size={15} />
+        <p>笔记不依附单本书：跨书汇总，打标签归类，点「跳转」回到原文位置。</p>
       </div>
 
       {allTags.length > 0 && (
         <div className="tag-filter">
           {selectedTags.length > 0 && (
             <button className="tag-chip clear" onClick={() => setSelectedTags([])}>
-              清除筛选 ✕
+              清除筛选
+              <Icon name="x" size={11} />
             </button>
           )}
           {allTags.map(t => (

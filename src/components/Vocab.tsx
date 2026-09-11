@@ -1,5 +1,6 @@
 import { useState, useEffect } from 'react';
 import { WordEntry } from '../types';
+import { Icon } from './Icon';
 
 export function Vocab() {
   const [words, setWords] = useState<WordEntry[]>([]);
@@ -38,8 +39,9 @@ export function Vocab() {
         </div>
       </div>
 
-      <div className="source-info">
-        <p>📖 阅读时选中生词 → 查词 → 存入生词本，随时回来复习。</p>
+      <div className="info-bar">
+        <Icon name="info" size={15} />
+        <p>阅读时选中生词 → 查词 → 存入生词本，随时回来复习。</p>
       </div>
 
       {filtered.length === 0 ? (

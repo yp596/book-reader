@@ -1,5 +1,6 @@
 import { useState, useEffect } from 'react';
 import { Book } from '../types';
+import { Icon } from './Icon';
 
 interface RagHit {
   book_id: number;
@@ -106,8 +107,9 @@ export function SemanticSearch({ books, onOpenBook }: SemanticSearchProps) {
         <h1>语义检索</h1>
       </div>
 
-      <div className="source-info">
-        <p>🧠 按意思找内容，不止关键词。先为书籍建立索引（本地向量服务），再用自然语言提问。</p>
+      <div className="info-bar">
+        <Icon name="info" size={15} />
+        <p>按意思找内容，不止关键词。先为书籍建立索引（本地向量服务），再用自然语言提问。</p>
       </div>
 
       <section className="settings-section">

@@ -1,6 +1,8 @@
-import { useState, useEffect } from 'react';
+import { useState, useEffect, type CSSProperties } from 'react';
 import { Book } from '../types';
 import { formatFileSize } from '../utils/text';
+import { coverHue } from '../utils/cover';
+import { Icon, StarRating } from './Icon';
 
 interface BookListProps {
   books: Book[];
@@ -509,9 +511,9 @@ ${r.filePath}`);
     { key: 'all', label: '全部' },
     { key: 'reading', label: '正在读' },
     { key: 'finished', label: '已读完' },
-    { key: 'favorite', label: '⭐ 收藏' },
-    { key: 'shelved', label: '📦 搁置' },
-    { key: 'idle', label: `💤 闲置${idleDays}天+` },
+    { key: 'favorite', label: '收藏' },
+    { key: 'shelved', label: '搁置' },
+    { key: 'idle', label: `闲置 ${idleDays} 天以上` },
   ];
 
   return (
@@ -523,7 +525,10 @@ ${r.filePath}`);
     >
       {dragOver && (
         <div className="drop-overlay">
-          <div className="drop-hint">📚 松开导入 EPUB / TXT / PDF / DOCX</div>
+          <div className="drop-hint">
+            <Icon name="download" size={20} />
+            松开导入 EPUB / TXT / PDF / DOCX
+          </div>
         </div>
       )}
 
@@ -551,14 +556,16 @@ ${r.filePath}`);
           <button
             className={`view-btn ${viewMode === 'grid' ? 'active' : ''}`}
             onClick={() => setViewMode('grid')}
+            title="网格视图"
           >
-            ▦
+            <Icon name="grid" size={15} />
           </button>
           <button
             className={`view-btn ${viewMode === 'list' ? 'active' : ''}`}
             onClick={() => setViewMode('list')}
+            title="列表视图"
           >
-            ☰
+            <Icon name="menu" size={15} />
           </button>
         </div>
       </div>
@@ -567,7 +574,8 @@ ${r.filePath}`);
         <div className="source-banner">
           <div className="source-banner-head">
             <span>
-              ⚠ 有 {sourceIssues.length} 本书的源文件已被改动或移走，书库里的还是导入时的版本
+              <Icon name="alert" size={15} />
+              有 {sourceIssues.length} 本书的源文件已被改动或移走，书库里的还是导入时的版本
             </span>
             <button className="link-btn" onClick={() => setSourcePanelOpen(o => !o)}>
               {sourcePanelOpen ? '收起' : '查看'}
@@ -597,7 +605,7 @@ ${r.filePath}`);
 
       {continueBook && (
         <div className="continue-card" onClick={() => onSelectBook(continueBook)}>
-          <div className="continue-icon">📖</div>
+          <div className="continue-icon"><Icon name="book-open" size={20} /></div>
           <div className="continue-info">
             <p className="continue-label">继续阅读</p>
             <h3>{continueBook.title}</h3>
@@ -608,7 +616,7 @@ ${r.filePath}`);
               <span className="progress-text">{Math.round(continueBook.progress * 100)}%</span>
             </div>
           </div>
-          <span className="continue-go">→</span>
+          <span className="continue-go"><Icon name="arrow-right" size={18} /></span>
         </div>
       )}
 
@@ -707,11 +715,12 @@ ${r.filePath}`);
 
       {filteredBooks.length === 0 ? (
         <div className="empty-state">
-          <div className="empty-icon">📚</div>
+          <div className="empty-icon"><Icon name="library" size={24} /></div>
           <h2>书架空空如也</h2>
           <p>支持 EPUB、TXT、PDF、DOCX，可直接拖入窗口</p>
           <button className="btn-primary empty-cta" onClick={onImport}>
-            ＋ 导入第一本书
+            <Icon name="plus" size={15} />
+            导入第一本书
           </button>
         </div>
       ) : viewMode === 'grid' ? (
@@ -727,30 +736,34 @@ ${r.filePath}`);
                 {book.cover_path ? (
                   <img src={book.cover_path} alt={book.title} />
                 ) : (
-                  <div className="book-cover-placeholder">
-                    <span>{book.file_type.toUpperCase()}</span>
+                  <div
+                    className="book-cover-placeholder"
+                    style={{ '--cover-h': coverHue(book.title) } as CSSProperties}
+                  >
+                    <span className="cover-title">{book.title}</span>
+                    <span className="cover-foot">{book.file_type.toUpperCase()}</span>
                   </div>
                 )}
                 {batchMode && (
                   <span className={`pick-box${selectedIds.has(book.id) ? ' on' : ''}`}>
-                    {selectedIds.has(book.id) ? '✓' : ''}
+                    {selectedIds.has(book.id) ? <Icon name="check" size={13} strokeWidth={2.6} /> : ''}
                   </span>
                 )}
-                {book.favorite ? <span className="fav-badge">⭐</span> : null}
-                {book.locked ? <span className="lock-badge" title="已锁定">🔒</span> : null}
-                {book.status === 'shelved' ? <span className="shelf-badge" title="已搁置">📦</span> : null}
+                {book.favorite ? <span className="fav-badge"><Icon name="star-fill" size={12} /></span> : null}
+                {book.locked ? <span className="lock-badge" title="已锁定"><Icon name="lock" size={11} /></span> : null}
+                {book.status === 'shelved' ? <span className="shelf-badge" title="已搁置"><Icon name="package" size={11} /></span> : null}
               </div>
               <div className="book-info">
                 <h3 className="book-title">{book.title}</h3>
                 {book.author && <p className="book-author">{book.author}</p>}
                 {book.rating ? (
                   <p className="book-rating" title={`评分 ${book.rating}/5`}>
-                    {'★'.repeat(book.rating)}{'☆'.repeat(5 - book.rating)}
+                    <StarRating value={book.rating} />
                   </p>
                 ) : null}
                 {(book.series || book.category) && (
                   <p className="book-category">
-                    {book.series ? `📚 ${book.series}` : ''}
+                    {book.series || ''}
                     {book.series && book.category ? ' · ' : ''}
                     {book.category || ''}
                   </p>
@@ -780,11 +793,19 @@ ${r.filePath}`);
                 {book.cover_path ? (
                   <img src={book.cover_path} alt={book.title} />
                 ) : (
-                  <div className="book-cover-placeholder small">{book.file_type.toUpperCase()}</div>
+                  <div
+                    className="book-cover-placeholder small"
+                    style={{ '--cover-h': coverHue(book.title) } as CSSProperties}
+                  >
+                    <span className="cover-foot">{book.file_type.toUpperCase()}</span>
+                  </div>
                 )}
               </div>
               <div className="book-list-info">
-                <h3>{book.favorite ? '⭐ ' : ''}{book.title}</h3>
+                <h3>
+                  {book.favorite ? <Icon name="star-fill" size={11} className="list-fav" /> : null}
+                  <span className="list-title-text">{book.title}</span>
+                </h3>
                 <p>{book.author || '未知作者'}{book.category ? ` · ${book.category}` : ''}</p>
                 <p className="book-meta">{book.file_type.toUpperCase()} · {book.progress > 0 ? `已读 ${Math.round(book.progress * 100)}%` : '未读'}</p>
               </div>
@@ -801,10 +822,10 @@ ${r.filePath}`);
         >
           <div className="context-menu-item" onClick={() => onShowDetail(contextMenu.book)}>详情</div>
           <div className="context-menu-item" onClick={handleToggleFavorite}>
-            {contextMenu.book.favorite ? '取消收藏' : '⭐ 收藏'}
+            {contextMenu.book.favorite ? '取消收藏' : '加入收藏'}
           </div>
           <div className="context-menu-item" onClick={handleToggleLock}>
-            {contextMenu.book.locked ? '🔓 解锁书籍' : '🔒 锁定书籍'}
+            {contextMenu.book.locked ? '解锁书籍' : '锁定书籍'}
           </div>
           <div className="context-menu-item" onClick={handleSetCategory}>设置分类</div>
           <div className="context-menu-item" onClick={handleSetSeries}>设置系列</div>

@@ -1,6 +1,7 @@
 import { useState, useEffect } from 'react';
 import { BookSource, OnlineBook, TextFilter, FollowedBook } from '../types';
 import { OnlineReader } from './OnlineReader';
+import { Icon } from './Icon';
 
 const emptyForm = {
   name: '',
@@ -272,8 +273,9 @@ export function SourceManager() {
         </div>
       </div>
 
-      <div className="source-info">
-        <p>💡 支持导入 Legado 格式的 JSON 书源。不内置任何书源，由用户自行导入。</p>
+      <div className="info-bar">
+        <Icon name="info" size={15} />
+        <p>支持导入 Legado 格式的 JSON 书源。不内置任何书源，由用户自行导入。</p>
       </div>
 
       {/* 在线搜索 */}
@@ -328,18 +330,19 @@ export function SourceManager() {
         <div className="source-header" style={{ marginBottom: 12 }}>
           <h2 style={{ marginBottom: 0 }}>追更（{follows.length}）</h2>
           <button className="btn-secondary" onClick={handleCheckUpdates} disabled={checking || follows.length === 0}>
-            {checking ? '检查中...' : '🔄 检查更新'}
+            {checking ? '检查中...' : <><Icon name="refresh" size={15} /> 检查更新</>}
           </button>
         </div>
         {follows.length === 0 ? (
-          <p className="empty-text">暂无追更，在书籍章节页点「📌 追更」订阅</p>
+          <p className="empty-text">暂无追更，在书籍章节页点「追更」订阅</p>
         ) : (
           <div className="source-list">
             {follows.map(f => (
               <div key={f.id} className="source-card">
                 <div className="source-info" style={{ border: 'none', margin: 0, padding: 0 }}>
                   <h3>
-                    {f.has_update ? '🔴 ' : ''}{f.title}
+                    {f.title}
+                    {f.has_update ? <span className="update-dot" title="有更新" /> : null}
                   </h3>
                   <p className="source-url">
                     {f.last_chapter ? `最新：${f.last_chapter}（共 ${f.last_count} 章）` : '尚未检查'}
@@ -465,7 +468,12 @@ export function SourceManager() {
               <div className="source-info" style={{ border: 'none', margin: 0, padding: 0 }}>
                 <h3>{source.name}</h3>
                 <p className="source-url">{source.url}</p>
-                {!source.rules && <p className="source-warn">⚠ 缺少抓取规则，无法搜索</p>}
+                {!source.rules && (
+                  <p className="source-warn">
+                    <Icon name="alert" size={13} />
+                    缺少抓取规则，无法搜索
+                  </p>
+                )}
               </div>
               <div className="source-actions">
                 <button className="btn-danger small" onClick={() => handleDelete(source.id)}>删除</button>

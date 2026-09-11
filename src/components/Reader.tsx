@@ -3,6 +3,7 @@ import ePub from 'epubjs';
 import * as pdfjsLib from 'pdfjs-dist';
 import PdfWorkerUrl from 'pdfjs-dist/build/pdf.worker.min.mjs?url';
 import { Book, Bookmark, Note, TocEntry, ReadingPosition } from '../types';
+import { Icon } from './Icon';
 import { escapeHtml, excerptAround, clampPage, lineToPageIndex, paginateText, parseSavedPosition, serializeSavedPosition, findKeyword, buildKeywordRegex, type SavedPosition, type KeywordOptions } from '../utils/text';
 import { fontStackOf, highlightColorOf, HIGHLIGHT_COLORS, type ThemeName } from '../utils/reader-options';
 import { resolveThemeByClock, type AutoThemeConfig } from '../utils/auto-theme';
@@ -2584,7 +2585,10 @@ ${body}</body></html>`;
         className={`reader-header ${view.autoHideBar && !barVisible ? 'bar-hidden' : ''}`}
         onMouseLeave={() => { if (view.autoHideBar) setBarVisible(false); }}
       >
-        <button className="back-btn" onClick={onBack}>← 返回</button>
+        <button className="back-btn" onClick={onBack}>
+          <Icon name="arrow-left" size={14} />
+          返回
+        </button>
         <h2 className="reader-title">{book.title}</h2>
         <div className="reader-actions">
           <select
@@ -2604,36 +2608,52 @@ ${body}</body></html>`;
               </option>
             ))}
           </select>
-          <button onClick={() => changeFontSize(-2)} title="缩小字号">A-</button>
+          <button onClick={() => changeFontSize(-2)} title="缩小字号">A−</button>
           <button onClick={() => changeFontSize(2)} title="放大字号">A+</button>
-          <button onClick={() => changeTheme('dark')} className={settings.theme === 'dark' ? 'active' : ''}>🌙</button>
-          <button onClick={() => changeTheme('light')} className={settings.theme === 'light' ? 'active' : ''}>☀️</button>
-          <button onClick={() => changeTheme('sepia')} className={settings.theme === 'sepia' ? 'active' : ''}>📜</button>
+          <span className="tool-sep" />
+          <button onClick={() => changeTheme('dark')} className={settings.theme === 'dark' ? 'active' : ''} title="深色主题">
+            <Icon name="moon" size={15} />
+          </button>
+          <button onClick={() => changeTheme('light')} className={settings.theme === 'light' ? 'active' : ''} title="浅色主题">
+            <Icon name="sun" size={15} />
+          </button>
+          <button onClick={() => changeTheme('sepia')} className={settings.theme === 'sepia' ? 'active' : ''} title="护眼纸色主题">
+            <Icon name="palette" size={15} />
+          </button>
+          <span className="tool-sep" />
           {supportsTextOps && (
             <button onClick={handleHeaderSpeak} className={speaking ? 'active' : ''} title={speaking ? '停止朗读' : '朗读'}>
-              {speaking ? '⏹' : '🔊'}
+              <Icon name={speaking ? 'stop' : 'volume'} size={15} />
             </button>
           )}
           {book.file_type === 'epub' && (
             <button onClick={toggleFlow} title={flowMode === 'paginated' ? '切换滚动模式' : '切换分页模式'}>
-              {flowMode === 'paginated' ? '📜' : '📄'}
+              <Icon name={flowMode === 'paginated' ? 'book' : 'rows'} size={15} />
             </button>
           )}
-          <button onClick={handlePrint} title="打印 / 打印预览">🖨</button>
-          <button onClick={handleExportPageImage} title="导出当前页为图片（PNG）">🖼</button>
+          <button onClick={handlePrint} title="打印 / 打印预览">
+            <Icon name="printer" size={15} />
+          </button>
+          <button onClick={handleExportPageImage} title="导出当前页为图片（PNG）">
+            <Icon name="image" size={15} />
+          </button>
+          <span className="tool-sep" />
           {supportsThumbs && (
             <button
               onClick={() => togglePanel('thumbs')}
               className={panel === 'thumbs' ? 'active' : ''}
               title="页面缩略图"
             >
-              🔳
+              <Icon name="grid" size={15} />
             </button>
           )}
           {(book.file_type === 'epub' ||
             book.file_type === 'txt' ||
             (book.file_type === 'pdf' && pdfReflow && reflowToc.length > 0)) && (
-            <button onClick={() => togglePanel('toc')} className={panel === 'toc' ? 'active' : ''}>📑 目录</button>
+            <button onClick={() => togglePanel('toc')} className={panel === 'toc' ? 'active' : ''} title="目录">
+              <Icon name="list" size={15} />
+              目录
+            </button>
           )}
           {(book.file_type === 'epub' || book.file_type === 'txt') && (
             <button
@@ -2641,7 +2661,7 @@ ${body}</body></html>`;
               className={vertical ? 'active' : ''}
               title={vertical ? '切换为横排' : '切换为竖排（从右向左）'}
             >
-              {vertical ? '⬍' : '⬌'}
+              <Icon name={vertical ? 'columns' : 'rows'} size={15} />
             </button>
           )}
           {book.file_type === 'cbz' && (
@@ -2651,28 +2671,35 @@ ${body}</body></html>`;
                 className={comicSpread ? 'active' : ''}
                 title={comicSpread ? '单页显示' : '双页合并'}
               >
-                {comicSpread ? '▣' : '▢'}
+                <Icon name={comicSpread ? 'side-by-side' : 'book'} size={15} />
               </button>
               <button
                 onClick={toggleComicRtl}
                 className={comicRtl ? 'active' : ''}
                 title={comicRtl ? '左向右翻页' : '右向左翻页（日漫）'}
               >
-                {comicRtl ? '⇦' : '⇨'}
+                <Icon name={comicRtl ? 'arrow-left' : 'arrow-right'} size={15} />
               </button>
             </>
           )}
           {book.file_type === 'pdf' && (
             <>
-              <button onClick={() => changePdfScale(-0.25)} title="缩小">🔍-</button>
-              <button onClick={() => changePdfScale(0.25)} title="放大">🔍+</button>
-              <button onClick={fitPdfWidth} title="适应宽度">↔</button>
+              <button onClick={() => changePdfScale(-0.25)} title="缩小">
+                <Icon name="zoom-out" size={15} />
+              </button>
+              <button onClick={() => changePdfScale(0.25)} title="放大">
+                <Icon name="zoom-in" size={15} />
+              </button>
+              <button onClick={fitPdfWidth} title="适应宽度">
+                <Icon name="fit-width" size={15} />
+              </button>
               <button
                 onClick={rotatePdf}
                 className={pdfRotation ? 'active' : ''}
                 title="顺时针旋转 90°"
               >
-                ⟳{pdfRotation ? ` ${pdfRotation}°` : ''}
+                <Icon name="rotate-cw" size={15} />
+                {pdfRotation ? `${pdfRotation}°` : null}
               </button>
               <button
                 onClick={togglePdfReflow}
@@ -2680,7 +2707,8 @@ ${body}</body></html>`;
                 disabled={reflowBusy}
                 title={pdfReflow ? '还原原始版式' : '重排为流式排版（适配窗口宽度，不改原文件）'}
               >
-                {reflowBusy ? '重排中…' : '📄 重排'}
+                <Icon name="wand" size={15} />
+                {reflowBusy ? '重排中…' : '重排'}
               </button>
             </>
           )}
@@ -2690,7 +2718,8 @@ ${body}</body></html>`;
               className={panel === 'ocr' ? 'active' : ''}
               title="识别当前页的文字（本机运算，不上传）"
             >
-              🔤 识别
+              <Icon name="scan" size={15} />
+              识别
             </button>
           )}
           <button
@@ -2698,20 +2727,22 @@ ${body}</body></html>`;
             className={panel === 'typo' ? 'active' : ''}
             title="排版自定义"
           >
-            Aa
+            <Icon name="type" size={15} />
           </button>
           <button onClick={() => togglePanel('notes')} className={panel === 'notes' ? 'active' : ''} title="笔记">
-            📝{notes.length > 0 ? ` ${notes.length}` : ''}
+            <Icon name="note" size={15} />
+            {notes.length > 0 ? notes.length : null}
           </button>
           <button
             onClick={toggleHideMarks}
             className={hideMarks ? 'active' : ''}
             title={hideMarks ? '显示批注' : '隐藏批注（不删除）'}
           >
-            {hideMarks ? '🙈' : '👁'}
+            <Icon name={hideMarks ? 'eye-off' : 'eye'} size={15} />
           </button>
           <button onClick={() => togglePanel('marks')} className={panel === 'marks' ? 'active' : ''} title="书签">
-            🔖{bookmarks.length > 0 ? ` ${bookmarks.length}` : ''}
+            <Icon name="bookmark" size={15} />
+            {bookmarks.length > 0 ? bookmarks.length : null}
           </button>
           {book.file_type === 'txt' && (
             <button
@@ -2719,20 +2750,23 @@ ${body}</body></html>`;
               className={normalizeOn ? 'active' : ''}
               title={normalizeOn ? '还原原始排版' : '文本规整：清理空行/缩进/硬折行（不改原文件）'}
             >
-              ✨ 规整
+              <Icon name="eraser" size={15} />
+              规整
             </button>
           )}
           <button onClick={() => togglePanel('positions')} className={panel === 'positions' ? 'active' : ''} title="阅读位置">
-            📍{positions.length > 0 ? ` ${positions.length}` : ''}
+            <Icon name="map-pin" size={15} />
+            {positions.length > 0 ? positions.length : null}
           </button>
+          <span className="tool-sep" />
           {supportsTextOps && (
             <button onClick={() => togglePanel('search')} className={panel === 'search' ? 'active' : ''} title="书内检索">
-              🔍
+              <Icon name="search" size={15} />
             </button>
           )}
           {supportsTextOps && (
             <button onClick={() => togglePanel('ai')} className={panel === 'ai' ? 'active' : ''} title="AI 助手">
-              ✨
+              <Icon name="sparkles" size={15} />
             </button>
           )}
           {supportsTextOps && (
@@ -2741,7 +2775,7 @@ ${body}</body></html>`;
               className={dualColumn ? 'active' : ''}
               title="双栏 / 单栏"
             >
-              📖
+              <Icon name="side-by-side" size={15} />
             </button>
           )}
           <button
@@ -2749,24 +2783,25 @@ ${body}</body></html>`;
             className={autoPlay ? 'active' : ''}
             title={autoPlay ? '停止自动翻页' : '自动翻页'}
           >
-            {autoPlay ? '⏸' : '▶'}
+            <Icon name={autoPlay ? 'pause' : 'play'} size={13} />
           </button>
+          <span className="tool-sep" />
           <button
             onClick={() => setPhoneMode(m => !m)}
             className={phoneMode ? 'active' : ''}
             title="手机模式"
           >
-            📱
+            <Icon name="phone" size={15} />
           </button>
           <button
             onClick={() => setShowViewPanel(v => !v)}
             className={showViewPanel ? 'active' : ''}
             title="阅读视图"
           >
-            👁
+            <Icon name="sliders" size={15} />
           </button>
           <button onClick={handleToggleFullscreen} title="全屏 (F11)">
-            ⛶
+            <Icon name="maximize" size={15} />
           </button>
         </div>
       </div>
@@ -2906,7 +2941,10 @@ ${body}</body></html>`;
           <div className="toc-panel">
             <div className="panel-title-row">
               <h3>目录（{txtToc.length}）</h3>
-              <button className="link-btn" onClick={handleAddChapterAtCursor}>＋ 当前位置</button>
+              <button className="link-btn" onClick={handleAddChapterAtCursor}>
+                <Icon name="plus" size={13} />
+                当前位置
+              </button>
             </div>
             {txtToc.length === 0 ? (
               <p className="empty-text">未识别到章节，可在书籍详情页调整解析方式</p>
@@ -3114,7 +3152,8 @@ ${body}</body></html>`;
               style={{ width: '100%', marginBottom: 14 }}
               onClick={handleMarkPosition}
             >
-              ＋ 标记当前位置
+              <Icon name="plus" size={13} />
+              标记当前位置
             </button>
             {positions.length === 0 ? (
               <p className="empty-text">还没有保存的位置</p>
@@ -3122,7 +3161,7 @@ ${body}</body></html>`;
               positions.map(p => (
                 <div key={p.id} className="mark-item">
                   <p className="mark-label">
-                    {p.source === 'crash' ? '⚠ 异常退出时' : p.source === 'exit' ? '退出时' : '手动标记'}
+                    {p.source === 'crash' ? '异常退出时' : p.source === 'exit' ? '退出时' : '手动标记'}
                     {p.progress > 0 ? ` · ${Math.round(p.progress * 100)}%` : ''}
                   </p>
                   <p className="mark-note">{p.label || '未命名位置'}</p>
@@ -3159,7 +3198,10 @@ ${body}</body></html>`;
 
         {panel === 'ai' && (
           <div className="toc-panel">
-            <h3>✨ AI 助手</h3>
+            <h3>
+              <Icon name="sparkles" size={14} />
+              AI 助手
+            </h3>
             <p className="section-desc">
               {aiContext ? '基于选中文本回答' : '基于当前页正文回答'}（PDF 暂不支持）
             </p>
@@ -3171,11 +3213,13 @@ ${body}</body></html>`;
                 翻译本页
               </button>
               <button className="btn-secondary small" onClick={handleAiMindmap} disabled={aiLoading}>
-                🧠 脑图
+                <Icon name="network" size={14} />
+                脑图
               </button>
               {supportsTextOps && (
                 <button className="btn-secondary small" onClick={handleBookMindmap} disabled={aiLoading}>
-                  📚 本书脑图
+                  <Icon name="library" size={14} />
+                  本书脑图
                 </button>
               )}
               {aiContext && (
@@ -3271,14 +3315,16 @@ ${body}</body></html>`;
           {phoneMode && (
             <div className="phone-statusbar">
               <span>{clock}</span>
-              <span>5G 🔋</span>
+              <span>5G <Icon name="battery" size={14} /></span>
             </div>
           )}
           {loading && <div className="loading">加载中...</div>}
           {!loading && error && (
             <div className="loading">
-              <div>
-                <div style={{ fontSize: 48, marginBottom: 16 }}>😢</div>
+              <div style={{ textAlign: 'center' }}>
+                <div style={{ color: 'var(--text-muted)', marginBottom: 16 }}>
+                  <Icon name="alert" size={38} strokeWidth={1.4} />
+                </div>
                 <div>{error}</div>
                 <button className="btn-primary" style={{ marginTop: 16 }} onClick={loadBook}>重新加载</button>
               </div>
@@ -3416,7 +3462,7 @@ ${body}</body></html>`;
           disabled={!histState.canBack}
           title="后退到上一个跳转位置"
         >
-          ↶
+          <Icon name="undo" size={16} />
         </button>
         <button
           className="nav-btn ghost"
@@ -3424,7 +3470,7 @@ ${body}</body></html>`;
           disabled={!histState.canForward}
           title="前进到下一个跳转位置"
         >
-          ↷
+          <Icon name="redo" size={16} />
         </button>
         <button className="nav-btn" onClick={handlePrev}>上一页</button>
         {book.file_type === 'epub' && chapterIdx != null && chapterTotal > 0 ? (
@@ -3496,22 +3542,27 @@ ${body}</body></html>`;
             title={readonlyMarksRef.current ? '批注只读模式已开启' : '写笔记'}
             disabled={readonlyMarksRef.current}
           >
-            📝 笔记
+            <Icon name="note" size={14} />
+            笔记
           </button>
           <button onClick={() => { speak(sel.text); setSel(null); clearEpubSelection(); }} title="朗读选中">
-            🔊 朗读
+            <Icon name="volume" size={14} />
+            朗读
           </button>
           <button onClick={() => handleHighlight(undefined as any, 'underline')} title="加下划线">
             <span style={{ borderBottom: '2px solid currentColor', paddingBottom: 1 }}>U</span>
           </button>
           <button onClick={() => handleAiQuick('explain')} title="AI 一键短解释">
-            ✨ 解释
+            <Icon name="sparkles" size={14} />
+            解释
           </button>
           <button onClick={() => handleAiQuick('translate')} title="AI 一键翻译">
-            🌐 翻译
+            <Icon name="globe" size={14} />
+            翻译
           </button>
           <button onClick={() => handleAiQuick('define')} title="查词并可存入生词本">
-            📖 查词
+            <Icon name="book-open" size={14} />
+            查词
           </button>
           <button
             onClick={async () => {
@@ -3521,10 +3572,13 @@ ${body}</body></html>`;
             }}
             title="复制"
           >
-            📋 复制
+            <Icon name="copy" size={14} />
+            复制
           </button>
           <span className="sel-count">{sel.text.replace(/\s/g, '').length} 字</span>
-          <button onClick={() => { setSel(null); clearEpubSelection(); }} title="关闭">✕</button>
+          <button onClick={() => { setSel(null); clearEpubSelection(); }} title="关闭">
+            <Icon name="x" size={14} />
+          </button>
         </div>
       )}
 

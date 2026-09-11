@@ -1,5 +1,6 @@
 import { useState } from 'react';
 import { MindNode, countNodes } from '../utils/mindmap';
+import { Icon } from './Icon';
 
 function TreeNode({
   node,
@@ -38,8 +39,12 @@ function TreeNode({
         className={`mind-node depth-${Math.min(depth, 3)}${hasChildren ? ' parent' : ''}`}
         onClick={handleClick}
       >
-        {children.length > 0 && <span className="mind-toggle">{collapsed ? '▶' : '▼'}</span>}
-        {loading && <span className="mind-toggle">⏳</span>}
+        {children.length > 0 && (
+          <span className="mind-toggle">
+            <Icon name={collapsed ? 'chevron-right' : 'chevron-down'} size={13} />
+          </span>
+        )}
+        {loading && <span className="mind-toggle"><Icon name="clock" size={13} /></span>}
         <span>{node.text}</span>
         {expandable && !loading && <span className="mind-expand-hint">生成子分支</span>}
       </div>
@@ -69,7 +74,10 @@ export function MindmapView({
     <div className="modal-mask" onClick={onClose}>
       <div className="mindmap-modal" onClick={e => e.stopPropagation()}>
         <div className="mindmap-header">
-          <h3>🧠 {title || `思维导图（${countNodes(nodes)} 个节点）`}</h3>
+          <h3>
+            <Icon name="network" size={16} />
+            {title || `思维导图（${countNodes(nodes)} 个节点）`}
+          </h3>
           <button className="back-btn" onClick={onClose}>关闭</button>
         </div>
         <div className="mindmap-body">

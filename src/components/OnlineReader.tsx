@@ -1,5 +1,6 @@
 import { useState, useEffect } from 'react';
 import { BookSource, OnlineBook, OnlineChapter } from '../types';
+import { Icon } from './Icon';
 
 interface OnlineReaderProps {
   source: BookSource;
@@ -117,7 +118,10 @@ export function OnlineReader({ source, book, onBack }: OnlineReaderProps) {
     return (
       <div className="reader">
         <div className="reader-header">
-          <button className="back-btn" onClick={() => setCurrentIdx(null)}>← 章节列表</button>
+          <button className="back-btn" onClick={() => setCurrentIdx(null)}>
+            <Icon name="arrow-left" size={14} />
+            章节列表
+          </button>
           <h2 className="reader-title">{ch.name}</h2>
           <div className="reader-actions">
             <span className="page-indicator">{currentIdx + 1} / {chapters.length}</span>
@@ -154,10 +158,13 @@ export function OnlineReader({ source, book, onBack }: OnlineReaderProps) {
   return (
     <div className="source-manager">
       <div className="source-header">
-        <button className="back-btn" onClick={onBack}>← 返回搜索</button>
+        <button className="back-btn" onClick={onBack}>
+          <Icon name="arrow-left" size={14} />
+          返回搜索
+        </button>
         <div className="source-actions">
           <button className="btn-secondary" onClick={handleFollow} disabled={following}>
-            {following ? '追更中...' : '📌 追更'}
+            {following ? '追更中...' : <><Icon name="pin" size={14} /> 追更</>}
           </button>
           <button className="btn-secondary" onClick={handleCacheAll} disabled={caching || chapters.length === 0}>
             {caching ? '缓存中...' : '缓存整本'}

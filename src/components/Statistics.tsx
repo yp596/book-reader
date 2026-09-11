@@ -2,6 +2,7 @@ import { useState, useEffect } from 'react';
 import { Book } from '../types';
 import { formatMinutes } from '../utils/text';
 import { buildWeekSeries, DayStat } from '../utils/stats';
+import { Icon } from './Icon';
 
 interface StatsData {
   totalBooks: number;
@@ -78,34 +79,34 @@ export function Statistics({ onOpenBook }: { onOpenBook: (book: Book) => void })
 
       <div className="stats-grid">
         <div className="stats-card">
-          <div className="stats-icon">📚</div>
+          <div className="stats-icon"><Icon name="library" size={18} /></div>
           <div className="stats-value">{stats.totalBooks}</div>
           <div className="stats-label">总书籍数</div>
         </div>
         <div className="stats-card">
-          <div className="stats-icon">📖</div>
+          <div className="stats-icon"><Icon name="book-open" size={18} /></div>
           <div className="stats-value">{stats.readingBooks}</div>
           <div className="stats-label">正在阅读</div>
         </div>
         <div className="stats-card">
-          <div className="stats-icon">✅</div>
+          <div className="stats-icon"><Icon name="check" size={18} /></div>
           <div className="stats-value">{stats.finishedBooks}</div>
           <div className="stats-label">已读完</div>
         </div>
         <div className="stats-card">
-          <div className="stats-icon">📊</div>
+          <div className="stats-icon"><Icon name="target" size={18} /></div>
           <div className="stats-value">
             {stats.totalBooks > 0 ? Math.round((stats.finishedBooks / stats.totalBooks) * 100) : 0}%
           </div>
           <div className="stats-label">完读率</div>
         </div>
         <div className="stats-card">
-          <div className="stats-icon">⏱️</div>
+          <div className="stats-icon"><Icon name="clock" size={18} /></div>
           <div className="stats-value small">{formatMinutes(stats.todayMinutes)}</div>
           <div className="stats-label">今日阅读</div>
         </div>
         <div className="stats-card">
-          <div className="stats-icon">⌛</div>
+          <div className="stats-icon"><Icon name="chart" size={18} /></div>
           <div className="stats-value small">{formatMinutes(stats.totalMinutes)}</div>
           <div className="stats-label">累计阅读</div>
         </div>
@@ -117,7 +118,10 @@ export function Statistics({ onOpenBook }: { onOpenBook: (book: Book) => void })
         const done = todayMin >= goalMinutes;
         return (
           <section className="stats-section">
-            <h2>今日目标 {done ? '✅ 已达成' : ''}</h2>
+            <h2>
+              今日目标
+              {done ? <><Icon name="check" size={14} /> 已达成</> : null}
+            </h2>
             <div className="goal-row">
               <div className="goal-bar">
                 <div className="goal-fill" style={{ width: `${pct}%` }} />

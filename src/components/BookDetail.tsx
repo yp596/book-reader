@@ -1,6 +1,8 @@
-import { useState, useEffect } from 'react';
+import { useState, useEffect, type CSSProperties } from 'react';
 import { Book, Bookmark, Note, TocEntry } from '../types';
 import { formatFileSize } from '../utils/text';
+import { coverHue } from '../utils/cover';
+import { Icon, StarRating } from './Icon';
 
 interface BookDetailProps {
   book: Book;
@@ -107,12 +109,16 @@ export function BookDetail({ book, onBack, onRead }: BookDetailProps) {
 
   return (
     <div className="book-detail">
-      <button className="back-btn" onClick={onBack}>← 返回书架</button>
+      <button className="back-btn" onClick={onBack}>
+        <Icon name="arrow-left" size={14} />
+        返回书架
+      </button>
       <button
         className="link-btn"
         style={{ marginLeft: 12 }}
         onClick={() => window.electronAPI?.openReaderWindow(book.id)}
       >
+        <Icon name="external-link" size={13} />
         在新窗口打开
       </button>
 
@@ -121,12 +127,22 @@ export function BookDetail({ book, onBack, onRead }: BookDetailProps) {
           {book.cover_path ? (
             <img src={book.cover_path} alt={book.title} />
           ) : (
-            <div className="book-cover-placeholder large">{book.file_type.toUpperCase()}</div>
+            <div
+              className="book-cover-placeholder"
+              style={{ '--cover-h': coverHue(book.title) } as CSSProperties}
+            >
+              <span className="cover-title">{book.title}</span>
+              <span className="cover-foot">{book.file_type.toUpperCase()}</span>
+            </div>
           )}
         </div>
         <div className="detail-info">
-          <h1>{book.favorite ? '⭐ ' : ''}{book.title}</h1>
+          <h1>
+            {book.title}
+            {book.favorite ? <Icon name="star-fill" size={16} className="detail-fav" /> : null}
+          </h1>
           <p className="detail-author">{book.author || '未知作者'}</p>
+          {book.rating ? <StarRating value={book.rating} size={14} /> : null}
           <p className="book-meta">
             {book.file_type.toUpperCase()} · {formatFileSize(fileSize)}
             {book.category ? ` · ${book.category}` : ''}
@@ -140,6 +156,7 @@ export function BookDetail({ book, onBack, onRead }: BookDetailProps) {
             </span>
           </div>
           <button className="btn-primary large" onClick={() => onRead(book)}>
+            <Icon name="book-open" size={15} />
             {book.progress > 0 ? '继续阅读' : '开始阅读'}
           </button>
         </div>
@@ -173,7 +190,7 @@ export function BookDetail({ book, onBack, onRead }: BookDetailProps) {
                     value={tocRule}
                     disabled={tocBusy}
                     onChange={e => applyTocRule(e.target.value)}
-                    style={{ flex: 1, minWidth: 160 }}
+                    style={{ flex: 1, minWidth: 160, maxWidth: 280 }}
                   >
                     <option value="">自动（内置规则择优）</option>
                     {ruleNames.map(r => (
