@@ -162,6 +162,9 @@ declare global {
       setBookRating: (id: number, rating: number) => Promise<void>;
       exportBookList: () => Promise<{ filePath: string; count: number } | null>;
       exportOneBook: (id: number) => Promise<{ filePath: string; count: number } | null>;
+      importOneBook: () => Promise<{ bookId: number; title: string; restored: number; positions: number } | null>;
+      saveBookAs: (id: number) => Promise<{ filePath: string } | null>;
+      exportBookText: (id: number) => Promise<{ filePath: string; chars: number } | null>;
       getReadingPositions: (bookId: number) => Promise<ReadingPosition[]>;
       addReadingPosition: (p: {
         book_id: number;
@@ -261,6 +264,7 @@ declare global {
       deleteNote: (id: number) => Promise<void>;
       getAllNotes: () => Promise<NoteWithBook[]>;
       updateNoteTags: (id: number, tags: string) => Promise<void>;
+      updateNote: (id: number, content: string, tags: string) => Promise<void>;
       getSetting: (key: string) => Promise<string | null>;
       setSetting: (key: string, value: string) => Promise<void>;
       exportNotes: (bookId?: number) => Promise<string | null>;
@@ -304,6 +308,13 @@ declare global {
       createSnapshot: () => Promise<{ file: string; pruned: number }>;
       listSnapshots: () => Promise<{ file: string; name: string; createdAt: string; sizeKB: number }[]>;
       restoreSnapshot: (file: string) => Promise<{ restored: number; createdAt: string }>;
+      getOcrAssets: () => Promise<{
+        detBuffer: Uint8Array;
+        recBuffer: Uint8Array;
+        wasmBinary: Uint8Array;
+        mjsText: string;
+        keysText: string;
+      }>;
       aiSummarize: (text: string) => Promise<string>;
       aiExplain: (text: string, question: string) => Promise<string>;
       aiTranslate: (text: string) => Promise<string>;

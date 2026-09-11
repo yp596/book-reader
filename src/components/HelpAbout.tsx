@@ -1,5 +1,14 @@
 import { useState, useEffect } from 'react';
-import { SHORTCUT_PRESETS, ACTION_LABELS, keyLabel, type ShortcutAction } from '../utils/shortcuts';
+import {
+  ACTION_LABELS,
+  DEFAULT_SHORTCUT_PRESET,
+  keyForAction,
+  keyLabel,
+  getPreset,
+  parseShortcutOverrides,
+  type ShortcutAction,
+  type ShortcutOverrides,
+} from '../utils/shortcuts';
 
 interface AppInfo {
   version: string;
@@ -17,9 +26,27 @@ type Tab = 'help' | 'about';
 const FORMATS = [
   { ext: 'EPUB', note: '最佳体验：目录、字体、高亮、检索全支持' },
   { ext: 'TXT', note: '支持 UTF-8 / GBK 自动识别，可一键规整排版' },
-  { ext: 'PDF', note: '支持缩放、跳页；有文字层的可切换流式重排' },
+  { ext: 'PDF', note: '支持缩放、跳页；有文字层的可切换流式重排，扫描版可用本机 OCR 取字' },
   { ext: 'DOCX', note: '导入时自动转换为 EPUB，阅读体验同为 EPUB' },
   { ext: 'CBZ', note: '漫画压缩包，免解压逐页读取' },
+];
+
+/** 随包开源组件与许可，取值与各依赖 package.json 的 license 字段一致 */
+const OPEN_SOURCE = [
+  { name: 'Electron', license: 'MIT' },
+  { name: 'React / React DOM', license: 'MIT' },
+  { name: 'epub.js', license: 'BSD-2-Clause' },
+  { name: 'PDF.js', license: 'Apache-2.0' },
+  { name: 'sql.js', license: 'MIT' },
+  { name: 'mammoth', license: 'BSD-2-Clause' },
+  { name: 'cheerio', license: 'MIT' },
+  { name: 'pdf-lib', license: 'MIT' },
+  { name: 'JSZip', license: 'MIT（双许可 MIT 或 GPL-3.0，本项目按 MIT 使用）' },
+  { name: 'marked', license: 'MIT' },
+  { name: 'webdav', license: 'MIT' },
+  { name: 'zod', license: 'MIT' },
+  { name: 'node-llama-cpp', license: 'MIT' },
+  { name: 'ONNX Runtime Web', license: 'MIT' },
 ];
 
 const FAQ = [
@@ -29,7 +56,7 @@ const FAQ = [
   },
   {
     q: '扫描版 PDF 为什么不能重排？',
-    a: '重排依赖 PDF 里的文字层，扫描版本质是图片，没有文字可提取。需要 OCR 识别才能实现，当前版本尚未支持。',
+    a: '重排依赖 PDF 里的文字层，扫描版本质是图片，没有文字可提取。可以点阅读工具栏的「识别」，用本机 OCR 取出当前页文字并复制，但识别结果不参与重排。',
   },
   {
     q: 'AI 功能怎么开启？',
@@ -48,10 +75,25 @@ const FAQ = [
 export function HelpAbout() {
   const [tab, setTab] = useState<Tab>('help');
   const [info, setInfo] = useState<AppInfo | null>(null);
+  /** 用户当前的键位方案与改键；速查表要反映实际生效的键，而不是预设默认值 */
+  const [presetKey, setPresetKey] = useState(DEFAULT_SHORTCUT_PRESET);
+  const [overrides, setOverrides] = useState<ShortcutOverrides>({});
 
   useEffect(() => {
     window.electronAPI?.getAppInfo().then(setInfo).catch(() => {});
+    const api = window.electronAPI;
+    if (!api) return;
+    Promise.all([api.getSetting('shortcutPreset'), api.getSetting('shortcutCustom')])
+      .then(([savedPreset, savedOverrides]) => {
+        setPresetKey(getPreset(savedPreset ?? DEFAULT_SHORTCUT_PRESET).key);
+        setOverrides(parseShortcutOverrides(savedOverrides));
+      })
+      .catch(() => {});
   }, []);
+
+  const preset = getPreset(presetKey);
+  const actions = Object.keys(ACTION_LABELS) as ShortcutAction[];
+  const customCount = actions.filter(a => overrides[a] !== undefined).length;
 
   return (
     <div className="source-manager">
@@ -100,24 +142,26 @@ export function HelpAbout() {
           <section className="settings-section">
             <h2>快捷键速查</h2>
             <p className="section-desc">
-              可在设置页切换三套方案并逐项改键；以下为各方案的默认键位。
+              {`当前方案：${preset.name}${customCount > 0 ? `（其中 ${customCount} 项已自定义）` : ''}。可在设置页切换方案或逐项改键。`}
             </p>
-            {SHORTCUT_PRESETS.map(p => (
-              <div key={p.key} className="help-preset">
-                <div className="help-preset-title">
-                  {p.name}
-                  <span className="privacy-hint" style={{ display: 'inline', marginLeft: 10 }}>{p.desc}</span>
-                </div>
-                <div className="keymap-list" style={{ borderTop: 'none', paddingTop: 0 }}>
-                  {Object.entries(p.map).map(([key, action]) => (
-                    <div key={key} className="keymap-row">
-                      <kbd>{keyLabel(key)}</kbd>
-                      <span>{ACTION_LABELS[action as ShortcutAction]}</span>
-                    </div>
-                  ))}
-                </div>
-              </div>
-            ))}
+            <div className="keymap-list" style={{ borderTop: 'none', paddingTop: 0 }}>
+              {actions.map(action => {
+                const key = keyForAction(preset, overrides, action);
+                return (
+                  <div key={action} className="keymap-row">
+                    <kbd>{key ? keyLabel(key) : '未绑定'}</kbd>
+                    <span>
+                      {ACTION_LABELS[action]}
+                      {overrides[action] !== undefined && (
+                        <span className="privacy-hint" style={{ display: 'inline', marginLeft: 8 }}>
+                          已自定义
+                        </span>
+                      )}
+                    </span>
+                  </div>
+                );
+              })}
+            </div>
             <p className="section-desc" style={{ marginTop: 14, marginBottom: 0 }}>
               固定键位：Esc 收起面板或返回书架；Alt + ← / → 在跳转历史中前进后退。
             </p>
@@ -165,10 +209,19 @@ export function HelpAbout() {
 
           <section className="settings-section">
             <h2>开源许可</h2>
-            <p className="section-desc" style={{ lineHeight: 1.9, marginBottom: 0 }}>
-              本项目基于 Electron、React、epub.js、pdf.js、sql.js、mammoth、cheerio、pdf-lib、marked 等
-              开源软件构建，各组件遵循其各自的许可协议。软件不内置任何书源，仅提供导入功能；
-              请仅用于阅读你拥有合法版权的内容。
+            <p className="section-desc" style={{ lineHeight: 1.9 }}>
+              本软件基于以下开源项目构建，各组件版权归其各自作者所有，遵循对应许可协议：
+            </p>
+            <div className="info-table">
+              {OPEN_SOURCE.map(d => (
+                <div key={d.name} className="info-row">
+                  <span style={{ width: 170 }}>{d.name}</span>
+                  <span>{d.license}</span>
+                </div>
+              ))}
+            </div>
+            <p className="section-desc" style={{ lineHeight: 1.9, marginTop: 12, marginBottom: 0 }}>
+              软件不内置任何书源，仅提供导入功能；请仅用于阅读你拥有合法版权的内容。
             </p>
           </section>
 

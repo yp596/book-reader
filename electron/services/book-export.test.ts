@@ -2,6 +2,8 @@ import { describe, it, expect } from 'vitest';
 import {
   buildBookListMarkdown,
   buildBookBackup,
+  buildPlainText,
+  parseBookBackup,
   backupFileName,
   effectiveStatus,
   STATUS_LABELS,
@@ -120,5 +122,76 @@ describe('backupFileName', () => {
 
   it('空书名有兜底名', () => {
     expect(backupFileName('', now)).toContain('book');
+  });
+});
+
+describe('parseBookBackup', () => {
+  const now = new Date(2026, 8, 10, 12, 0);
+
+  it('导出结果能被原样解析回来（导出→恢复闭环）', () => {
+    const backup = buildBookBackup(
+      book({ progress: 0.4, rating: 4, favorite: 1, category: '科幻', status: 'reading' }),
+      [{ position: 'epubcfi(/6/4)', text: '摘录', color: 'yellow', style: 'highlight' }],
+      [{ position: 'epubcfi(/6/6)', note: '想法', tags: '待整理' }],
+      [{ position: 'epubcfi(/6/8)', label: '断点', progress: 0.4, source: 'manual' }],
+      now,
+    );
+    const parsed = parseBookBackup(JSON.stringify(backup));
+    expect(parsed.book.title).toBe('三体');
+    expect(parsed.bookmarks).toHaveLength(1);
+    expect(parsed.notes).toHaveLength(1);
+    expect(parsed.positions).toHaveLength(1);
+  });
+
+  it('不是 JSON 时报错而不是静默返回空备份', () => {
+    expect(() => parseBookBackup('这不是 json')).toThrow(/JSON/);
+  });
+
+  it('版本不认识时拒绝，避免旧格式写脏新库', () => {
+    expect(() => parseBookBackup(JSON.stringify({ version: 99, book: { title: 'x' } }))).toThrow(/版本/);
+  });
+
+  it('缺少书名时拒绝：没有书名无从匹配要恢复哪本书', () => {
+    expect(() => parseBookBackup(JSON.stringify({ version: 1, book: {} }))).toThrow(/书籍信息/);
+  });
+
+  it('三个列表字段缺失或不是数组时归一化为空数组', () => {
+    const parsed = parseBookBackup(
+      JSON.stringify({ version: 1, book: { title: '三体' }, bookmarks: null, notes: 'oops' }),
+    );
+    expect(parsed.bookmarks).toEqual([]);
+    expect(parsed.notes).toEqual([]);
+    expect(parsed.positions).toEqual([]);
+  });
+});
+
+describe('buildPlainText', () => {
+  const sec = (label: string, text: string) => ({ label, text });
+
+  it('章节名单独成行，章节之间空行分隔', () => {
+    const out = buildPlainText([sec('第一章', '正文甲'), sec('第二章', '正文乙')]);
+    expect(out).toBe('第一章\n\n正文甲\n\n\n第二章\n\n正文乙\n');
+  });
+
+  it('withHeadings=false 时不插章节名（PDF 按页切，页标题会把正文割碎）', () => {
+    const out = buildPlainText([sec('第 1 页', '甲'), sec('第 2 页', '乙')], false);
+    expect(out).toBe('甲\n\n\n乙\n');
+  });
+
+  it('无标题的章节只留正文，不产生空行开头的碎块', () => {
+    expect(buildPlainText([sec('', '裸正文')])).toBe('裸正文\n');
+  });
+
+  it('正文为空的章节被跳过', () => {
+    expect(buildPlainText([sec('空章', '   '), sec('实章', '有内容')])).toBe('实章\n\n有内容\n');
+  });
+
+  it('全空返回空串，交给调用方报错而不是写一个空文件', () => {
+    expect(buildPlainText([])).toBe('');
+    expect(buildPlainText([sec('', '')])).toBe('');
+  });
+
+  it('结尾有换行，避免部分编辑器显示最后一行挤在一起', () => {
+    expect(buildPlainText([sec('', 'x')]).endsWith('\n')).toBe(true);
   });
 });

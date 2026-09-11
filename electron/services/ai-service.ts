@@ -7,9 +7,16 @@ export interface AiConfig {
 
 export class AiService {
   private config: AiConfig;
+  /**
+   * 联网闸门，由调用方注入。
+   * 服务层不直接引 electron / 数据库：既保持可单测，也让「能不能联网」
+   * 这条策略留在组装处统一决定。
+   */
+  private onlineGuard: () => void;
 
-  constructor(config: AiConfig) {
+  constructor(config: AiConfig, onlineGuard: () => void = () => {}) {
     this.config = config;
+    this.onlineGuard = onlineGuard;
   }
 
   /**
@@ -30,6 +37,8 @@ export class AiService {
       if (local) return local;
     } catch { /* 回退 HTTP */ }
     try {
+      // 进程内推理不可用才会走到这里，发请求前先过闸门
+      this.onlineGuard();
       const response = await fetch(`${this.config.baseUrl}/v1/chat/completions`, {
         method: 'POST',
         headers: {

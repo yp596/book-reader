@@ -105,6 +105,13 @@ export class ModelService {
 
   private fetchToFile(url: string, dest: string, id: string, label: string): Promise<void> {
     return new Promise((resolve, reject) => {
+      try {
+        // 模型与 llama-server 二进制的下载都走这里，是唯一的出站关口
+        DatabaseService.getInstance().assertOnlineEnabled(label);
+      } catch (err) {
+        reject(err);
+        return;
+      }
       const tmp = dest + '.part';
       const file = fs.createWriteStream(tmp);
       const req = https.get(

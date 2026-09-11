@@ -3,7 +3,7 @@ import fs from 'fs';
 import os from 'os';
 import path from 'path';
 import JSZip from 'jszip';
-import { extractMetadata, extractToc, parseTxtChapters, docxToChapters, mdToChapters } from './metadata';
+import { extractMetadata, extractToc, parseTxtChapters, docxToChapters, mdToChapters, decodeTextAuto } from './metadata';
 
 let tmpDir: string;
 
@@ -346,5 +346,39 @@ describe('DOCX', () => {
     const chapters = await docxToChapters(p);
     expect(chapters.map(c => c.title)).toEqual(['上篇', '第一节']);
     expect(chapters[0].content).toContain('内容一');
+  });
+});
+
+describe('decodeTextAuto 编码判定', () => {
+  it('合法 UTF-8 原样解出', () => {
+    expect(decodeTextAuto(Buffer.from('中文标题测试', 'utf8'))).toBe('中文标题测试');
+  });
+
+  it('GBK 字节仍走 GBK 分支（D6D0 CEC4 = 「中文」）', () => {
+    expect(decodeTextAuto(Buffer.from([0xd6, 0xd0, 0xce, 0xc4]))).toBe('中文');
+  });
+
+  it('结尾缺半个字符时按 UTF-8 恢复，不误判成 GBK', () => {
+    const buf = Buffer.from('还不起学贷的我只好兼职猎魔', 'utf8');
+    expect(decodeTextAuto(buf.subarray(0, buf.length - 1))).toBe('还不起学贷的我只好兼职猎');
+  });
+
+  it('按固定字节数截断、切在汉字中间时，不整段回落 GBK', () => {
+    // 前缀 6 字节 + 「字」×N（每字 3 字节），让第 4096 字节正好落在某个字中间
+    const buf = Buffer.concat([Buffer.from('标题', 'utf8'), Buffer.from('字'.repeat(2000), 'utf8')]);
+    const cut = buf.subarray(0, 4096);
+    // 先确认这个切片确实会让严格解码失败（否则用例就没在测想测的场景）
+    expect(() => new TextDecoder('utf-8', { fatal: true }).decode(cut)).toThrow();
+    expect(decodeTextAuto(cut).startsWith('标题字字')).toBe(true);
+  });
+
+  it('extractMetadata 读 TXT 标题时不再被截断边界带偏', () => {
+    const buf = Buffer.concat([Buffer.from('标题\n', 'utf8'), Buffer.from('字'.repeat(2000), 'utf8')]);
+    // 头部 4096 字节切在汉字中间，正是曾经产出乱码书名的形状
+    const file = path.join(tmpDir, 'title-boundary.txt');
+    fs.writeFileSync(file, buf);
+    return extractMetadata(file, '.txt').then(meta => {
+      expect(meta?.title).toBe('标题');
+    });
   });
 });

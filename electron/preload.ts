@@ -45,6 +45,9 @@ contextBridge.exposeInMainWorld('electronAPI', {
     ipcRenderer.invoke('books:setRating', id, rating),
   exportBookList: () => ipcRenderer.invoke('books:exportList'),
   exportOneBook: (id: number) => ipcRenderer.invoke('books:exportOne', id),
+  importOneBook: () => ipcRenderer.invoke('books:importOne'),
+  saveBookAs: (id: number) => ipcRenderer.invoke('books:saveAs', id),
+  exportBookText: (id: number) => ipcRenderer.invoke('books:exportText', id),
   getReadingPositions: (bookId: number) => ipcRenderer.invoke('positions:list', bookId),
   addReadingPosition: (p: any) => ipcRenderer.invoke('positions:add', p),
   deleteReadingPosition: (id: number) => ipcRenderer.invoke('positions:delete', id),
@@ -112,6 +115,8 @@ contextBridge.exposeInMainWorld('electronAPI', {
   deleteNote: (id: number) => ipcRenderer.invoke('notes:delete', id),
   getAllNotes: () => ipcRenderer.invoke('notes:getAll'),
   updateNoteTags: (id: number, tags: string) => ipcRenderer.invoke('notes:updateTags', id, tags),
+  updateNote: (id: number, content: string, tags: string) =>
+    ipcRenderer.invoke('notes:update', id, content, tags),
 
   // Settings
   getSetting: (key: string) => ipcRenderer.invoke('settings:get', key),
@@ -191,6 +196,9 @@ contextBridge.exposeInMainWorld('electronAPI', {
     ipcRenderer.on('models:progress', listener);
     return () => ipcRenderer.removeListener('models:progress', listener);
   },
+
+  // 本地 OCR：模型字节由主进程读好送来
+  getOcrAssets: () => ipcRenderer.invoke('ocr:assets'),
 
   // AI
   aiSummarize: (text: string) => ipcRenderer.invoke('ai:summarize', text),

@@ -388,6 +388,15 @@ export class DatabaseService {
     return next;
   }
 
+  /** 显式设置收藏态。恢复备份时用，toggle 依赖当前值不适合重复执行 */
+  setFavorite(id: number, favorite: boolean) {
+    this.assertUnlocked(id, '修改收藏');
+    this.run('UPDATE books SET favorite = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?', [
+      favorite ? 1 : 0,
+      id,
+    ]);
+  }
+
   setCategory(id: number, category: string) {
     this.assertUnlocked(id, '修改分类');
     this.run('UPDATE books SET category = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?', [category.trim(), id]);
@@ -566,6 +575,19 @@ export class DatabaseService {
       | undefined;
     if (row) this.assertUnlocked(row.book_id, '修改笔记标签');
     this.run('UPDATE notes SET tags = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?', [tags, id]);
+  }
+
+  /** 更新笔记正文与标签。集中管理面板一次落库，避免正文与标签分两次写导致不同步 */
+  updateNote(id: number, content: string, tags: string) {
+    const row = this.get('SELECT book_id FROM notes WHERE id = ?', [id]) as
+      | { book_id: number }
+      | undefined;
+    if (row) this.assertUnlocked(row.book_id, '修改笔记');
+    this.run('UPDATE notes SET note = ?, tags = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?', [
+      content,
+      tags,
+      id,
+    ]);
   }
 
   getNotesByBookId(bookId: number) {
@@ -786,6 +808,35 @@ export class DatabaseService {
 
   setSetting(key: string, value: string) {
     this.run('INSERT OR REPLACE INTO settings (key, value) VALUES (?, ?)', [key, value]);
+  }
+
+  // ============ 联网附加能力总开关 ============
+
+  /**
+   * 出站请求的总闸门。纯离线定位要求默认关闭，
+   * 关闭状态下 AI 回退、书源抓取、WebDAV 同步、模型下载都不许发出请求。
+   * 只存 '1'/'0' 两个值，其余一律当关闭处理。
+   */
+  isOnlineEnabled(): boolean {
+    return this.getSetting('onlineFeaturesEnabled') === '1';
+  }
+
+  /** 出站前调用。未开启时给可操作提示，而不是让调用方去撞网络超时 */
+  assertOnlineEnabled(feature: string) {
+    if (this.isOnlineEnabled()) return;
+    throw new Error(`「${feature}」需要联网，当前未开启。请到「设置 → 联网附加能力」中开启后再试。`);
+  }
+
+  /**
+   * 首次初始化开关（只在没写过值时执行一次）。
+   * 新装默认关闭；但老用户可能已经配好书源或 WebDAV 地址，
+   * 一刀切关掉等于让既有配置变成哑巴，故检测到既有配置时视为已开启。
+   */
+  initOnlineSwitch() {
+    if (this.getSetting('onlineFeaturesEnabled') !== null) return;
+    const hasSources = this.all('SELECT id FROM book_sources LIMIT 1').length > 0;
+    const hasWebdav = !!(this.getSetting('webdavUrl') || '').trim();
+    this.setSetting('onlineFeaturesEnabled', hasSources || hasWebdav ? '1' : '0');
   }
 
   /**

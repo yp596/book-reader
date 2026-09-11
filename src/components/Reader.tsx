@@ -55,7 +55,7 @@ interface ReaderProps {
   initialPosition?: string | null;
 }
 
-type Panel = 'toc' | 'notes' | 'marks' | 'search' | 'ai' | 'positions' | 'typo' | 'thumbs' | null;
+type Panel = 'toc' | 'notes' | 'marks' | 'search' | 'ai' | 'positions' | 'typo' | 'thumbs' | 'ocr' | null;
 
 interface SelPopup {
   x: number;
@@ -158,6 +158,11 @@ export function Reader({ book, onBack, initialTarget, initialPosition }: ReaderP
   /** 竖排阅读：只对文字类格式生效 */
   const [vertical, setVertical] = useState(false);
   const verticalRef = useRef(false);
+  /** 本地 OCR：当前页识别结果与进度，仅扫描版 PDF / 漫画有入口 */
+  const [ocrLines, setOcrLines] = useState<{ text: string; score: number }[]>([]);
+  const [ocrBusy, setOcrBusy] = useState(false);
+  const [ocrError, setOcrError] = useState('');
+  const [ocrPage, setOcrPage] = useState<number | null>(null);
   /** 快捷键分发要同步读取翻页方向，用 ref 避免闭包拿到旧值 */
   const comicRtlRef = useRef(false);
   const [pdfReady, setPdfReady] = useState(false);
@@ -204,6 +209,8 @@ export function Reader({ book, onBack, initialTarget, initialPosition }: ReaderP
   const [markSort, setMarkSort] = useState<'time' | 'position'>('time');
   /** 显示/隐藏全部批注（只影响渲染，不删数据） */
   const [hideMarks, setHideMarks] = useState(false);
+  /** EPUB 注解在绘制那一刻就定死了样式，重绘时要读最新值，故另存 ref */
+  const hideMarksRef = useRef(false);
   /** 全局强制统一字体：压过电子书自带的奇葩字体 */
   const forceFontRef = useRef(false);
   /** 批注只读：屏蔽新增/删除批注的操作入口 */
@@ -812,6 +819,8 @@ export function Reader({ book, onBack, initialTarget, initialPosition }: ReaderP
       comicRtlRef.current = merged.comicRtl;
       setVertical(merged.vertical);
       verticalRef.current = merged.vertical;
+      setHideMarks(merged.hideMarks);
+      hideMarksRef.current = merged.hideMarks;
       savedPosRef.current = parseSavedPosition(pos);
     } catch {
       /* 读取失败按默认值走 */
@@ -900,13 +909,14 @@ export function Reader({ book, onBack, initialTarget, initialPosition }: ReaderP
           return;
         }
 
-        // 书内相对链接：相对当前章节所在目录解析
+        // 书内相对链接：相对当前章节所在目录解析。
+        // 锚点必须保留——epubjs 的 spine.get 会自行剥掉 #fragment 找章节，
+        // 而 contents.locationOf 正是靠 fragment 做 getElementById 定位脚注，
+        // 早先在这里 split('#') 会把脚注全部退化成「跳到该章开头」。
         e.preventDefault();
         const base = (contents.section?.href as string) || '';
         const dir = base.includes('/') ? base.slice(0, base.lastIndexOf('/') + 1) : '';
-        const target = href.startsWith('/')
-          ? href.slice(1)
-          : dir + href.split('#')[0];
+        const target = href.startsWith('/') ? href.slice(1) : dir + href;
         try {
           rendition.display(target);
         } catch { /* 目标不存在则忽略 */ }
@@ -1305,11 +1315,104 @@ export function Reader({ book, onBack, initialTarget, initialPosition }: ReaderP
     return true;
   };
 
-  /** EPUB 注解样式：下划线用描边，高亮用填充 */
+  /**
+   * EPUB 注解样式：下划线用描边，高亮用填充。
+   * 隐藏批注时改为全透明并关掉指针事件——不关事件的话，看不见的矩形会挡住划词。
+   */
   const epubAnnotationStyles = (color: { epubFill: string }, style?: string) =>
-    style === 'underline'
-      ? { stroke: color.epubFill, 'stroke-width': '3px', fill: 'transparent', 'fill-opacity': '0' }
-      : { fill: color.epubFill, 'fill-opacity': '0.35' };
+    hideMarksRef.current
+      ? {
+          fill: 'transparent',
+          'fill-opacity': '0',
+          stroke: 'transparent',
+          'stroke-width': '0px',
+          'pointer-events': 'none',
+        }
+      : style === 'underline'
+        ? { stroke: color.epubFill, 'stroke-width': '3px', fill: 'transparent', 'fill-opacity': '0' }
+        : { fill: color.epubFill, 'fill-opacity': '0.35' };
+
+  /**
+   * 重画 EPUB 注解。注解的样式只在 highlight() 那一刻写进 SVG，
+   * 所以显隐开关必须重挂一遍才能生效。
+   */
+  const resyncEpubMarks = () => {
+    const rendition = renditionRef.current;
+    if (book.file_type !== 'epub' || !rendition) return;
+    for (const b of bookmarks) {
+      try {
+        rendition.annotations.remove(b.position, 'highlight');
+      } catch { /* CFI 失效则跳过 */ }
+      try {
+        rendition.annotations.highlight(
+          b.position,
+          { markId: b.id },
+          undefined,
+          undefined,
+          epubAnnotationStyles(highlightColorOf(b.color || 'yellow'), b.style),
+        );
+      } catch { /* CFI 失效则跳过 */ }
+    }
+  };
+
+  /** 显隐批注：TXT 靠状态重渲染，EPUB 要手动重画注解 */
+  const toggleHideMarks = () => {
+    const next = !hideMarks;
+    setHideMarks(next);
+    hideMarksRef.current = next;
+    queueSaveBookPrefs({ hideMarks: next });
+    resyncEpubMarks();
+  };
+
+  /** 当前页的位图源：PDF 用已渲染的画布，漫画用当前页的图片数据解码 */
+  const currentPageImage = async (): Promise<HTMLCanvasElement | HTMLImageElement> => {
+    if (book.file_type === 'pdf') {
+      const canvas = canvasRef.current;
+      if (!canvas || !pdfReady) throw new Error('当前页尚未渲染完成');
+      return canvas;
+    }
+    if (!comicPageData) throw new Error('当前页尚未加载');
+    const img = new Image();
+    img.src = `data:${comicPageData.mime};base64,${comicPageData.data}`;
+    await img.decode();
+    return img;
+  };
+
+  /**
+   * 本地 OCR：识别当前页文字。
+   * 模型约 16MB，首次点击才从主进程取并常驻；全部在本机运算，不联网。
+   */
+  const runOcr = async () => {
+    if (ocrBusy) return;
+    setOcrBusy(true);
+    setOcrError('');
+    try {
+      const { initOcrFromMain, recognizeImage } = await import('../utils/ocr/engine');
+      await initOcrFromMain();
+      const source = await currentPageImage();
+      const lines = await recognizeImage(source);
+      setOcrLines(lines.map(l => ({ text: l.text, score: l.score })));
+      setOcrPage(pageIndex + 1);
+      if (lines.length === 0) setOcrError('这一页没有识别到文字');
+    } catch (err) {
+      setOcrLines([]);
+      setOcrError(err instanceof Error ? err.message : '识别失败');
+    } finally {
+      setOcrBusy(false);
+    }
+  };
+
+  /** 识别结果整体复制，便于贴到笔记里 */
+  const copyOcrText = async () => {
+    const text = ocrLines.map(l => l.text).join('\n');
+    if (!text) return;
+    try {
+      await navigator.clipboard.writeText(text);
+      showToast('已复制识别结果');
+    } catch {
+      showToast('复制失败');
+    }
+  };
 
   const handleHighlight = async (colorKey: string = 'yellow', style: 'highlight' | 'underline' = 'highlight') => {
     if (blockedByReadonly('新增高亮')) return;
@@ -1959,7 +2062,7 @@ ${body}</body></html>`;
       if (pages.length === 0) {
         alert(
           '本书没有可提取的文字层，可能是扫描版 PDF。\n' +
-          '扫描版需要 OCR 才能重排，当前版本尚未支持。',
+          '扫描版无法重排；可点工具栏的「识别」，用本机 OCR 取出当前页文字。',
         );
         return;
       }
@@ -2582,6 +2685,15 @@ ${body}</body></html>`;
               </button>
             </>
           )}
+          {(book.file_type === 'pdf' || book.file_type === 'cbz') && (
+            <button
+              onClick={() => togglePanel('ocr')}
+              className={panel === 'ocr' ? 'active' : ''}
+              title="识别当前页的文字（本机运算，不上传）"
+            >
+              🔤 识别
+            </button>
+          )}
           <button
             onClick={() => togglePanel('typo')}
             className={panel === 'typo' ? 'active' : ''}
@@ -2593,7 +2705,7 @@ ${body}</body></html>`;
             📝{notes.length > 0 ? ` ${notes.length}` : ''}
           </button>
           <button
-            onClick={() => setHideMarks(h => !h)}
+            onClick={toggleHideMarks}
             className={hideMarks ? 'active' : ''}
             title={hideMarks ? '显示批注' : '隐藏批注（不删除）'}
           >
@@ -2734,6 +2846,42 @@ ${body}</body></html>`;
       )}
 
       <div className="reader-body">
+        {panel === 'ocr' && (
+          <div className="toc-panel">
+            <div className="panel-title-row">
+              <h3>识别当前页文字</h3>
+              {ocrLines.length > 0 && (
+                <button className="link-btn" onClick={copyOcrText}>复制全部</button>
+              )}
+            </div>
+            <button className="btn-primary small" onClick={runOcr} disabled={ocrBusy}>
+              {ocrBusy ? '识别中…' : ocrPage === pageIndex + 1 ? '重新识别这一页' : '识别这一页'}
+            </button>
+            <p className="section-desc" style={{ marginTop: 12 }}>
+              扫描版 PDF 与漫画的页面是图片，没有可复制的文字。识别在本机完成，
+              图片不会离开这台电脑。
+            </p>
+            {ocrBusy && <p className="empty-text">首次识别需要加载模型，请稍候…</p>}
+            {!ocrBusy && ocrError && <p className="empty-text">{ocrError}</p>}
+            {!ocrBusy && ocrLines.length > 0 && (
+              <>
+                <p className="section-desc">第 {ocrPage} 页 · 共 {ocrLines.length} 行</p>
+                {ocrLines.map((line, i) => (
+                  <p
+                    key={i}
+                    className="ocr-line"
+                    // 置信度低的行淡显，方便对照原图复核
+                    style={{ opacity: line.score < 0.6 ? 0.6 : 1 }}
+                    title={`置信度 ${(line.score * 100).toFixed(0)}%`}
+                  >
+                    {line.text}
+                  </p>
+                ))}
+              </>
+            )}
+          </div>
+        )}
+
         {panel === 'toc' && book.file_type === 'pdf' && pdfReflow && (
           <div className="toc-panel">
             <h3>目录（{reflowToc.length}）</h3>

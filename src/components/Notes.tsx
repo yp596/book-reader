@@ -11,7 +11,7 @@ export function Notes({ onOpenNote }: NotesProps) {
   const [notes, setNotes] = useState<NoteWithBook[]>([]);
   const [query, setQuery] = useState('');
   const [selectedTags, setSelectedTags] = useState<string[]>([]);
-  const [editing, setEditing] = useState<{ id: number; tags: string } | null>(null);
+  const [editing, setEditing] = useState<{ id: number; tags: string; note: string } | null>(null);
 
   useEffect(() => { load(); }, []);
 
@@ -40,9 +40,9 @@ export function Notes({ onOpenNote }: NotesProps) {
   const toggleTag = (tag: string) =>
     setSelectedTags(s => (s.includes(tag) ? s.filter(t => t !== tag) : [...s, tag]));
 
-  const saveTags = async () => {
+  const saveNote = async () => {
     if (!editing) return;
-    await window.electronAPI?.updateNoteTags(editing.id, normalizeTags(editing.tags));
+    await window.electronAPI?.updateNote(editing.id, editing.note, normalizeTags(editing.tags));
     setEditing(null);
     await load();
   };
@@ -110,9 +110,9 @@ export function Notes({ onOpenNote }: NotesProps) {
                   ))}
                   <button
                     className="tag-chip small ghost"
-                    onClick={() => setEditing({ id: n.id, tags: n.tags ?? '' })}
+                    onClick={() => setEditing({ id: n.id, tags: n.tags ?? '', note: n.note ?? '' })}
                   >
-                    {parseTags(n.tags).length > 0 ? '改标签' : '+ 标签'}
+                    编辑
                   </button>
                 </div>
                 <p className="book-meta">{new Date(n.created_at).toLocaleString()}</p>
@@ -131,19 +131,26 @@ export function Notes({ onOpenNote }: NotesProps) {
       {editing && (
         <div className="modal-mask" onClick={() => setEditing(null)}>
           <div className="note-modal" onClick={e => e.stopPropagation()}>
-            <h3>编辑标签</h3>
-            <p className="section-desc" style={{ marginBottom: 12 }}>多个标签用逗号或空格分隔</p>
+            <h3>编辑笔记</h3>
+            <textarea
+              className="note-textarea"
+              value={editing.note}
+              onChange={e => setEditing({ ...editing, note: e.target.value })}
+              placeholder="写下你的想法..."
+              rows={6}
+              autoFocus
+            />
+            <p className="section-desc" style={{ margin: '12px 0' }}>多个标签用逗号或空格分隔</p>
             <input
               className="tag-input"
               value={editing.tags}
               onChange={e => setEditing({ ...editing, tags: e.target.value })}
-              onKeyDown={e => e.key === 'Enter' && saveTags()}
+              onKeyDown={e => e.key === 'Enter' && saveNote()}
               placeholder="例如：小说, 科幻, 待整理"
-              autoFocus
             />
             <div className="form-actions">
               <button className="btn-secondary" onClick={() => setEditing(null)}>取消</button>
-              <button className="btn-primary" onClick={saveTags}>保存</button>
+              <button className="btn-primary" onClick={saveNote}>保存</button>
             </div>
           </div>
         </div>

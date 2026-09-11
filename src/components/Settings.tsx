@@ -67,6 +67,8 @@ interface SettingsData {
   txtTocRegex: string;
   /** 导入时遇到重复书籍：跳过 / 各留一本 / 覆盖已有记录 */
   importConflictPolicy: 'skip' | 'keep' | 'replace';
+  /** 联网附加能力总开关：关闭时不发起任何出站请求 */
+  onlineFeaturesEnabled: boolean;
 }
 
 export function Settings() {
@@ -101,6 +103,7 @@ export function Settings() {
     txtTocKeyword: '',
     txtTocRegex: '',
     importConflictPolicy: 'skip',
+    onlineFeaturesEnabled: false,
   });
   const [saved, setSaved] = useState(false);
   const [syncing, setSyncing] = useState(false);
@@ -132,7 +135,7 @@ export function Settings() {
   const loadSettings = async () => {
     const api = window.electronAPI;
     if (!api) return;
-    const BOOL_KEYS: (keyof SettingsData)[] = ['autoTheme', 'privacyAutoClear', 'forceFont', 'annotationsReadonly', 'closeToTray', 'screenProtection'];
+    const BOOL_KEYS: (keyof SettingsData)[] = ['autoTheme', 'privacyAutoClear', 'forceFont', 'annotationsReadonly', 'closeToTray', 'screenProtection', 'onlineFeaturesEnabled'];
     const NUM_KEYS: (keyof SettingsData)[] = [
       'fontSize', 'lineHeight', 'ttsRate', 'autoThemeDayStart', 'autoThemeNightStart', 'idleDays', 'dailyGoalMinutes',
     ];
@@ -698,6 +701,37 @@ export function Settings() {
             <p className="section-desc">按多行模式匹配，命中位置即为章节起点；表达式非法时自动回退到默认方式。</p>
           </>
         )}
+      </section>
+
+      <section className="settings-section">
+        <h2>联网附加能力</h2>
+        <p className="section-desc" style={{ lineHeight: 1.9 }}>
+          软件默认纯离线运行，解析、渲染、检索、存储全部在本机完成，不发起任何网络请求。
+          只有下面这一道开关打开后，需要联网的能力才会生效：在线书源与在线阅读、WebDAV 同步、
+          本地模型的下载、以及 AI 助手与语义检索在进程内推理不可用时的远端服务回退。
+        </p>
+        <p className="section-desc" style={{ lineHeight: 1.9 }}>
+          已下载到本机的模型、已缓存的在线章节不受影响，关闭联网后依然可用。
+        </p>
+        <div className="form-row" style={{ marginTop: 10 }}>
+          <label className="checkbox-row">
+            <input
+              type="checkbox"
+              checked={settings.onlineFeaturesEnabled}
+              onChange={e => {
+                const next = e.target.checked;
+                if (next && !confirm('开启后软件会访问网络（在线书源、WebDAV 同步、模型下载、远端 AI 服务）。确定开启？')) {
+                  return;
+                }
+                handleChange('onlineFeaturesEnabled', next);
+              }}
+            />
+            <span>
+              允许联网
+              <em className="privacy-hint">默认关闭；关闭时不会建立任何出站连接</em>
+            </span>
+          </label>
+        </div>
       </section>
 
       <section className="settings-section">

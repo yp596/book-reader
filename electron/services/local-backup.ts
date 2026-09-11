@@ -27,6 +27,9 @@ const BACKUP_SETTINGS = [
   'fontSize', 'lineHeight', 'theme', 'fontFamily', 'ttsRate',
   'autoTheme', 'autoThemeDayStart', 'autoThemeNightStart', 'autoThemeDay', 'autoThemeNight',
   'aiProvider', 'aiBaseUrl', 'aiModel', 'aiEmbedUrl',
+  // 键位与阅读样式属于「用户配置」，换机器恢复时最需要——
+  // 漏掉它们会出现「备份还原后改键和自定义 CSS 全没了」
+  'shortcutPreset', 'shortcutCustom', 'readingStylePreset', 'customReadingCss',
 ];
 
 const TABLES = ['books', 'bookmarks', 'notes', 'words', 'book_sources'] as const;

@@ -92,12 +92,9 @@ async function extractPdfMetadata(filePath: string): Promise<BookMetadata | null
 /** TXT：取首个非空行当书名，匹配「作者：XXX」 */
 function extractTxtMetadata(filePath: string): BookMetadata | null {
   const buffer = fs.readFileSync(filePath);
-  let head: string;
-  try {
-    head = new TextDecoder('utf-8', { fatal: true }).decode(buffer.slice(0, 4096));
-  } catch {
-    head = new TextDecoder('gbk').decode(buffer.slice(0, 4096));
-  }
+  // 必须走 decodeTextAuto：这里只取文件头部，切片位置很可能落在某个汉字的中间，
+  // 直接 fatal 解码会抛错并整段回落 GBK，把一本 UTF-8 书的书名变成乱码。
+  const head = decodeTextAuto(buffer.subarray(0, 4096));
   const lines = head.split('\n').map(l => l.trim()).filter(Boolean);
   if (lines.length === 0) return null;
 
@@ -367,7 +364,14 @@ export function parseTxtChapters(text: string, options?: TxtTocOptions): TocEntr
  * 读取头部时截断点可能落在多字节字符中间，此时 UTF-8 严格解码会抛错；
  * 需先回退最多 3 字节再判定，否则正常 UTF-8 文件会被误判为 GBK，全文变乱码。
  */
-function decodeTextAuto(buffer: Buffer): string {
+/**
+ * 文本编码自动判定：先按 UTF-8 严格解码，容忍结尾被截断的半个字符（最多 3 字节）；
+ * 仍失败才退回 GBK——中文 txt 基本只有这两种来源。
+ *
+ * 注意：这里只容忍「结尾」，不容忍文件中间的非法字节。整份都要严格通过，
+ * 是为了不让一个坏字节把整本书从 UTF-8 误判成 GBK。
+ */
+export function decodeTextAuto(buffer: Buffer | Uint8Array): string {
   for (let drop = 0; drop <= 3 && drop < buffer.length; drop++) {
     try {
       return new TextDecoder('utf-8', { fatal: true }).decode(buffer.subarray(0, buffer.length - drop));

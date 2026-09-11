@@ -47,3 +47,10 @@ const isInside = (dir: string, filePath: string) => {
  */
 export const isInsideAllowedDir = (filePath: string) =>
   isInside(booksDir(), filePath) || isInside(fontsDir(), filePath) || isInside(resourcesDir(), filePath);
+
+/**
+ * 是否落在书库目录内。
+ * 删除书籍时要回收的是应用自己拷进来的副本与封面，这个判断比 allowed 更窄，
+ * 免得误删字体或随包资源。
+ */
+export const isInsideBooksDir = (filePath: string) => isInside(booksDir(), filePath);

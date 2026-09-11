@@ -213,6 +213,29 @@ describe('跨书籍笔记与标签', () => {
     db.toggleBookLock(b1); // 解锁
   });
 
+  it('updateNote 一次改正文与标签', () => {
+    const target = db.getAllNotes().find((n: any) => n.note === '乙的另一条');
+    db.updateNote(target.id, '改过的正文', '哲学');
+    const after = db.getAllNotes().find((n: any) => n.id === target.id);
+    expect(after.note).toBe('改过的正文');
+    expect(after.tags).toBe('哲学');
+  });
+
+  it('updateNote 允许清空正文（改空白不等于没改）', () => {
+    const target = db.getAllNotes().find((n: any) => n.note === '改过的正文');
+    db.updateNote(target.id, '', '哲学');
+    const after = db.getAllNotes().find((n: any) => n.id === target.id);
+    expect(after.note).toBe('');
+    expect(after.tags).toBe('哲学');
+  });
+
+  it('锁定的书籍拒绝改笔记正文', () => {
+    const target = db.getAllNotes().find((n: any) => n.book_title === '笔记书甲');
+    db.toggleBookLock(b1);
+    expect(() => db.updateNote(target.id, '偷改', '')).toThrow(/已锁定/);
+    db.toggleBookLock(b1);
+  });
+
   it('按书名筛选可用', () => {
     const all = db.getAllNotes();
     expect(all.filter((n: any) => n.book_title === '笔记书乙')).toHaveLength(2);
@@ -446,5 +469,60 @@ describe('崩溃恢复的会话标记', () => {
     db.setSetting('readingSession:7', '100');
     expect(db.findDanglingReadingSession()?.bookId).toBe(7);
     db.clearReadingSessions();
+  });
+});
+
+describe('联网附加能力总开关', () => {
+  const clearSwitch = () => {
+    db.run("DELETE FROM settings WHERE key = 'onlineFeaturesEnabled'");
+  };
+
+  afterAll(() => {
+    clearSwitch();
+  });
+
+  it('只有存成 1 才算开启，其余脏值一律当关闭', () => {
+    db.setSetting('onlineFeaturesEnabled', 'true');
+    expect(db.isOnlineEnabled()).toBe(false);
+    db.setSetting('onlineFeaturesEnabled', '0');
+    expect(db.isOnlineEnabled()).toBe(false);
+    db.setSetting('onlineFeaturesEnabled', '1');
+    expect(db.isOnlineEnabled()).toBe(true);
+  });
+
+  it('关闭时拦截出站操作，并在提示里指明去哪里开', () => {
+    db.setSetting('onlineFeaturesEnabled', '0');
+    expect(() => db.assertOnlineEnabled('在线书源')).toThrow(/在线书源/);
+    expect(() => db.assertOnlineEnabled('在线书源')).toThrow(/设置/);
+  });
+
+  it('开启后放行', () => {
+    db.setSetting('onlineFeaturesEnabled', '1');
+    expect(() => db.assertOnlineEnabled('在线书源')).not.toThrow();
+  });
+
+  it('新库初始化默认关闭', () => {
+    clearSwitch();
+    db.initOnlineSwitch();
+    expect(db.getSetting('onlineFeaturesEnabled')).toBe('0');
+  });
+
+  it('已有书源的老库初始化视为已开启，不让既有配置变哑巴', () => {
+    clearSwitch();
+    db.insertSource({
+      name: '测试源',
+      url: 'https://example.com',
+      search_url: 'https://example.com/s?q={{keyword}}',
+      chapters_url: '',
+      content_url: '',
+    });
+    db.initOnlineSwitch();
+    expect(db.getSetting('onlineFeaturesEnabled')).toBe('1');
+  });
+
+  it('初始化不覆盖用户已做的选择', () => {
+    db.setSetting('onlineFeaturesEnabled', '0');
+    db.initOnlineSwitch();
+    expect(db.getSetting('onlineFeaturesEnabled')).toBe('0');
   });
 });

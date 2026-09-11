@@ -301,7 +301,7 @@ function App() {
       case 'settings':
         return <Settings />;
       case 'stats':
-        return <Statistics />;
+        return <Statistics onOpenBook={handleSelectBook} />;
       case 'compare':
         return <Compare books={books} />;
       case 'pdf':

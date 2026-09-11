@@ -23,7 +23,7 @@ import { contentHash } from '../services/file-hash';
 import { dirSize, clearSnapshots } from '../services/cache';
 import { folderWatcher } from '../services/watch-folder';
 import { loadRenderer } from '../renderer-window';
-import { fontsDir, localFileUrl } from '../services/local-file';
+import { filePathFromUrl, fontsDir, isInsideBooksDir, localFileUrl, resourcesDir } from '../services/local-file';
 import {
   mergePdfs,
   extractPages,
@@ -33,7 +33,7 @@ import {
   addWatermark,
   addPageNumbers,
 } from '../services/pdf-edit';
-import { buildBookListMarkdown, buildBookBackup, backupFileName, localDateStamp } from '../services/book-export';
+import { buildBookListMarkdown, buildBookBackup, buildPlainText, parseBookBackup, backupFileName, localDateStamp } from '../services/book-export';
 
 /**
  * 补全缺失的封面：封面提取是后加的，此前入库的书都没有封面。
@@ -76,6 +76,9 @@ async function fetchChapterContent(
   const cached = db.getCachedChapter(chapter.url) as { content: string } | undefined;
   // 缓存也过一遍当前规则（后加的规则对旧缓存生效）
   if (cached?.content) return applyTextFilters(cached.content, db.getEnabledFilters());
+
+  // 有缓存就不联网，所以闸门放在缓存命中之后
+  db.assertOnlineEnabled('在线阅读');
 
   const source = db.getSourceById(sourceId) as any;
   if (!source) throw new Error('书源不存在');
@@ -219,6 +222,9 @@ async function bookTextLines(book: any): Promise<string[] | null> {
 export function registerIpcHandlers() {
   const db = DatabaseService.getInstance();
 
+  // 联网总开关的初值：新装默认关闭；已有书源或 WebDAV 配置的老库视为已开启
+  db.initOnlineSwitch();
+
   /**
    * 汇总某本书的 TXT 目录解析配置。
    * 本书指定的规则优先；否则取设置页的全局三档配置（默认 / 关键字 / 正则）。
@@ -306,7 +312,26 @@ export function registerIpcHandlers() {
     return db.getBookById(id);
   });
 
+  // 删除书籍：连同书库内的副本与封面一起回收。
+  // 导入时文件是拷进 userData/books 的，只删数据库行会把副本永久留在磁盘上。
+  // 先删文件再删记录——文件被占用时能报错中止，不至于记录没了、文件还在。
   ipcMain.handle('books:delete', (_event, id: number) => {
+    const book = db.getBookById(id) as
+      | { id: number; file_path?: string; cover_path?: string }
+      | undefined;
+    if (!book) return;
+    const targets = [book.file_path, book.cover_path ? filePathFromUrl(book.cover_path) : null];
+    for (const target of targets) {
+      if (!target || !isInsideBooksDir(target)) continue;
+      try {
+        fs.unlinkSync(target);
+      } catch (err) {
+        // 文件本来就不在（书库目录被手工清理过）不算失败，其余情况要让用户知道
+        if ((err as NodeJS.ErrnoException).code !== 'ENOENT') {
+          throw new Error(`无法删除书库文件，已中止：${(err as Error).message}`);
+        }
+      }
+    }
     db.deleteBook(id);
   });
 
@@ -409,6 +434,54 @@ export function registerIpcHandlers() {
     return { filePath, count: books.length };
   });
 
+  // 另存为副本：把书库里的文件原样复制到用户选的位置。
+  // 阅读器本身不改原文件，「想把它拿出去」是这个只读模型下真正缺的一环。
+  ipcMain.handle('books:saveAs', async (event, id: number) => {
+    const book = db.getBookById(id) as any;
+    if (!book) throw new Error('书籍不存在');
+    if (!fs.existsSync(book.file_path)) throw new Error('书库文件已丢失，请重新导入');
+    const win = BrowserWindow.fromWebContents(event.sender) ?? undefined;
+    const { canceled, filePath } = await dialog.showSaveDialog(win!, {
+      title: '另存为',
+      defaultPath: `${sanitizeFileName(book.title)}.${book.file_type}`,
+      filters: [{ name: book.file_type.toUpperCase(), extensions: [book.file_type] }],
+    });
+    if (canceled || !filePath) return null;
+    fs.copyFileSync(book.file_path, filePath);
+    return { filePath };
+  });
+
+  // 导出正文为 TXT：把书里的文字取出来另存，便于引用、校对或喂给别的工具
+  ipcMain.handle('books:exportText', async (event, id: number) => {
+    const book = db.getBookById(id) as any;
+    if (!book) throw new Error('书籍不存在');
+    if (!fs.existsSync(book.file_path)) throw new Error('书库文件已丢失，请重新导入');
+
+    let text = '';
+    if (book.file_type === 'txt') {
+      // 直接读整份原文：TXT 自带章节标题，再插一层反而重复。
+      // 注意不能用 extractBookSections——它为做目录只读前 8MB，会静默截断大文件。
+      text = readPlainTextFile(book.file_path);
+    } else if (book.file_type === 'epub') {
+      text = buildPlainText(await extractBookSections(book.file_path, '.epub', book.toc ?? ''), true);
+    } else if (book.file_type === 'pdf') {
+      text = buildPlainText(await extractBookSections(book.file_path, '.pdf', book.toc ?? ''), false);
+    } else {
+      throw new Error('这种格式没有可导出的文字，漫画请用「另存为副本」');
+    }
+    if (!text.trim()) throw new Error('没有提取到文字，可能是扫描版，可先用阅读页的「识别」取字');
+
+    const win = BrowserWindow.fromWebContents(event.sender) ?? undefined;
+    const { canceled, filePath } = await dialog.showSaveDialog(win!, {
+      title: '导出正文为 TXT',
+      defaultPath: `${sanitizeFileName(book.title)}.txt`,
+      filters: [{ name: '文本文件', extensions: ['txt'] }],
+    });
+    if (canceled || !filePath) return null;
+    fs.writeFileSync(filePath, text, 'utf-8');
+    return { filePath, chars: text.length };
+  });
+
   // 单本书备份：带走阅读痕迹（不含书籍文件）
   ipcMain.handle('books:exportOne', async (event, id: number) => {
     const win = BrowserWindow.fromWebContents(event.sender) ?? undefined;
@@ -429,6 +502,83 @@ export function registerIpcHandlers() {
     fs.writeFileSync(filePath, JSON.stringify(payload, null, 2), 'utf-8');
     const n = payload.bookmarks.length + payload.notes.length + payload.positions.length;
     return { filePath, count: n };
+  });
+
+  // 恢复单书备份：把导出的批注 / 笔记 / 阅读位置写回同名书籍
+  ipcMain.handle('books:importOne', async (event) => {
+    const win = BrowserWindow.fromWebContents(event.sender) ?? undefined;
+    const { canceled, filePaths } = await dialog.showOpenDialog(win!, {
+      title: '选择单书备份文件',
+      filters: [{ name: '备份文件', extensions: ['json'] }],
+      properties: ['openFile'],
+    });
+    if (canceled || filePaths.length === 0) return null;
+    const payload = parseBookBackup(fs.readFileSync(filePaths[0], 'utf-8'));
+
+    const title = payload.book.title!.trim();
+    const target = db.findBookByTitle(title) as { id: number; locked?: number; progress?: number } | undefined;
+    if (!target) {
+      throw new Error(`书架里没有《${title}》。请先把这本书导入书架，再恢复它的批注与笔记。`);
+    }
+    if (target.locked) {
+      throw new Error(`《${title}》已锁定，无法写入。请先在书架右键解锁。`);
+    }
+
+    // 同一位置只保留一条，重复恢复不会堆出多份
+    const seenBookmarks = new Set(
+      (db.getBookmarksByBookId(target.id) as { position: string }[]).map(b => b.position),
+    );
+    const seenNotes = new Set(
+      (db.getNotesByBookId(target.id) as { position: string }[]).map(n => n.position),
+    );
+    let restored = 0;
+    for (const b of payload.bookmarks as any[]) {
+      if (!b?.position || seenBookmarks.has(b.position)) continue;
+      db.insertBookmark({
+        book_id: target.id,
+        position: b.position,
+        text: b.text,
+        color: b.color,
+        style: b.style,
+      });
+      seenBookmarks.add(b.position);
+      restored++;
+    }
+    for (const n of payload.notes as any[]) {
+      if (!n?.position || seenNotes.has(n.position)) continue;
+      db.insertNote({
+        book_id: target.id,
+        position: n.position,
+        selected_text: n.selected_text,
+        note: n.note,
+        tags: n.tags,
+      });
+      seenNotes.add(n.position);
+      restored++;
+    }
+    let positions = 0;
+    for (const p of payload.positions as any[]) {
+      if (!p?.position) continue;
+      // 该方法本身按 (book_id, position) 去重
+      db.addReadingPosition({
+        book_id: target.id,
+        position: p.position,
+        label: p.label ?? '',
+        progress: p.progress ?? 0,
+        source: p.source ?? 'manual',
+      });
+      positions++;
+    }
+
+    // 书架元信息一并还原；进度只取更靠后的那个，避免把已读位置拉回去
+    if (payload.book.category !== undefined) db.setCategory(target.id, payload.book.category ?? '');
+    if (payload.book.status !== undefined) db.setBookStatus(target.id, payload.book.status ?? '');
+    if (payload.book.rating !== undefined) db.setBookRating(target.id, payload.book.rating ?? 0);
+    if (payload.book.favorite !== undefined) db.setFavorite(target.id, !!payload.book.favorite);
+    const backupProgress = payload.book.progress ?? 0;
+    if (backupProgress > (target.progress ?? 0)) db.updateBookProgress(target.id, backupProgress);
+
+    return { bookId: target.id, title, restored, positions };
   });
 
   // 批量场景：显式设置（不做 toggle）
@@ -636,6 +786,7 @@ export function registerIpcHandlers() {
   });
 
   ipcMain.handle('sources:search', async (_event, sourceId: number, keyword: string) => {
+    db.assertOnlineEnabled('在线书源搜索');
     const source = db.getSourceById(sourceId) as any;
     if (!source) throw new Error('书源不存在');
     const crawler = buildCrawlerFromRow(source);
@@ -644,6 +795,7 @@ export function registerIpcHandlers() {
   });
 
   ipcMain.handle('sources:chapters', async (_event, sourceId: number, detailUrl: string) => {
+    db.assertOnlineEnabled('在线书源目录');
     const source = db.getSourceById(sourceId) as any;
     if (!source) throw new Error('书源不存在');
     const crawler = buildCrawlerFromRow(source);
@@ -760,6 +912,8 @@ export function registerIpcHandlers() {
 
   // 检查指定/全部订阅更新，有新章节弹系统通知
   ipcMain.handle('follows:check', async (_event, ids?: number[]) => {
+    // 纯抓取操作，没有离线路径，直接在入口拦
+    db.assertOnlineEnabled('追更检查');
     const all = db.getFollowedBooks() as any[];
     const targets = ids?.length ? all.filter(f => ids.includes(f.id)) : all;
     const updated: { id: string | number; title: string; newCount: number }[] = [];
@@ -824,6 +978,11 @@ export function registerIpcHandlers() {
 
   ipcMain.handle('notes:updateTags', (_event, id: number, tags: string) => {
     db.updateNoteTags(id, tags);
+  });
+
+  // 笔记正文与标签一起改（集中管理面板的编辑弹窗）
+  ipcMain.handle('notes:update', (_event, id: number, content: string, tags: string) => {
+    db.updateNote(id, content, tags);
   });
 
   // 笔记+书签导出 Markdown（不传 bookId 则导出全部书）
@@ -917,6 +1076,7 @@ export function registerIpcHandlers() {
     const vectors = await embedTexts(
       chunks.map(c => c.text),
       getEmbedBaseUrl(),
+      () => db.assertOnlineEnabled('语义检索'),
     );
     db.clearBookVectors(bookId);
     db.saveVectors(
@@ -942,7 +1102,9 @@ export function registerIpcHandlers() {
     const all = db.getAllVectors() as any[];
     const rows = bookId ? all.filter(v => v.book_id === bookId) : all;
     if (rows.length === 0) throw new Error('还没有建立索引，先去语义检索页为书籍建索引');
-    const [qvec] = await embedTexts([query.trim().slice(0, 1000)], getEmbedBaseUrl());
+    const [qvec] = await embedTexts([query.trim().slice(0, 1000)], getEmbedBaseUrl(), () =>
+      db.assertOnlineEnabled('语义检索'),
+    );
     const books = db.getAllBooks() as any[];
     const titleOf = (id: number) => books.find(b => b.id === id)?.title ?? '';
     return rows
@@ -971,6 +1133,7 @@ export function registerIpcHandlers() {
   });
 
   ipcMain.handle('models:download', async (_event, id: string) => {
+    db.assertOnlineEnabled('本地模型下载');
     await ModelService.getInstance().downloadModel(id);
     return true;
   });
@@ -984,6 +1147,31 @@ export function registerIpcHandlers() {
     ModelService.getInstance().stop(id);
   });
 
+  // ============ 本地 OCR ============
+
+  /**
+   * 把 OCR 模型与 wasm 的字节交给渲染进程。
+   * 不返回 URL：打包后这些文件在 asar 里，渲染进程自己取不到；
+   * 主进程的 fs 对 asar 透明，读成字节再走结构化克隆最稳。
+   */
+  ipcMain.handle('ocr:assets', () => {
+    const dir = path.join(resourcesDir(), 'ocr');
+    const read = (name: string) => {
+      const file = path.join(dir, name);
+      if (!fs.existsSync(file)) throw new Error(`缺少文字识别资源：${name}`);
+      return fs.readFileSync(file);
+    };
+    return {
+      detBuffer: read('det.onnx'),
+      recBuffer: read('rec.onnx'),
+      wasmBinary: read(path.join('ort', 'ort-wasm-simd-threaded.wasm')),
+      // onnxruntime 要把这层胶水模块 import 进渲染进程；asar 里拿不到可 import 的 URL，
+      // 所以连文本一起送过去，由渲染进程转成 blob URL 交给它
+      mjsText: read(path.join('ort', 'ort-wasm-simd-threaded.mjs')).toString('utf-8'),
+      keysText: read('keys.txt').toString('utf-8'),
+    };
+  });
+
   // ============ AI 阅读助手 ============
   // 配置来自设置页（aiBaseUrl/aiModel/aiApiKey），支持 Ollama / OpenAI / 兼容接口
 
@@ -991,7 +1179,11 @@ export function registerIpcHandlers() {
     const baseUrl = (db.getSetting('aiBaseUrl') || 'http://localhost:11434').replace(/\/$/, '');
     const model = db.getSetting('aiModel') || 'minicpm5-1b';
     const apiKey = db.getSetting('aiApiKey') || undefined;
-    return new AiService({ provider: 'custom', baseUrl, model, apiKey });
+    // 进程内推理照用（纯本地不出网）；只有回退 HTTP 时才需要过联网闸门
+    return new AiService(
+      { provider: 'custom', baseUrl, model, apiKey },
+      () => db.assertOnlineEnabled('AI 阅读助手'),
+    );
   }
 
   ipcMain.handle('ai:summarize', async (_event, text: string) => {
@@ -1090,6 +1282,7 @@ export function registerIpcHandlers() {
   }
 
   ipcMain.handle('sync:backup', async () => {
+    db.assertOnlineEnabled('WebDAV 同步');
     const { url, user, pass } = getSyncClient();
     const { createClient } = await import('webdav');
     const client = createClient(url, { username: user, password: pass });
@@ -1130,6 +1323,7 @@ export function registerIpcHandlers() {
   });
 
   ipcMain.handle('sync:restore', async () => {
+    db.assertOnlineEnabled('WebDAV 同步');
     const { url, user, pass } = getSyncClient();
     const { createClient } = await import('webdav');
     const client = createClient(url, { username: user, password: pass });

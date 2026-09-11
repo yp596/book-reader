@@ -31,6 +31,8 @@ export interface ReaderPrefs {
   pageGap: number;
   /** 阅读样式预设（EPUB 正文），值取自 reading-styles 的预设名 */
   readingStyle: string;
+  /** 隐藏批注标记（只隐藏，不删除） */
+  hideMarks: boolean;
 }
 
 export const DEFAULT_READER_PREFS: ReaderPrefs = {
@@ -50,6 +52,7 @@ export const DEFAULT_READER_PREFS: ReaderPrefs = {
   paraSpacing: 0,
   pageGap: 0,
   readingStyle: 'none',
+  hideMarks: false,
 };
 
 /** 每本书的偏好存这个 key 下 */
@@ -100,6 +103,7 @@ export function parseBookPrefs(raw: string | null | undefined): Partial<ReaderPr
   if (typeof parsed.readingStyle === 'string' && STYLE_PRESETS.some(p => p.key === parsed.readingStyle)) {
     out.readingStyle = parsed.readingStyle;
   }
+  if (typeof parsed.hideMarks === 'boolean') out.hideMarks = parsed.hideMarks;
   return out;
 }
 

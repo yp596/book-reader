@@ -803,6 +803,9 @@ body {
 
 .recent-item:hover { background: var(--bg-hover); }
 
+/* 可点击的最近阅读项：整行点开继续阅读 */
+.recent-item.clickable { cursor: pointer; }
+
 .recent-info { flex: 1; min-width: 0; }
 .recent-info h3 { font-size: 14px; font-weight: 600; margin-bottom: 3px; }
 .recent-info p { font-size: 12px; color: var(--text-muted); }

@@ -53,13 +53,19 @@ export function cosine(a: number[], b: number[]): number {
 }
 
 /** 批量 embedding（优先进程内，失败回退 llama-server /v1/embeddings，兼容 Ollama） */
-export async function embedTexts(texts: string[], baseUrl: string): Promise<number[][]> {
+export async function embedTexts(
+  texts: string[],
+  baseUrl: string,
+  onlineGuard: () => void = () => {},
+): Promise<number[][]> {
   // 优先进程内推理
   try {
     const { embedViaLocal } = await import('./llama-engine');
     const local = await embedViaLocal(texts);
     if (local) return local;
   } catch { /* 回退 HTTP */ }
+  // 进程内不可用才会发请求，先过联网闸门
+  onlineGuard();
   const out: number[][] = [];
   // 分批防超限
   for (let i = 0; i < texts.length; i += 16) {

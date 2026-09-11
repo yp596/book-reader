@@ -192,6 +192,17 @@
   box-shadow: 0 0 0 3px var(--accent-glow);
 }
 
+/* OCR 识别结果：一行一条，便于逐行对照原图核对 */
+.ocr-line {
+  margin: 0 0 8px;
+  padding: 8px 10px;
+  background: var(--bg-input);
+  border-radius: var(--radius-sm);
+  font-size: 13px;
+  line-height: 1.7;
+  word-break: break-word;
+}
+
 /* 页面缩略图（PDF / 漫画）：两列小图，滚到哪生成哪 */
 .thumb-list {
   display: grid;

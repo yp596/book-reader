@@ -104,7 +104,15 @@ export function BookList({ books, searchQuery, onSelectBook, onShowDetail, onRef
 
   const handleDelete = async () => {
     if (contextMenu) {
-      await window.electronAPI?.deleteBook(contextMenu.book.id);
+      if (!confirm(`确定从书架删除《${contextMenu.book.title}》？\n书签、笔记、阅读记录与书库内的文件副本将一并删除。`)) {
+        closeMenu();
+        return;
+      }
+      try {
+        await window.electronAPI?.deleteBook(contextMenu.book.id);
+      } catch (err) {
+        alert(err instanceof Error ? err.message : '删除失败');
+      }
       closeMenu();
       onRefresh();
     }
@@ -124,7 +132,7 @@ export function BookList({ books, searchQuery, onSelectBook, onShowDetail, onRef
 
   const handleRename = async () => {
     if (contextMenu) {
-      const newName = prompt('输入新书名:', contextMenu.book.title);
+      const newName = prompt('输入新书名（只改书架显示名，不动磁盘文件）:', contextMenu.book.title);
       if (newName && newName.trim() && newName.trim() !== contextMenu.book.title) {
         try {
           await window.electronAPI?.renameBook(contextMenu.book.id, newName.trim());
@@ -237,6 +245,41 @@ ${r.filePath}`);
       const r = await window.electronAPI?.exportOneBook(contextMenu.book.id);
       if (r) alert(`已导出《${contextMenu.book.title}》的批注与笔记（${r.count} 条）
 ${r.filePath}`);
+    } catch (err) {
+      alert(err instanceof Error ? err.message : '导出失败');
+    }
+    closeMenu();
+  };
+
+  const handleImportOne = async () => {
+    try {
+      const r = await window.electronAPI?.importOneBook();
+      if (r) {
+        alert(`已恢复《${r.title}》：批注与笔记 ${r.restored} 条、阅读位置 ${r.positions} 条。`);
+        onRefresh();
+      }
+    } catch (err) {
+      alert(err instanceof Error ? err.message : '恢复失败');
+    }
+    closeMenu();
+  };
+
+  const handleSaveAs = async () => {
+    if (!contextMenu) return;
+    try {
+      const r = await window.electronAPI?.saveBookAs(contextMenu.book.id);
+      if (r) alert(`已另存为：\n${r.filePath}`);
+    } catch (err) {
+      alert(err instanceof Error ? err.message : '另存失败');
+    }
+    closeMenu();
+  };
+
+  const handleExportText = async () => {
+    if (!contextMenu) return;
+    try {
+      const r = await window.electronAPI?.exportBookText(contextMenu.book.id);
+      if (r) alert(`已导出正文 ${r.chars.toLocaleString()} 字：\n${r.filePath}`);
     } catch (err) {
       alert(err instanceof Error ? err.message : '导出失败');
     }
@@ -406,12 +449,14 @@ ${r.filePath}`);
     const lockedCount = selectedIds.size - targets.length;
     const msg = `确定删除所选 ${targets.length} 本书？` +
       (lockedCount > 0 ? `（另有 ${lockedCount} 本因锁定被跳过）` : '') +
-      '\n书签、笔记、阅读记录将一并清除（磁盘文件保留）。';
+      '\n书签、笔记、阅读记录与书库内的文件副本将一并删除。';
     if (!confirm(msg)) return;
     for (const b of targets) {
       try {
         await api.deleteBook(b.id);
-      } catch { /* 忽略 */ }
+      } catch (err) {
+        alert(err instanceof Error ? err.message : '删除失败');
+      }
     }
     exitBatch();
     onRefresh();
@@ -712,10 +757,13 @@ ${r.filePath}`);
           <div className="context-menu-item" onClick={handleSetSeries}>设置系列</div>
           <div className="context-menu-item" onClick={handleSetStatus}>阅读状态</div>
           <div className="context-menu-item" onClick={handleSetRating}>评分</div>
-          <div className="context-menu-item" onClick={handleRename}>重命名</div>
+          <div className="context-menu-item" onClick={handleRename}>重命名书名</div>
           <div className="context-menu-item" onClick={handleRefreshMetadata}>重新识别标题</div>
           <div className="context-menu-item" onClick={handleFileInfo}>属性</div>
           <div className="context-menu-item" onClick={handleExportOne}>导出批注与笔记</div>
+          <div className="context-menu-item" onClick={handleImportOne}>恢复批注与笔记</div>
+          <div className="context-menu-item" onClick={handleSaveAs}>另存为副本</div>
+          <div className="context-menu-item" onClick={handleExportText}>导出正文为 TXT</div>
           <div className="context-menu-item" onClick={handleReveal}>打开所在位置</div>
           <div className="context-menu-item" onClick={handleCopyPath}>复制文件路径</div>
           <div className="context-menu-item" onClick={handleOpenWithSystem}>用默认程序打开</div>

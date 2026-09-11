@@ -12,7 +12,7 @@ interface StatsData {
   totalMinutes: number;
 }
 
-export function Statistics() {
+export function Statistics({ onOpenBook }: { onOpenBook: (book: Book) => void }) {
   /** 每日目标（分钟），0 表示未设目标 */
   const [goalMinutes, setGoalMinutes] = useState(0);
 
@@ -166,7 +166,12 @@ export function Statistics() {
         ) : (
           <div className="recent-list">
             {stats.recentBooks.map(book => (
-              <div key={book.id} className="recent-item">
+              <div
+                key={book.id}
+                className="recent-item clickable"
+                onClick={() => onOpenBook(book)}
+                title="继续阅读"
+              >
                 <div className="recent-info">
                   <h3>{book.title}</h3>
                   <p>{book.author || '未知作者'}</p>

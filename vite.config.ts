@@ -20,6 +20,25 @@ function copyPdfWorker() {
   };
 }
 
+/**
+ * 清掉 onnxruntime 带出来的 wasm 资产。
+ * ort 对若干用不到的后端仍写了 new URL(..., import.meta.url)，Vite 会照着把
+ * .wasm 复制进 dist（jsep 那份 27MB）。本项目的 wasm 二进制由主进程读好、
+ * 经 IPC 送进渲染进程，这些资产永远不会被取用。
+ */
+function dropOrtWasmAssets() {
+  return {
+    name: 'drop-ort-wasm-assets',
+    closeBundle() {
+      const dir = path.resolve(process.cwd(), 'dist/assets');
+      if (!fs.existsSync(dir)) return;
+      for (const file of fs.readdirSync(dir)) {
+        if (/^ort-wasm-.*\.wasm$/.test(file)) fs.unlinkSync(path.join(dir, file));
+      }
+    },
+  };
+}
+
 export default defineConfig({
   plugins: [
     react(),
@@ -52,5 +71,6 @@ export default defineConfig({
       },
     ]),
     renderer(),
+    dropOrtWasmAssets(),
   ],
 });

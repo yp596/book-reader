@@ -105,6 +105,53 @@ export function buildBookBackup(
 }
 
 /**
+ * 解析单书备份文件。
+ * 结构不符或版本不认识时直接抛错——半截数据写进书库比恢复失败更难收拾。
+ */
+export function parseBookBackup(raw: string): BookBackup {
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(raw);
+  } catch {
+    throw new Error('备份文件不是合法的 JSON');
+  }
+  const p = parsed as Partial<BookBackup> | null;
+  if (!p || typeof p !== 'object') throw new Error('备份文件内容为空');
+  if (p.version !== 1) throw new Error(`不支持的备份版本：${String(p.version)}`);
+  if (!p.book || typeof p.book.title !== 'string' || !p.book.title.trim()) {
+    throw new Error('备份文件缺少书籍信息');
+  }
+  const list = (v: unknown) => (Array.isArray(v) ? v : []);
+  return {
+    version: 1,
+    exportedAt: typeof p.exportedAt === 'string' ? p.exportedAt : '',
+    book: p.book,
+    bookmarks: list(p.bookmarks),
+    notes: list(p.notes),
+    positions: list(p.positions),
+  };
+}
+
+/**
+ * 把抽取出来的章节拼成可导出的纯文本。
+ * withHeadings 为 false 时不插章节名——PDF 的 section 是按页切的，
+ * 「第 N 页」当标题插进去只会把正文割碎。
+ */
+export function buildPlainText(
+  sections: { label: string; text: string }[],
+  withHeadings = true,
+): string {
+  const parts: string[] = [];
+  for (const s of sections) {
+    const body = (s.text ?? '').trim();
+    if (!body) continue;
+    const label = withHeadings ? (s.label ?? '').trim() : '';
+    parts.push(label ? `${label}\n\n${body}` : body);
+  }
+  return parts.length === 0 ? '' : `${parts.join('\n\n\n')}\n`;
+}
+
+/**
  * 本地日期戳 YYYY-MM-DD。
  * 不能用 toISOString——那是 UTC，东八区凌晨 0-8 点会算成前一天，
  * 用户看到的文件名日期会比当天早一天。

@@ -27,6 +27,7 @@ describe('parseBookPrefs', () => {
       pagePadding: 72,
       paraSpacing: 1.2,
       pageGap: 40,
+      hideMarks: true,
     };
     expect(parseBookPrefs(JSON.stringify(prefs))).toEqual(prefs);
   });
@@ -38,6 +39,12 @@ describe('parseBookPrefs', () => {
       comicRtl: true,
       vertical: true,
     });
+  });
+
+  it('批注显隐开关须为布尔值，非布尔一律丢弃', () => {
+    expect(parseBookPrefs(JSON.stringify({ hideMarks: 1 }))).toEqual({});
+    expect(parseBookPrefs(JSON.stringify({ hideMarks: true }))).toEqual({ hideMarks: true });
+    expect(parseBookPrefs(JSON.stringify({ hideMarks: false }))).toEqual({ hideMarks: false });
   });
 
   it('空值 / 坏 JSON 返回空对象', () => {

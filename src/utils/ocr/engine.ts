@@ -24,18 +24,24 @@ export interface OcrLine {
 }
 
 export interface OcrAssets {
-  /** 检测模型 URL */
-  detUrl: string;
-  /** 识别模型 URL */
-  recUrl: string;
-  /** 字符表 URL */
-  keysUrl: string;
+  /** 检测模型字节 */
+  detBuffer: ArrayBuffer;
+  /** 识别模型字节 */
+  recBuffer: ArrayBuffer;
+  /** 字符表文本 */
+  keysText: string;
   /**
    * onnxruntime 的 wasm 字节。
-   * 不能只给它目录：bookfile:// 的路径没有目录层级，emscripten 加载器按自身 URL
-   * 拼相对路径必然找不到，所以由调用方取好字节直接喂进去。
+   * 不能只给它目录：模型与 wasm 都随包放在 asar 里，emscripten 的加载器按自身 URL
+   * 拼相对路径取不到，所以由调用方把字节取好直接喂进来。
    */
   wasmBinary: ArrayBuffer;
+  /**
+   * onnxruntime 的胶水模块源码（ort-wasm-simd-threaded.mjs）。
+   * 除了 wasm 字节，它还必须在渲染进程里被 import 一次才能建出后端；
+   * asar 内没有可直接 import 的 URL，所以同样由调用方给源码，这里转成 blob URL。
+   */
+  mjsText: string;
 }
 
 let detSession: ort.InferenceSession | null = null;
@@ -47,24 +53,27 @@ let dict: string[] = [];
 
 /** 单例初始化：模型只加载一次，重复调用直接返回 */
 let initPromise: Promise<void> | null = null;
+/** 胶水模块的 blob URL。import 出去后仍要保持有效，不能让它在使用中被回收 */
+let mjsBlobUrl: string | null = null;
 
 export function initOcr(assets: OcrAssets): Promise<void> {
   if (!initPromise) {
     initPromise = (async () => {
       ort.env.wasm.numThreads = 1; // 多线程 wasm 需要跨源隔离头，file:// 下拿不到
+      if (!mjsBlobUrl) {
+        mjsBlobUrl = URL.createObjectURL(new Blob([assets.mjsText], { type: 'text/javascript' }));
+      }
+      // wasmBinary 省掉 .wasm 的取用，wasmPaths.mjs 指明胶水在哪——
+      // 两个都给齐，onnxruntime 才不会回退到它自己的默认（联网）路径
       (ort.env.wasm as unknown as { wasmBinary: ArrayBuffer }).wasmBinary = assets.wasmBinary;
+      ort.env.wasm.wasmPaths = { mjs: mjsBlobUrl };
 
-      const [detBuf, recBuf, dictText] = await Promise.all([
-        fetch(assets.detUrl).then(r => r.arrayBuffer()),
-        fetch(assets.recUrl).then(r => r.arrayBuffer()),
-        fetch(assets.keysUrl).then(r => r.text()),
-      ]);
-      detSession = await ort.InferenceSession.create(detBuf);
-      recSession = await ort.InferenceSession.create(recBuf);
+      detSession = await ort.InferenceSession.create(assets.detBuffer);
+      recSession = await ort.InferenceSession.create(assets.recBuffer);
       detInputName = detSession.inputNames[0];
       recInputName = recSession.inputNames[0];
       dict = [
-        ...dictText.split('\n').map(s => s.replace(/\r$/, '')).filter(s => s.length > 0),
+        ...assets.keysText.split('\n').map(s => s.replace(/\r$/, '')).filter(s => s.length > 0),
         ' ',
       ];
     })().catch(err => {
@@ -73,6 +82,23 @@ export function initOcr(assets: OcrAssets): Promise<void> {
     });
   }
   return initPromise;
+}
+
+/**
+ * 渲染进程侧的初始化入口：模型字节由主进程读好送过来。
+ * 模型 + wasm 共约 16MB，只在这里读一次；没点过 OCR 的会话不会付出这份开销。
+ */
+export async function initOcrFromMain(): Promise<void> {
+  const api = window.electronAPI;
+  if (!api?.getOcrAssets) throw new Error('当前环境不支持文字识别');
+  const assets = await api.getOcrAssets();
+  return initOcr({
+    detBuffer: assets.detBuffer as unknown as ArrayBuffer,
+    recBuffer: assets.recBuffer as unknown as ArrayBuffer,
+    wasmBinary: assets.wasmBinary as unknown as ArrayBuffer,
+    mjsText: assets.mjsText,
+    keysText: assets.keysText,
+  });
 }
 
 export const isOcrReady = () => detSession !== null && recSession !== null;
