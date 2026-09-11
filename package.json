@@ -15,7 +15,6 @@
     "cheerio": "^1.0.0",
     "epubjs": "^0.3.93",
     "jszip": "^3.10.1",
-    "libarchive.js": "^2.0.2",
     "mammoth": "^1.12.2",
     "marked": "^18.0.12",
     "node-llama-cpp": "^3.20.0",

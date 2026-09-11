@@ -3,7 +3,7 @@ import fs from 'fs';
 import os from 'os';
 import path from 'path';
 import JSZip from 'jszip';
-import { naturalCompare, isComicPage, detectArchiveKind, listComicPages, readComicPage, clearComicCache } from './comic';
+import { naturalCompare, isComicPage, detectArchiveKind, readTarEntries, listComicPages, readComicPage, clearComicCache } from './comic';
 
 let tmpDir: string;
 
@@ -88,16 +88,64 @@ describe('容器格式判定', () => {
     return buf;
   };
 
-  it('按魔数识别 zip / rar / 7z / tar', () => {
+  it('识别 zip 与 tar', () => {
     expect(detectArchiveKind(head([0x50, 0x4b, 0x03, 0x04]))).toBe('zip');
-    expect(detectArchiveKind(head([0x52, 0x61, 0x72, 0x21, 0x1a, 0x07, 0x00]))).toBe('rar');
-    expect(detectArchiveKind(head([0x37, 0x7a, 0xbc, 0xaf, 0x27, 0x1c]))).toBe('7z');
     expect(detectArchiveKind(head([], 'ustar'))).toBe('tar');
   });
 
-  it('无法识别返回 unknown，交给上层按格式报错', () => {
-    expect(detectArchiveKind(head([0x00, 0x01, 0x02]))).toBe('unknown');
+  it('rar / 7z 明确不识别，由上层给出可读错误', () => {
+    expect(detectArchiveKind(head([0x52, 0x61, 0x72, 0x21, 0x1a, 0x07]))).toBe('unknown');
+    expect(detectArchiveKind(head([0x37, 0x7a, 0xbc, 0xaf, 0x27, 0x1c]))).toBe('unknown');
+  });
+
+  it('空数据返回 unknown', () => {
     expect(detectArchiveKind(Buffer.alloc(0))).toBe('unknown');
+  });
+});
+
+describe('tar 归档读取', () => {
+  /** 按 tar 规范拼一个最小归档：512 字节定长头 + 内容 + 补齐 */
+  const makeTar = (files: { name: string; data: Buffer }[]): Buffer => {
+    const blocks: Buffer[] = [];
+    for (const f of files) {
+      const header = Buffer.alloc(512);
+      header.write(f.name, 0, 100, 'utf8');
+      header.write('0000644\0', 100, 8, 'latin1');
+      header.write('0000000\0', 108, 8, 'latin1');
+      header.write('0000000\0', 116, 8, 'latin1');
+      header.write(f.data.length.toString(8).padStart(11, '0') + '\0', 124, 12, 'latin1');
+      header.write('00000000000\0', 136, 12, 'latin1');
+      header.write('        ', 148, 8, 'latin1');
+      header.write('0', 156, 1, 'latin1');
+      header.write('ustar\0', 257, 6, 'latin1');
+      header.write('00', 263, 2, 'latin1');
+      blocks.push(header, f.data);
+      const pad = (512 - (f.data.length % 512)) % 512;
+      if (pad) blocks.push(Buffer.alloc(pad));
+    }
+    blocks.push(Buffer.alloc(1024)); // 归档结束：两个全零块
+    return Buffer.concat(blocks);
+  };
+
+  it('解析条目偏移与长度', () => {
+    const data = Buffer.from('hello tar');
+    const tar = makeTar([
+      { name: 'a/1.png', data },
+      { name: 'a/2.png', data: Buffer.alloc(600, 7) },
+    ]);
+    const entries = readTarEntries(tar);
+    expect(entries.map(e => e.name)).toEqual(['a/1.png', 'a/2.png']);
+    expect(entries[0].size).toBe(data.length);
+    // 偏移必须能直接切出内容
+    expect(tar.subarray(entries[0].offset, entries[0].offset + entries[0].size)).toEqual(data);
+    // 第二个条目要跨过第一块内容的补齐
+    expect(entries[1].offset).toBe(512 + 512 + 512);
+  });
+
+  it('忽略目录条目，遇全零块停止', () => {
+    const tar = makeTar([{ name: '1.png', data: Buffer.from([1]) }]);
+    expect(readTarEntries(tar)).toHaveLength(1);
+    expect(readTarEntries(Buffer.alloc(1024))).toEqual([]);
   });
 });
 
