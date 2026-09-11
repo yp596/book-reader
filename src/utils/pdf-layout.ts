@@ -226,16 +226,58 @@ export function findRepeatingLines(
   return repeated;
 }
 
+/** 重排后的内容块：标题带层级，正文为 0 级 */
+export interface ReflowBlock {
+  kind: 'heading' | 'paragraph';
+  /** 标题层级 1–3；正文为 0 */
+  level: number;
+  text: string;
+}
+
+export interface FontProfile {
+  /** 正文字号（全篇字号中位数） */
+  bodyFont: number;
+  /** 大于正文的字号，从大到小，最多三档 —— 对应标题的 1/2/3 级 */
+  headingSizes: number[];
+}
+
 /**
- * 行 → 段落。
- * 另起一段的判据：上一行以句末标点收尾且明显短于栏宽、行距突然变大、
- * 当前行有缩进、或是标题。
+ * 从整篇文档的文本行估算字号分档。
+ * 必须跨页统计：单页可能只有标题没有正文，分不出档次。
  */
-export function linesToParagraphs(lines: LayoutLine[]): string[] {
+export function analyzeFontSizes(pages: LayoutLine[][]): FontProfile {
+  const sizes = pages.flat().map(l => Math.round(l.fontSize * 10) / 10);
+  if (sizes.length === 0) return { bodyFont: 10, headingSizes: [] };
+  const sorted = [...sizes].sort((a, b) => a - b);
+  const bodyFont = sorted[Math.floor(sorted.length / 2)] || 10;
+  const bigger = [...new Set(sorted.filter(s => s > bodyFont * 1.15))].sort((a, b) => b - a);
+  return { bodyFont, headingSizes: bigger.slice(0, 3) };
+}
+
+/** 字号 → 标题层级；找不到（没给出分档或字号不匹配）时按 2 级兜底 */
+function levelOf(fontSize: number, profile: FontProfile): number {
+  if (profile.headingSizes.length === 0) return 2;
+  let best = 0;
+  let bestDiff = Infinity;
+  profile.headingSizes.forEach((size, i) => {
+    const diff = Math.abs(size - fontSize);
+    if (diff < bestDiff) {
+      bestDiff = diff;
+      best = i;
+    }
+  });
+  return best + 1;
+}
+
+/**
+ * 行 → 内容块。
+ * 另起一段的判据：上一行以句末标点收尾且明显短于栏宽、行距突然变大、
+ * 当前行有缩进、或是标题。标题独占一块，不与相邻正文合并。
+ */
+export function linesToBlocks(lines: LayoutLine[], profile?: FontProfile): ReflowBlock[] {
   if (lines.length === 0) return [];
-  const fontSizes = lines.map(l => l.fontSize).sort((a, b) => a - b);
-  const bodyFont = fontSizes[Math.floor(fontSizes.length / 2)] || 10;
-  // 用行距中位数判断「行距突然变大」；只有一行时用字号兜底
+  const fontProfile = profile ?? analyzeFontSizes([lines]);
+  const bodyFont = fontProfile.bodyFont;
   const gaps = lines.slice(1).map((l, i) => lines[i].y - l.y).filter(g => g > 0);
   // 用行距中位数判断「行距突然变大」。取偏小的那个中位数：
   // 行数少时若取偏大的，单个大行距会把基准抬高，规则就永远不触发
@@ -248,7 +290,7 @@ export function linesToParagraphs(lines: LayoutLine[]): string[] {
   const rights = lines.map(l => l.right).sort((a, b) => a - b);
   const columnRight = rights[Math.floor(rights.length * 0.9)] ?? 0;
 
-  const paragraphs: string[] = [];
+  const blocks: ReflowBlock[] = [];
   let current = '';
   /** 当前段落首行的左边界：缩进要相对它判断。
    *  用全页最左会误判——双栏版面的右栏整体右移，每一行都会被当成有缩进 */
@@ -262,6 +304,10 @@ export function linesToParagraphs(lines: LayoutLine[]): string[] {
     if (isCjk(last) || isCjk(first)) return prev + next;
     return `${prev} ${next}`;
   };
+  const flush = () => {
+    if (current) blocks.push({ kind: 'paragraph', level: 0, text: current });
+    current = '';
+  };
 
   lines.forEach((line, i) => {
     const prev = i > 0 ? lines[i - 1] : null;
@@ -270,23 +316,35 @@ export function linesToParagraphs(lines: LayoutLine[]): string[] {
     const columnBreak = prev !== null && gap < 0;
     const indented = current !== '' && line.x - paraLeft > bodyFont * 1.5;
     const prevShort = prev ? prev.right < columnRight - bodyFont * 1.5 : false;
+    const heading = isLikelyHeading(line, bodyFont);
     const startsNew =
       !prev ||
       columnBreak ||
       gap > medianGap * 1.6 ||
       indented ||
-      isLikelyHeading(line, bodyFont) ||
+      heading ||
       (prevShort && SENTENCE_END.test(prev.text));
     const forced = PARA_START.test(line.text);
 
+    if (heading) {
+      // 标题独占一块，前后都断开
+      flush();
+      blocks.push({ kind: 'heading', level: levelOf(line.fontSize, fontProfile), text: line.text });
+      return;
+    }
     if (startsNew || forced || current === '') {
-      if (current) paragraphs.push(current);
+      flush();
       current = line.text;
       paraLeft = line.x;
     } else {
       current = join(current, line.text);
     }
   });
-  if (current) paragraphs.push(current);
-  return paragraphs;
+  flush();
+  return blocks;
+}
+
+/** 只要段落文本时用这个（标题会作为独立段落返回） */
+export function linesToParagraphs(lines: LayoutLine[]): string[] {
+  return linesToBlocks(lines).map(b => b.text);
 }

@@ -20,10 +20,12 @@ import {
   itemsToLines,
   detectColumnSplit,
   splitColumns,
-  linesToParagraphs,
+  linesToBlocks,
+  analyzeFontSizes,
   findRepeatingLines,
   normalizeForRepeat,
   type LayoutLine,
+  type ReflowBlock,
 } from '../utils/pdf-layout';
 import { getPreset, resolveAction, buildKeyMap, parseShortcutOverrides, DEFAULT_SHORTCUT_PRESET } from '../utils/shortcuts';
 import { STYLE_PRESETS, resolveCustomCss, validateCustomCss, MAX_CSS_LEN } from '../utils/reading-styles';
@@ -185,7 +187,7 @@ export function Reader({ book, onBack, initialTarget, initialPosition }: ReaderP
   const [positions, setPositions] = useState<ReadingPosition[]>([]);
   /** PDF 重排：抽取文字层后按流式排版渲染，适配窗口宽度 */
   const [pdfReflow, setPdfReflow] = useState(false);
-  const [reflowPages, setReflowPages] = useState<string[]>([]);
+  const [reflowPages, setReflowPages] = useState<ReflowBlock[][]>([]);
   const [reflowPage, setReflowPage] = useState(0);
   const [reflowBusy, setReflowBusy] = useState(false);
   /** 排版自定义：背景色 / 文字色 / 页边距 / 段间距 */
@@ -1892,23 +1894,29 @@ ${body}</body></html>`;
         pageSizes.map(s => s.height),
       );
 
-      const pages: string[] = [];
-      let buf = '';
+      // 字号分档要跨页统计：单页可能只有标题没有正文，分不出档次
+      const profile = analyzeFontSizes(perPageLines);
+
+      const pages: ReflowBlock[][] = [];
+      let buf: ReflowBlock[] = [];
+      let bufLength = 0;
       perPageLines.forEach((lines, i) => {
         const kept =
           skip.size > 0 ? lines.filter(l => !skip.has(normalizeForRepeat(l.text))) : lines;
         if (kept.length === 0) return;
         // 分栏要在剔除页眉页脚之后判：残留的页眉会污染空白带的统计
         const split = detectColumnSplit(kept, pageSizes[i].width);
-        const paragraphs = linesToParagraphs(splitColumns(kept, split));
-        if (paragraphs.length === 0) return;
-        buf += paragraphs.join('\n\n') + '\n\n';
-        if (buf.length >= 3000) {
+        const blocks = linesToBlocks(splitColumns(kept, split), profile);
+        if (blocks.length === 0) return;
+        buf.push(...blocks);
+        bufLength += blocks.reduce((n, b) => n + b.text.length, 0);
+        if (bufLength >= 3000) {
           pages.push(buf);
-          buf = '';
+          buf = [];
+          bufLength = 0;
         }
       });
-      if (buf) pages.push(buf);
+      if (buf.length > 0) pages.push(buf);
 
       if (pages.length === 0) {
         alert(
@@ -3152,10 +3160,20 @@ ${body}</body></html>`;
           )}
           {!loading && !error && book.file_type === 'pdf' && pdfReflow && reflowPages.length > 0 && (
             <div
-              className="txt-page"
+              className="txt-page pdf-reflow"
               style={{ fontSize: settings.fontSize, lineHeight: settings.lineHeight }}
             >
-              {reflowPages[reflowPage]}
+              {reflowPages[reflowPage].map((block, i) =>
+                block.kind === 'heading' ? (
+                  <p key={i} className={`reflow-heading reflow-h${block.level}`}>
+                    {block.text}
+                  </p>
+                ) : (
+                  <p key={i} className="reflow-para">
+                    {block.text}
+                  </p>
+                ),
+              )}
             </div>
           )}
 

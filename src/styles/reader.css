@@ -1080,3 +1080,18 @@
   background: var(--bg-input);
   cursor: pointer;
 }
+
+/* PDF 重排视图：正文按段落，标题按识别出的层级区分大小 */
+.pdf-reflow .reflow-para {
+  margin: 0 0 0.85em;
+}
+
+.pdf-reflow .reflow-heading {
+  font-weight: 600;
+  margin: 1.5em 0 0.7em;
+  line-height: 1.4;
+}
+
+.pdf-reflow .reflow-h1 { font-size: 1.5em; }
+.pdf-reflow .reflow-h2 { font-size: 1.28em; }
+.pdf-reflow .reflow-h3 { font-size: 1.12em; }

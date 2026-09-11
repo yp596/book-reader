@@ -1,6 +1,8 @@
 import { describe, it, expect } from 'vitest';
 import {
   itemsToLines,
+  analyzeFontSizes,
+  linesToBlocks,
   normalizeForRepeat,
   findRepeatingLines,
   type LayoutLine,
@@ -196,5 +198,67 @@ describe('页眉页脚剔除', () => {
     );
     const repeated = findRepeatingLines(pages, pages.map(() => HEIGHT));
     expect(repeated.has(normalizeForRepeat('偶发页眉'))).toBe(false);
+  });
+});
+
+describe('标题层级识别', () => {
+  const line = (text: string, y: number, fontSize: number): LayoutLine => ({
+    text, y, x: 50, right: 50 + text.length * fontSize * 0.6, fontSize,
+  });
+
+  it('字号分档：正文取中位数，大于正文的按从大到小排序且最多三档', () => {
+    const pages = [[
+      line('大标题', 780, 24),
+      line('小标题', 740, 16),
+      line('正文一', 700, 12),
+      line('正文二', 684, 12),
+      line('正文三', 668, 12),
+      line('正文四', 652, 12),
+    ]];
+    const profile = analyzeFontSizes(pages);
+    expect(profile.bodyFont).toBe(12);
+    expect(profile.headingSizes).toEqual([24, 16]);
+  });
+
+  it('字号大的行判为标题，层级按字号从大到小编 1、2 级', () => {
+    const lines = [
+      line('第一章 绪论', 780, 24),
+      line('这一章讲的是最基础的内容，', 700, 12),
+      line('需要慢慢读完才行。', 684, 12),
+      line('1.1 背景', 640, 16),
+      line('背景部分的正文内容，', 600, 12),
+      line('也同样需要读完。', 584, 12),
+    ];
+    const profile = analyzeFontSizes([lines]);
+    const blocks = linesToBlocks(lines, profile);
+    const headings = blocks.filter(b => b.kind === 'heading');
+    expect(headings.map(h => [h.text, h.level])).toEqual([
+      ['第一章 绪论', 1],
+      ['1.1 背景', 2],
+    ]);
+    // 标题不能被并进正文段落
+    expect(blocks.find(b => b.kind === 'paragraph')!.text).not.toContain('第一章');
+  });
+
+  it('同一字号的正文行仍合并成段', () => {
+    const lines = [
+      line('这是一段话的开头，', 700, 12),
+      line('接着写下去。', 684, 12),
+    ];
+    const blocks = linesToBlocks(lines);
+    expect(blocks).toHaveLength(1);
+    expect(blocks[0]).toMatchObject({ kind: 'paragraph', level: 0 });
+    expect(blocks[0].text).toBe('这是一段话的开头，接着写下去。');
+  });
+
+  it('无字号分档时标题按 2 级兜底，不抛错', () => {
+    const lines = [line('孤立的大字', 700, 30), line('正文', 660, 12)];
+    const blocks = linesToBlocks(lines, { bodyFont: 12, headingSizes: [] });
+    expect(blocks[0]).toMatchObject({ kind: 'heading', level: 2 });
+  });
+
+  it('空输入返回空数组', () => {
+    expect(linesToBlocks([])).toEqual([]);
+    expect(analyzeFontSizes([])).toEqual({ bodyFont: 10, headingSizes: [] });
   });
 });
