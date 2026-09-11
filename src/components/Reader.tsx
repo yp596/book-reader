@@ -16,7 +16,7 @@ import {
 import { parseMindmap, MindNode } from '../utils/mindmap';
 import { lookupMark, compareByPosition } from '../utils/mark-lookup';
 import { normalizeText } from '../utils/text-normalize';
-import { getPreset, resolveAction, DEFAULT_SHORTCUT_PRESET } from '../utils/shortcuts';
+import { getPreset, resolveAction, buildKeyMap, parseShortcutOverrides, DEFAULT_SHORTCUT_PRESET } from '../utils/shortcuts';
 import { STYLE_PRESETS, resolveCustomCss, validateCustomCss, MAX_CSS_LEN } from '../utils/reading-styles';
 import { MindmapView } from './Mindmap';
 
@@ -736,7 +736,12 @@ export function Reader({ book, onBack, initialTarget, initialPosition }: ReaderP
       const globalStyle = STYLE_PRESETS.some(p => p.key === styleKey) ? String(styleKey) : 'none';
       customCssRef.current = customCss ?? '';
       setCustomCssDraft(customCssRef.current);
-      if (presetKey) presetRef.current = getPreset(presetKey);
+      // 自定义键位叠在预设上：被抢走的键要真的让位，否则会出现「改了没生效」
+      const preset = getPreset(presetKey ?? DEFAULT_SHORTCUT_PRESET);
+      presetRef.current = {
+        ...preset,
+        map: buildKeyMap(preset, parseShortcutOverrides(await api.getSetting('shortcutCustom'))),
+      };
       const rate = Number(tts);
       if (!Number.isNaN(rate) && rate >= 0.5 && rate <= 2) setTtsRate(rate);
       // 自动护眼配置（纯本地时钟判定）

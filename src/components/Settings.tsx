@@ -1,9 +1,22 @@
-import { useState, useEffect } from 'react';
+import { useState, useEffect, type KeyboardEvent as ReactKeyboardEvent } from 'react';
 import { formatFileSize } from '../utils/text';
 import { THEMES } from '../utils/reader-options';
 import { DEFAULT_AUTO_THEME, isDaytime } from '../utils/auto-theme';
 
-import { SHORTCUT_PRESETS, getPreset, DEFAULT_SHORTCUT_PRESET, ACTION_LABELS, keyLabel, type ShortcutAction } from '../utils/shortcuts';
+import {
+  SHORTCUT_PRESETS,
+  getPreset,
+  DEFAULT_SHORTCUT_PRESET,
+  ACTION_LABELS,
+  keyLabel,
+  normalizeKey,
+  buildKeyMap,
+  findKeyConflict,
+  keyForAction,
+  parseShortcutOverrides,
+  type ShortcutAction,
+  type ShortcutOverrides,
+} from '../utils/shortcuts';
 
 
 /** 0-23 整点选项 */
@@ -92,6 +105,12 @@ export function Settings() {
   const [saved, setSaved] = useState(false);
   const [syncing, setSyncing] = useState(false);
   const [lastSync, setLastSync] = useState('');
+  /** 自定义快捷键：动作 → 归一化按键（空串=显式不绑定），与预设合成后生效 */
+  const [shortcutCustom, setShortcutCustom] = useState<ShortcutOverrides>({});
+  /** 正在录制新键的动作 */
+  const [recording, setRecording] = useState<ShortcutAction | null>(null);
+  /** 改绑提示（例如「这个键原本属于谁」） */
+  const [keyNotice, setKeyNotice] = useState('');
 
   useEffect(() => {
     loadSettings();
@@ -132,6 +151,7 @@ export function Settings() {
       }
     }
     setSettings(loaded);
+    setShortcutCustom(parseShortcutOverrides(await api.getSetting('shortcutCustom')));
   };
 
   const handleSave = async (silent = false) => {
@@ -148,6 +168,52 @@ export function Settings() {
 
   const handleChange = (key: keyof SettingsData, value: any) => {
     setSettings(s => ({ ...s, [key]: value }));
+  };
+
+  // ---------- 快捷键自定义 ----------
+
+  /** 改完立即落盘：录制手感上不该还要记得点底部的保存 */
+  const persistShortcutCustom = (next: ShortcutOverrides) => {
+    setShortcutCustom(next);
+    window.electronAPI?.setSetting('shortcutCustom', JSON.stringify(next)).catch(() => {});
+  };
+
+  /**
+   * 录制新键。撞键时不静默覆盖，而是把该键从原动作身上摘掉并显式告知：
+   * 原动作变成「未设置」，用户看得见，比留下一个不生效的假键位强。
+   */
+  const captureShortcutKey = (e: ReactKeyboardEvent, action: ShortcutAction) => {
+    if (recording !== action) return;
+    e.preventDefault();
+    e.stopPropagation();
+    if (e.key === 'Escape') {
+      setRecording(null);
+      setKeyNotice('');
+      return;
+    }
+    const key = normalizeKey(e);
+    const preset = getPreset(settings.shortcutPreset);
+    const next: ShortcutOverrides = { ...shortcutCustom };
+    const owner = findKeyConflict(buildKeyMap(preset, shortcutCustom), key, action);
+    if (owner) {
+      next[owner] = '';
+      setKeyNotice(
+        `「${keyLabel(key)}」原本属于「${ACTION_LABELS[owner]}」，已改绑到「${ACTION_LABELS[action]}」`,
+      );
+    } else {
+      setKeyNotice('');
+    }
+    next[action] = key;
+    persistShortcutCustom(next);
+    setRecording(null);
+  };
+
+  /** 单个动作恢复预设键位 */
+  const resetShortcut = (action: ShortcutAction) => {
+    const next = { ...shortcutCustom };
+    delete next[action];
+    setKeyNotice('');
+    persistShortcutCustom(next);
   };
 
   // ---------- 本地字体 ----------
@@ -818,14 +884,39 @@ export function Settings() {
           ))}
         </div>
         <div className="keymap-list">
-          {Object.entries(getPreset(settings.shortcutPreset).map).map(([key, action]) => (
-            <div key={key} className="keymap-row">
-              <kbd>{keyLabel(key)}</kbd>
-              <span>{ACTION_LABELS[action as ShortcutAction]}</span>
-            </div>
-          ))}
+          {(Object.keys(ACTION_LABELS) as ShortcutAction[]).map(action => {
+            const current = keyForAction(getPreset(settings.shortcutPreset), shortcutCustom, action);
+            const isCustom = shortcutCustom[action] !== undefined;
+            return (
+              <div key={action} className="keymap-row">
+                <kbd
+                  tabIndex={0}
+                  title="点一下，再按新键；Esc 取消"
+                  onClick={() => {
+                    setRecording(action);
+                    setKeyNotice('');
+                  }}
+                  onKeyDown={e => captureShortcutKey(e, action)}
+                >
+                  {recording === action ? '按下新键…' : current ? keyLabel(current) : '未设置'}
+                </kbd>
+                <span>{ACTION_LABELS[action]}</span>
+                {isCustom && (
+                  <button className="link-btn" onClick={() => resetShortcut(action)}>
+                    恢复预设
+                  </button>
+                )}
+              </div>
+            );
+          })}
         </div>
+        {keyNotice && (
+          <p className="section-desc" style={{ marginTop: 8, color: 'var(--accent)' }}>
+            {keyNotice}
+          </p>
+        )}
         <p className="section-desc" style={{ marginTop: 12, marginBottom: 0 }}>
+          点键位后按下新键即可改绑，Esc 取消；抢了别的动作的键时会明确告知。
           固定键位：Esc 收起面板 / 返回书架；Alt+← → 前进后退。
         </p>
       </section>

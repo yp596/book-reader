@@ -100,7 +100,7 @@ export function HelpAbout() {
           <section className="settings-section">
             <h2>快捷键速查</h2>
             <p className="section-desc">
-              可在设置页切换三套方案；以下为各方案的全部键位。
+              可在设置页切换三套方案并逐项改键；以下为各方案的默认键位。
             </p>
             {SHORTCUT_PRESETS.map(p => (
               <div key={p.key} className="help-preset">

@@ -125,3 +125,76 @@ export function normalizeKey(e: KeyLike): string {
 export function resolveAction(preset: ShortcutPreset, e: KeyLike): ShortcutAction | null {
   return preset.map[normalizeKey(e)] ?? null;
 }
+
+// ---------- 自定义键位 ----------
+
+/**
+ * 动作 → 归一化按键，只存动过的动作。
+ * 值为空串表示「显式不绑定」——被别的动作抢走键之后就是这个状态，
+ * 否则那条动作会显示成预设里已经不生效的旧键。
+ */
+export type ShortcutOverrides = Partial<Record<ShortcutAction, string>>;
+
+const ALL_ACTIONS = Object.keys(ACTION_LABELS) as ShortcutAction[];
+
+/**
+ * 把自定义键位叠到预设上。
+ * 动过的动作会先让出它在预设里的全部旧键，再挂上自定义键——
+ * 不这样做会出现「旧键还生效」，看着像改了没生效。
+ */
+export function buildKeyMap(
+  preset: ShortcutPreset,
+  overrides: ShortcutOverrides = {},
+): Record<string, ShortcutAction> {
+  const touched = new Set(Object.keys(overrides) as ShortcutAction[]);
+  const map: Record<string, ShortcutAction> = {};
+  for (const [key, action] of Object.entries(preset.map)) {
+    if (!touched.has(action)) map[key] = action;
+  }
+  for (const action of touched) {
+    const key = overrides[action];
+    if (key) map[key] = action;
+  }
+  return map;
+}
+
+/** 该键当前被哪个动作占用（排除自己）；没冲突返回 null */
+export function findKeyConflict(
+  map: Record<string, ShortcutAction>,
+  key: string,
+  self: ShortcutAction,
+): ShortcutAction | null {
+  const owner = map[key];
+  return owner && owner !== self ? owner : null;
+}
+
+/** 解析存下来的自定义键位；坏数据一律丢弃，不让脏值把键位搞乱 */
+export function parseShortcutOverrides(raw: string | null | undefined): ShortcutOverrides {
+  if (!raw) return {};
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(raw);
+  } catch {
+    return {};
+  }
+  if (!parsed || typeof parsed !== 'object') return {};
+  const out: ShortcutOverrides = {};
+  for (const [action, key] of Object.entries(parsed as Record<string, unknown>)) {
+    if (ALL_ACTIONS.includes(action as ShortcutAction) && typeof key === 'string') {
+      out[action as ShortcutAction] = key;
+    }
+  }
+  return out;
+}
+
+/** 某个动作当前生效的键：自定义优先，其次预设里的第一个；没有则 null */
+export function keyForAction(
+  preset: ShortcutPreset,
+  overrides: ShortcutOverrides,
+  action: ShortcutAction,
+): string | null {
+  const custom = overrides[action];
+  if (custom !== undefined) return custom || null;
+  const hit = Object.entries(preset.map).find(([, a]) => a === action);
+  return hit ? hit[0] : null;
+}

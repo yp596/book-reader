@@ -7,6 +7,10 @@ import {
   ACTION_LABELS,
   keyLabel,
   resolveAction,
+  buildKeyMap,
+  findKeyConflict,
+  parseShortcutOverrides,
+  keyForAction,
 } from './shortcuts';
 
 describe('normalizeKey', () => {
@@ -143,5 +147,62 @@ describe('ACTION_LABELS / keyLabel', () => {
     expect(keyLabel('h')).toBe('H');
     expect(keyLabel('F11')).toBe('F11');
     expect(keyLabel('/')).toBe('/');
+  });
+});
+
+describe('自定义键位', () => {
+  it('自定义键生效，该动作在预设里的旧键让位', () => {
+    const map = buildKeyMap(getPreset('reading'), { next: 'j' });
+    expect(map['j']).toBe('next');
+    // 一个动作在预设里可能绑了多个键（→ / PgDn / 空格），换键后都要让位
+    expect(map['ArrowRight']).toBeUndefined();
+    expect(map['PageDown']).toBeUndefined();
+    expect(map[' ']).toBeUndefined();
+    expect(map['ArrowLeft']).toBe('prev');
+  });
+
+  it('未被改动的动作不受影响', () => {
+    const map = buildKeyMap(getPreset('annotate'), { highlight: 'm' });
+    expect(map['m']).toBe('highlight');
+    expect(map['h']).toBeUndefined();
+    expect(map['n']).toBe('addNote');
+    expect(map['ArrowRight']).toBe('next');
+  });
+
+  it('空串表示显式不绑定：预设里的旧键也不再生效', () => {
+    const map = buildKeyMap(getPreset('reading'), { next: '' });
+    expect(map['ArrowRight']).toBeUndefined();
+    expect(map['PageDown']).toBeUndefined();
+    expect(map['ArrowLeft']).toBe('prev');
+  });
+
+  it('冲突检测：挑出占用该键的动作，自己不算冲突', () => {
+    const map = buildKeyMap(getPreset('reading'), {});
+    expect(findKeyConflict(map, 'ArrowLeft', 'next')).toBe('prev');
+    expect(findKeyConflict(map, 'ArrowLeft', 'prev')).toBeNull();
+    expect(findKeyConflict(map, 'j', 'next')).toBeNull();
+  });
+
+  it('抢走别人的键之后，那一方在映射里确实不再拥有它', () => {
+    // 把 prev 的键给 next：prev 显式不绑定，避免出现两个动作都认这个键
+    const map = buildKeyMap(getPreset('reading'), { prev: '', next: 'ArrowLeft' });
+    expect(map['ArrowLeft']).toBe('next');
+    expect(Object.values(map).filter(a => a === 'prev')).toHaveLength(0);
+  });
+
+  it('取动作当前键：自定义优先，空串显示为未绑定', () => {
+    const preset = getPreset('layout');
+    expect(keyForAction(preset, {}, 'fontUp')).toBe('+');
+    expect(keyForAction(preset, { fontUp: '=' }, 'fontUp')).toBe('=');
+    expect(keyForAction(preset, { fontUp: '' }, 'fontUp')).toBeNull();
+    expect(keyForAction(getPreset('reading'), {}, 'openToc')).toBeNull();
+  });
+
+  it('解析坏数据一律丢弃', () => {
+    expect(parseShortcutOverrides('{ bad')).toEqual({});
+    expect(parseShortcutOverrides(null)).toEqual({});
+    expect(parseShortcutOverrides('123')).toEqual({});
+    expect(parseShortcutOverrides(JSON.stringify({ 不存在的动作: 'x', next: 5 }))).toEqual({});
+    expect(parseShortcutOverrides(JSON.stringify({ next: 'j', prev: '' }))).toEqual({ next: 'j', prev: '' });
   });
 });
