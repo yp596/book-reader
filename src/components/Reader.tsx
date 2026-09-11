@@ -28,6 +28,9 @@ const LOCAL_FONT_PREFIX = 'local:';
 /** 阅读样式注入用的 style 节点 id：同一章节反复注入时复用同一个节点 */
 const STYLE_NODE_ID = 'reader-style-preset';
 
+/** 缩略图目标宽度（px）：和面板两列布局对齐，漫画原图几 MB 也先缩到这里 */
+const THUMB_WIDTH = 96;
+
 /** 字体 key → CSS font-family：本地导入的字体直接用其 family，预设走原有映射 */
 const stackOfFontKey = (key: string) =>
   key.startsWith(LOCAL_FONT_PREFIX) ? `'${key.slice(LOCAL_FONT_PREFIX.length)}'` : fontStackOf(key);
@@ -41,7 +44,7 @@ interface ReaderProps {
   initialPosition?: string | null;
 }
 
-type Panel = 'toc' | 'notes' | 'marks' | 'search' | 'ai' | 'positions' | 'typo' | null;
+type Panel = 'toc' | 'notes' | 'marks' | 'search' | 'ai' | 'positions' | 'typo' | 'thumbs' | null;
 
 interface SelPopup {
   x: number;
@@ -127,6 +130,9 @@ export function Reader({ book, onBack, initialTarget, initialPosition }: ReaderP
   const [txtPages, setTxtPages] = useState<string[]>([]);
   const [pageIndex, setPageIndex] = useState(0);
   const [totalPages, setTotalPages] = useState(0);
+  /** 缩略图按页缓存小图；只给滚到可见的页生成，长文档不能全量渲染 */
+  const [thumbs, setThumbs] = useState<Record<number, string>>({});
+  const thumbPendingRef = useRef<Set<number>>(new Set());
   /** TXT 目录（含段落行号），阅读器内可直接跳转与增补章节 */
   const [txtToc, setTxtToc] = useState<TocEntry[]>([]);
   /** 每页起始段落行号，用于目录行号 ↔ 页码互转 */
@@ -2231,6 +2237,89 @@ ${body}</body></html>`;
     settings.theme === 'light' ? 'reader-light' : settings.theme === 'sepia' ? 'reader-sepia' : '';
   /** 支持文本类操作（朗读/检索/笔记/双栏/脑图）的格式；漫画与 PDF 不适用 */
   const supportsTextOps = book.file_type === 'epub' || book.file_type === 'txt';
+  /** 缩略图只对「一页就是一张图」的格式有意义；TXT/EPUB 用目录跳转更省 */
+  const supportsThumbs = book.file_type === 'pdf' || book.file_type === 'cbz';
+  const thumbCount = book.file_type === 'cbz' ? comicPages.length : totalPages;
+  // 换书清空缩略图缓存，别把上一本的图留着占内存
+  useEffect(() => {
+    setThumbs({});
+    thumbPendingRef.current.clear();
+  }, [book.id]);
+
+  /** 把整页图缩成缩略图：漫画单页可能几 MB，原样留在列表里滚动会把内存吃光 */
+  const downscaleToThumb = (src: string) =>
+    new Promise<string>((resolve, reject) => {
+      const img = new Image();
+      img.onload = () => {
+        const scale = Math.min(1, THUMB_WIDTH / Math.max(1, img.width));
+        const canvas = document.createElement('canvas');
+        canvas.width = Math.max(1, Math.round(img.width * scale));
+        canvas.height = Math.max(1, Math.round(img.height * scale));
+        const ctx = canvas.getContext('2d');
+        if (!ctx) {
+          reject(new Error('canvas 不可用'));
+          return;
+        }
+        ctx.drawImage(img, 0, 0, canvas.width, canvas.height);
+        resolve(canvas.toDataURL('image/jpeg', 0.7));
+      };
+      img.onerror = () => reject(new Error('图片解码失败'));
+      img.src = src;
+    });
+
+  /** 生成某一页的缩略图；已有缓存或正在生成的直接跳过 */
+  const ensureThumb = async (idx: number) => {
+    if (thumbs[idx] || thumbPendingRef.current.has(idx)) return;
+    thumbPendingRef.current.add(idx);
+    try {
+      let url: string | null = null;
+      if (book.file_type === 'cbz') {
+        const name = comicPages[idx];
+        const page = name ? await window.electronAPI?.getComicPage(book.id, name) : null;
+        if (page) url = await downscaleToThumb(`data:${page.mime};base64,${page.data}`);
+      } else {
+        const doc = pdfDocRef.current;
+        if (doc) {
+          const page = await doc.getPage(idx + 1);
+          const base = page.getViewport({ scale: 1 });
+          const viewport = page.getViewport({ scale: THUMB_WIDTH / Math.max(1, base.width) });
+          const canvas = document.createElement('canvas');
+          canvas.width = Math.max(1, Math.ceil(viewport.width));
+          canvas.height = Math.max(1, Math.ceil(viewport.height));
+          const ctx = canvas.getContext('2d');
+          if (ctx) {
+            await page.render({ canvasContext: ctx, viewport }).promise;
+            url = canvas.toDataURL('image/jpeg', 0.7);
+          }
+        }
+      }
+      if (url) setThumbs(prev => ({ ...prev, [idx]: url as string }));
+    } catch {
+      /* 单页失败就留空格子，不影响其它页 */
+    } finally {
+      thumbPendingRef.current.delete(idx);
+    }
+  };
+
+  // 滚到可见才生成：500 页的 PDF 全量渲染要几十秒，用户多半只看附近几页
+  useEffect(() => {
+    if (panel !== 'thumbs' || !supportsThumbs) return;
+    const observer = new IntersectionObserver(
+      entries => {
+        for (const entry of entries) {
+          if (!entry.isIntersecting) continue;
+          const idx = Number((entry.target as HTMLElement).dataset.thumb);
+          if (Number.isInteger(idx)) void ensureThumb(idx);
+          observer.unobserve(entry.target);
+        }
+      },
+      { rootMargin: '160px' },
+    );
+    document.querySelectorAll<HTMLElement>('[data-thumb]').forEach(el => observer.observe(el));
+    // 打开面板时把当前页那格滚进视野，长文档不用自己找
+    document.querySelector('.thumb-item.active')?.scrollIntoView({ block: 'center' });
+    return () => observer.disconnect();
+  }, [panel, supportsThumbs, book.id, thumbCount]);
 
   // 漫画翻页：按需拉取当前页（双页合并时连下一页一起），翻页后丢弃旧图，避免整包驻留内存
   useEffect(() => {
@@ -2331,6 +2420,15 @@ ${body}</body></html>`;
           )}
           <button onClick={handlePrint} title="打印 / 打印预览">🖨</button>
           <button onClick={handleExportPageImage} title="导出当前页为图片（PNG）">🖼</button>
+          {supportsThumbs && (
+            <button
+              onClick={() => togglePanel('thumbs')}
+              className={panel === 'thumbs' ? 'active' : ''}
+              title="页面缩略图"
+            >
+              🔳
+            </button>
+          )}
           {(book.file_type === 'epub' || book.file_type === 'txt') && (
             <button onClick={() => togglePanel('toc')} className={panel === 'toc' ? 'active' : ''}>📑 目录</button>
           )}
@@ -2561,6 +2659,33 @@ ${body}</body></html>`;
                 {ch.label}
               </div>
             ))}
+          </div>
+        )}
+
+        {panel === 'thumbs' && supportsThumbs && (
+          <div className="toc-panel">
+            <h3>页面缩略图</h3>
+            <div className="thumb-list">
+              {Array.from({ length: thumbCount }, (_, i) => (
+                <button
+                  key={i}
+                  data-thumb={i}
+                  className={`thumb-item${i === pageIndex ? ' active' : ''}`}
+                  onClick={() => jumpToPage(String(i + 1))}
+                  title={`第 ${i + 1} 页`}
+                >
+                  {thumbs[i] ? (
+                    <img src={thumbs[i]} alt={`第 ${i + 1} 页`} />
+                  ) : (
+                    <span className="thumb-ph">{i + 1}</span>
+                  )}
+                  <span className="thumb-no">{i + 1}</span>
+                </button>
+              ))}
+            </div>
+            <p className="section-desc" style={{ marginBottom: 0 }}>
+              缩略图滚动到哪生成到哪，点一下即可跳页。
+            </p>
           </div>
         )}
 
