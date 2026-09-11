@@ -130,9 +130,48 @@ function App() {
     const t = target ?? (book as Book & { _tocTarget?: TocEntry })._tocTarget ?? null;
     const { _tocTarget, ...clean } = book as Book & { _tocTarget?: TocEntry };
     setReaderTarget(t);
-    setCurrentBook(clean);
+    openTab(clean);
+  };
+
+  /**
+   * 同窗口多标签：打开过的书留在标签条里，切回来还停在原位。
+   * 位置不会丢——Reader 卸载时会 flush 当前位置，挂载时按书读回。
+   */
+  const [tabs, setTabs] = useState<Book[]>([]);
+
+  /** 把书加进标签（已在标签里就只切过去），并设为当前标签 */
+  const openTab = (book: Book) => {
+    setTabs(prev => (prev.some(b => b.id === book.id) ? prev : [...prev, book]));
+    setCurrentBook(book);
     setDetailBook(null);
     setView('reader');
+  };
+
+  /** 切标签：清掉上一本书带过来的跳转目标，位置由 Reader 自己按书恢复 */
+  const activateTab = (book: Book) => {
+    if (book.id === currentBook?.id) return;
+    setReaderTarget(null);
+    setReaderPosition(null);
+    setCurrentBook(book);
+    setDetailBook(null);
+    setView('reader');
+  };
+
+  /** 关标签：关的是当前标签就接上右边那个（没有则左边），全关了就退回书架 */
+  const closeTab = (id: number) => {
+    const idx = tabs.findIndex(b => b.id === id);
+    const next = tabs.filter(b => b.id !== id);
+    setTabs(next);
+    if (currentBook?.id !== id) return;
+    setReaderTarget(null);
+    setReaderPosition(null);
+    const fallback = next[Math.min(idx, next.length - 1)] ?? null;
+    if (fallback) {
+      setCurrentBook(fallback);
+    } else {
+      setCurrentBook(null);
+      setView('library');
+    }
   };
 
   /** 笔记 → 原文：打开对应书籍并定位到批注位置 */
@@ -143,9 +182,7 @@ function App() {
     if (!b) return;
     setReaderTarget(null);
     setReaderPosition(position);
-    setCurrentBook(b);
-    setDetailBook(null);
-    setView('reader');
+    openTab(b);
   };
 
   const handleShowDetail = (book: Book) => {
@@ -192,15 +229,47 @@ function App() {
             onRead={handleSelectBook}
           />
         ) : null;
-      case 'reader':
-        return currentBook ? (
+      case 'reader': {
+        if (!currentBook) return null;
+        const reader = (
           <Reader
+            key={currentBook.id}
             book={currentBook}
             initialTarget={readerTarget}
             initialPosition={readerPosition}
             onBack={handleBack}
           />
-        ) : null;
+        );
+        // 只有一个标签时不套外壳，布局与原来完全一致
+        if (tabs.length <= 1) return reader;
+        return (
+          <div className="reader-tabs-wrap">
+            <div className="reader-tabs">
+              {tabs.map(b => (
+                <div
+                  key={b.id}
+                  className={`reader-tab${b.id === currentBook.id ? ' active' : ''}`}
+                  onClick={() => activateTab(b)}
+                  title={b.title}
+                >
+                  <span className="reader-tab-title">{b.title}</span>
+                  <button
+                    className="reader-tab-close"
+                    title="关闭标签"
+                    onClick={e => {
+                      e.stopPropagation();
+                      closeTab(b.id);
+                    }}
+                  >
+                    ×
+                  </button>
+                </div>
+              ))}
+            </div>
+            {reader}
+          </div>
+        );
+      }
       case 'sources':
         return <SourceManager />;
       case 'rag':
