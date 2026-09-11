@@ -377,3 +377,49 @@ describe('系列分组', () => {
     db.setBookLock(a, false);
   });
 });
+
+describe('导入冲突处理', () => {
+  it('按书名查重忽略大小写与首尾空白', () => {
+    const id = db.insertBook({ title: '  Night Flight  ', file_path: '/tmp/nf.epub', file_type: 'epub' });
+    expect(db.findBookByTitle('night flight')?.id).toBe(id);
+    expect(db.findBookByTitle('  Night Flight ')?.id).toBe(id);
+    expect(db.findBookByTitle('查无此书')).toBeUndefined();
+  });
+
+  it('空书名不参与查重，避免一堆无名书互相判重', () => {
+    expect(db.findBookByTitle('')).toBeUndefined();
+    expect(db.findBookByTitle('   ')).toBeUndefined();
+  });
+
+  it('替换只改文件字段，id 不变——书签笔记挂在 id 上不能丢', () => {
+    const id = db.insertBook({ title: '旧版', file_path: '/tmp/old.epub', file_type: 'epub', hash: 'h1' });
+    db.insertBookmark({ book_id: id, position: 'cfi-1', text: '书签' });
+    db.setBookLocations(id, JSON.stringify(['cfi-a']));
+
+    db.replaceBookFile(id, {
+      title: '新版',
+      author: '作者',
+      file_path: '/tmp/new.pdf',
+      file_type: 'pdf',
+      hash: 'h2',
+    });
+
+    const after = db.getBookById(id);
+    expect(after.title).toBe('新版');
+    expect(after.author).toBe('作者');
+    expect(after.file_path).toBe('/tmp/new.pdf');
+    expect(after.file_type).toBe('pdf');
+    expect(after.hash).toBe('h2');
+    expect(db.getBookmarksByBookId(id)).toHaveLength(1);
+    // 换了文件，旧的位置索引必须作废，否则 CFI 会指向不存在的位置
+    expect(after.locations ?? null).toBeNull();
+  });
+
+  it('锁定的书籍拒绝替换', () => {
+    const id = db.insertBook({ title: '锁定替换', file_path: '/tmp/l.epub', file_type: 'epub' });
+    db.setBookLock(id, true);
+    expect(() =>
+      db.replaceBookFile(id, { title: 't', file_path: '/tmp/n.epub', file_type: 'epub', hash: 'h' }),
+    ).toThrow(/已锁定/);
+  });
+});

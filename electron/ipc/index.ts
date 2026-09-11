@@ -97,22 +97,43 @@ async function fetchChapterContent(
   return content;
 }
 
+/** 导入冲突处理策略：skip=跳过 / keep=各留一本 / replace=覆盖已有记录 */
+type ImportConflictPolicy = 'skip' | 'keep' | 'replace';
+
 /** 单文件导入复用逻辑（对话框/拖拽共用） */
-async function importOneFile(db: DatabaseService, filePath: string) {
+async function importOneFile(db: DatabaseService, filePath: string, policyOverride?: ImportConflictPolicy) {
   const ext = path.extname(filePath).toLowerCase();
   if (!['.epub', '.txt', '.pdf', '.docx', '.cbz', '.cbt', '.md'].includes(ext)) {
     throw new Error(`不支持的格式：${ext || '(无后缀)'}`);
   }
   const fileName = path.basename(filePath, path.extname(filePath));
-
-  // 内容查重：同一本书重复导入会污染书架，这里按指纹直接跳过
   const hash = contentHash(filePath);
-  const dup = db.findBookByHash(hash) as { title?: string } | undefined;
-  if (dup) throw new Error(`与《${dup.title ?? '已有书籍'}》内容相同，已跳过`);
-
   const booksDir = path.join(app.getPath('userData'), 'books');
   if (!fs.existsSync(booksDir)) {
     fs.mkdirSync(booksDir, { recursive: true });
+  }
+
+  // 元数据先取：冲突检测要用书名，落盘也得用同一个标题
+  const meta = await extractMetadata(filePath, ext);
+  const title = meta?.title ?? fileName;
+  // 冲突有两种：指纹相同=内容一模一样；同名=同一本书的另一个版本或格式
+  const conflict = (db.findBookByHash(hash) ?? db.findBookByTitle(title)) as
+    | { id: number; title?: string }
+    | undefined;
+  const policy: ImportConflictPolicy =
+    policyOverride ??
+    (() => {
+      // 设置里读到脏值就按最保守的「跳过」处理
+      const stored = db.getSetting('importConflictPolicy');
+      return stored === 'keep' || stored === 'replace' ? stored : 'skip';
+    })();
+  if (conflict && policy === 'skip') {
+    // 默认策略沿用旧的「直接跳过」，但把书名和改法说清楚
+    throw new Error(`与《${conflict.title ?? title}》重复，已跳过（可在设置里改为保留或替换）`);
+  }
+  if (conflict && policy === 'replace' && (db.getBookById(conflict.id) as { locked?: number })?.locked) {
+    // 提前拦下：锁定书不许替换，也免得白拷一份文件再失败
+    throw new Error(`《${conflict.title ?? title}》已锁定，无法替换。请先在书架右键解锁。`);
   }
 
   // DOCX / Markdown：导入时转 EPUB 落盘，后续全按 EPUB 走（阅读/目录/检索零改动）
@@ -124,8 +145,6 @@ async function importOneFile(db: DatabaseService, filePath: string) {
     const label = ext === '.docx' ? 'DOCX' : 'Markdown';
     const chapters = ext === '.docx' ? await docxToChapters(filePath) : await mdToChapters(filePath);
     if (chapters.length === 0) throw new Error(`${label} 内容为空或解析失败`);
-    const meta = await extractMetadata(filePath, ext);
-    const title = meta?.title ?? fileName;
     const { buildEpub } = await import('../services/epub-export');
     const buf = await buildEpub(title, chapters);
     storePath = path.join(booksDir, `${Date.now()}-${fileName}.epub`);
@@ -138,25 +157,44 @@ async function importOneFile(db: DatabaseService, filePath: string) {
     storePath = destPath;
   }
 
-  const meta = convertible ? await extractMetadata(filePath, ext) : await extractMetadata(storePath, storeExt);
   // 封面提取失败不阻塞导入，书架会退回格式占位块
   let coverUrl: string | null = null;
   try {
     coverUrl = await extractCover(storePath, storeExt, hash);
   } catch { /* 忽略 */ }
-  const id = db.insertBook({
-    title: meta?.title ?? fileName,
+  const fields = {
+    title,
     author: meta?.author,
     cover_path: coverUrl ?? undefined,
     file_path: storePath,
     file_type: storeExt.slice(1),
     hash,
-  });
-  // 提取目录并缓存（转格式的书用转换时的章节，EPUB 读 NCX）
+  };
+  // 提取目录（转格式的书用转换时的章节，EPUB 读 NCX）
+  let tocJson = '';
   try {
     const toc = convertedToc ?? (await extractToc(storePath, storeExt));
-    if (toc.length > 0) db.setBookToc(Number(id), JSON.stringify(toc));
+    if (toc.length > 0) tocJson = JSON.stringify(toc);
   } catch { /* 目录失败不阻塞导入 */ }
+
+  // 替换：覆盖已有记录，id 不变，书签/笔记/进度都留着
+  if (conflict && policy === 'replace') {
+    const before = db.getBookById(conflict.id) as { file_path?: string } | undefined;
+    db.replaceBookFile(conflict.id, fields);
+    if (tocJson) db.setBookToc(conflict.id, tocJson);
+    // 旧副本还在书库目录里且已不被引用，顺手删掉免得白占空间
+    const oldPath = before?.file_path;
+    if (oldPath && oldPath !== storePath && oldPath.startsWith(booksDir)) {
+      try {
+        fs.unlinkSync(oldPath);
+      } catch { /* 删不掉就留着，不影响阅读 */ }
+    }
+    return { id: conflict.id, path: storePath };
+  }
+
+  // 无冲突，或策略是「保留」：按新书入库
+  const id = db.insertBook(fields);
+  if (tocJson) db.setBookToc(Number(id), tocJson);
   return { id: Number(id), path: storePath };
 }
 
@@ -1264,7 +1302,9 @@ export function registerIpcHandlers() {
   const watcher = folderWatcher();
   watcher.onReady = async (filePath: string) => {
     try {
-      await importOneFile(db, filePath);
+      // 监视入库固定「跳过」：同一个文件被改动就会再触发一次，
+      // 用保留/替换策略会不断往书架上堆副本
+      await importOneFile(db, filePath, 'skip');
       const win = BrowserWindow.getAllWindows()[0];
       win?.webContents.send('watch:imported', path.basename(filePath));
     } catch (err) {

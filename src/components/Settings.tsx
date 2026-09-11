@@ -52,6 +52,8 @@ interface SettingsData {
   txtTocKeyword: string;
   /** 自定义正则解析时的表达式 */
   txtTocRegex: string;
+  /** 导入时遇到重复书籍：跳过 / 各留一本 / 覆盖已有记录 */
+  importConflictPolicy: 'skip' | 'keep' | 'replace';
 }
 
 export function Settings() {
@@ -85,6 +87,7 @@ export function Settings() {
     txtTocMode: 'default',
     txtTocKeyword: '',
     txtTocRegex: '',
+    importConflictPolicy: 'skip',
   });
   const [saved, setSaved] = useState(false);
   const [syncing, setSyncing] = useState(false);
@@ -663,10 +666,30 @@ export function Settings() {
       </section>
 
       <section className="settings-section">
+        <h2>导入</h2>
+        <div className="form-row">
+          <label>遇到重复书籍</label>
+          <select
+            value={settings.importConflictPolicy}
+            onChange={e => handleChange('importConflictPolicy', e.target.value)}
+          >
+            <option value="skip">跳过，不导入</option>
+            <option value="keep">保留，书架上留两本</option>
+            <option value="replace">替换，覆盖已有那本</option>
+          </select>
+        </div>
+        <p className="section-desc">
+          按内容指纹或书名判定重复。选「替换」时只更新文件，书签、笔记、阅读进度都保留；
+          文件夹监视自动入库的一律跳过重复，不受此项影响。
+        </p>
+      </section>
+
+      <section className="settings-section">
         <h2>文件夹监视</h2>
         <p className="section-desc">
           指定一个文件夹，往里放新的电子书会自动入库，不用每次手动导入。
-          重复的书会自动跳过；正在下载的半截文件不会被导入。
+          重复的书自动跳过（同一个文件被改动会反复触发，不适合用保留/替换）；
+          正在下载的半截文件不会被导入。
         </p>
         <div className="info-table" style={{ marginBottom: 16 }}>
           <div className="info-row">

@@ -308,6 +308,47 @@ export class DatabaseService {
     return this.get('SELECT id, title FROM books WHERE hash = ?', [hash]);
   }
 
+  /** 按书名查重（忽略大小写与首尾空白）：同一本书的另一个版本或格式 */
+  findBookByTitle(title: string) {
+    const t = (title || '').trim();
+    if (!t) return undefined;
+    return this.get('SELECT id, title FROM books WHERE LOWER(TRIM(title)) = LOWER(?)', [t]);
+  }
+
+  /**
+   * 用新文件替换已有记录（导入冲突策略「替换」）。
+   * 只改文件相关字段，id 保持不变——书签、笔记、阅读进度、统计都挂在 id 上。
+   * 位置索引（locations）随文件一起作废：换了文件，旧的 CFI 映射不再成立，
+   * 阅读器发现缺失会自己重建。
+   */
+  replaceBookFile(
+    id: number,
+    book: {
+      title: string;
+      author?: string;
+      cover_path?: string;
+      file_path: string;
+      file_type: string;
+      hash: string;
+    },
+  ) {
+    this.assertUnlocked(id, '替换文件');
+    this.run(
+      `UPDATE books SET title = ?, author = ?, cover_path = ?, file_path = ?, file_type = ?,
+         hash = ?, locations = NULL, updated_at = CURRENT_TIMESTAMP
+       WHERE id = ?`,
+      [
+        book.title,
+        book.author ?? null,
+        book.cover_path ?? null,
+        book.file_path,
+        book.file_type,
+        book.hash,
+        id,
+      ],
+    );
+  }
+
   /** 补写指纹（存量书籍首次导入时可能为空） */
   setBookHash(id: number, hash: string) {
     this.run('UPDATE books SET hash = ? WHERE id = ?', [hash, id]);
