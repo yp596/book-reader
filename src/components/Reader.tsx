@@ -3,7 +3,7 @@ import ePub from 'epubjs';
 import * as pdfjsLib from 'pdfjs-dist';
 import PdfWorkerUrl from 'pdfjs-dist/build/pdf.worker.min.mjs?url';
 import { Book, Bookmark, Note, TocEntry, ReadingPosition } from '../types';
-import { escapeHtml, excerptAround, clampPage, lineToPageIndex, parseSavedPosition, serializeSavedPosition, findKeyword, buildKeywordRegex, type SavedPosition, type KeywordOptions } from '../utils/text';
+import { escapeHtml, excerptAround, clampPage, lineToPageIndex, paginateText, parseSavedPosition, serializeSavedPosition, findKeyword, buildKeywordRegex, type SavedPosition, type KeywordOptions } from '../utils/text';
 import { fontStackOf, highlightColorOf, HIGHLIGHT_COLORS, type ThemeName } from '../utils/reader-options';
 import { resolveThemeByClock, type AutoThemeConfig } from '../utils/auto-theme';
 import {
@@ -146,6 +146,12 @@ export function Reader({ book, onBack, initialTarget, initialPosition }: ReaderP
   const thumbPendingRef = useRef<Set<number>>(new Set());
   /** TXT 目录（含段落行号），阅读器内可直接跳转与增补章节 */
   const [txtToc, setTxtToc] = useState<TocEntry[]>([]);
+  /**
+   * 章节标题集合，仅供分页使用。
+   * 用 ref 而不是从 txtToc 推导：目录取回来是异步的，而首次分页在它之前就跑完了，
+   * 直接读 state 会拿到空集合，导致首页仍然跨章。
+   */
+  const chapterLabelsRef = useRef<Set<string>>(new Set());
   /** 每页起始段落行号，用于目录行号 ↔ 页码互转 */
   const txtPageStartRef = useRef<number[]>([]);
   /** 漫画（CBZ）：页面条目名清单与当前页图片数据，按页拉取，不整包驻留 */
@@ -856,8 +862,11 @@ export function Reader({ book, onBack, initialTarget, initialPosition }: ReaderP
         if (book.file_type === 'epub') {
           await loadEpub(bytes.buffer as ArrayBuffer);
         } else if (book.file_type === 'txt') {
+          // 目录要先于分页取回来：分页要靠章节标题做「章界另起」
+          const toc = ((await api.getBookToc(book.id)) as TocEntry[]) || [];
+          setTxtToc(toc);
+          chapterLabelsRef.current = new Set(toc.map(t => t.label.trim()).filter(Boolean));
           loadTxt(bytes);
-          setTxtToc(((await api.getBookToc(book.id)) as TocEntry[]) || []);
         } else if (book.file_type === 'pdf') {
           await loadPdf(bytes);
         } else {
@@ -1060,23 +1069,12 @@ export function Reader({ book, onBack, initialTarget, initialPosition }: ReaderP
 
   /**
    * TXT 分页。keepPage 非空时沿用该页码（规整切换场景），
-   * 否则按目录/断点定位。
+   * 否则按目录/断点定位。切页规则见 paginateText：字数到顶、或遇上章节标题。
    */
   const paginateTxt = (text: string, keepPage: number | null = null) => {
-    const paragraphs = text.split('\n');
-    const pages: string[] = [];
-    // 每页起始段落行号，用于把目录里的章节行号换算成真实页码
-    const pageStartLines: number[] = [];
-    let current = '';
-    for (let i = 0; i < paragraphs.length; i++) {
-      if (current === '') pageStartLines.push(i);
-      current += paragraphs[i] + '\n';
-      if (current.length >= 3000) {
-        pages.push(current);
-        current = '';
-      }
-    }
-    if (current) pages.push(current);
+    // 目录可能晚于首次分页到达，所以标题集合走 ref，并在这里兜底再取一次
+    const labels = chapterLabelsRef.current.size > 0 ? chapterLabelsRef.current : txtToc.map(t => t.label);
+    const { pages, startLines: pageStartLines } = paginateText(text, labels);
     txtPageStartRef.current = pageStartLines;
     setTxtPages(pages.length > 0 ? pages : ['（空文件）']);
     const total = pages.length || 1;
@@ -1145,6 +1143,7 @@ export function Reader({ book, onBack, initialTarget, initialPosition }: ReaderP
       (a, b) => (a.line ?? 0) - (b.line ?? 0),
     );
     setTxtToc(next);
+    chapterLabelsRef.current = new Set(next.map(t => t.label.trim()).filter(Boolean));
     await window.electronAPI?.saveToc(book.id, next);
   };
 

@@ -9,6 +9,7 @@ import {
   serializeSavedPosition,
   parseSavedPosition,
   findKeyword,
+  paginateText,
 } from './text';
 
 describe('escapeHtml', () => {
@@ -161,5 +162,69 @@ describe('检索关键字的匹配选项', () => {
     expect(findKeyword('a.b', 'a.b')).toEqual({ index: 0, length: 3 });
     expect(findKeyword('axb', 'a.b')).toBeNull();
     expect(findKeyword('(x)', '(x)')).toEqual({ index: 0, length: 3 });
+  });
+});
+
+describe('paginateText 章节边界', () => {
+  /** 造一段「正文长度不足以自然换页、但章节标题必须另起」的文本 */
+  const body = (n: number, tag: string) => Array.from({ length: n }, () => `${tag}正文内容`).join('\n');
+
+  it('没有章节标题时按字数切页（原有行为不能丢）', () => {
+    const text = Array.from({ length: 800 }, (_, i) => `第${i}行正文内容`).join('\n');
+    const { pages } = paginateText(text, []);
+    expect(pages.length).toBeGreaterThan(1);
+    expect(pages.join('')).toBe(text + '\n');
+  });
+
+  it('章节标题必须落在页首，不能插在上一章的段落中间', () => {
+    const text = `${body(30, '甲')}\n第一章 开端\n${body(30, '乙')}`;
+    const { pages } = paginateText(text, ['第一章 开端']);
+    const hit = pages.find(p => p.includes('第一章 开端'));
+    expect(hit).toBeDefined();
+    // 标题前面不能还有别的正文
+    expect(hit!.split('\n')[0].trim()).toBe('第一章 开端');
+  });
+
+  it('一页里不会同时出现两章（这就是被报的 bug）', () => {
+    const text = [
+      '第一章 甲章', ...Array.from({ length: 40 }, () => '甲章正文'),
+      '第二章 乙章', ...Array.from({ length: 40 }, () => '乙章正文'),
+      '第三章 丙章', ...Array.from({ length: 40 }, () => '丙章正文'),
+    ].join('\n');
+    const { pages } = paginateText(text, ['第一章 甲章', '第二章 乙章', '第三章 丙章']);
+    for (const page of pages) {
+      const heads = ['第一章 甲章', '第二章 乙章', '第三章 丙章'].filter(h =>
+        page.split('\n').some(l => l.trim() === h),
+      );
+      expect(heads.length).toBeLessThanOrEqual(1);
+    }
+  });
+
+  it('超长章节内部仍按字数分页（章内分页，不是一整章一页）', () => {
+    const text = `第一章 长章\n${Array.from({ length: 800 }, () => '正文内容').join('\n')}`;
+    const { pages } = paginateText(text, ['第一章 长章']);
+    expect(pages.length).toBeGreaterThan(1);
+  });
+
+  it('startLines 与 pages 一一对应，供目录行号换页码', () => {
+    const text = `${body(10, '甲')}\n第一章 开端\n${body(10, '乙')}`;
+    const { pages, startLines } = paginateText(text, ['第一章 开端']);
+    expect(startLines).toHaveLength(pages.length);
+    // 每页起始行号递增，且指到的那一行确实是该页第一行
+    for (let i = 0; i < pages.length; i++) {
+      expect(pages[i].split('\n')[0]).toBe(text.split('\n')[startLines[i]]);
+    }
+  });
+
+  it('标题集合为空时不额外切页，避免老书没目录就乱切', () => {
+    const text = `${body(10, '甲')}\n第一章 开端\n${body(10, '乙')}`;
+    expect(paginateText(text, []).pages).toHaveLength(paginateText(text, []).pages.length);
+    expect(paginateText(text, []).pages.length).toBeLessThan(paginateText(text, ['第一章 开端']).pages.length);
+  });
+
+  it('空白标题被忽略，不会把每个空行都当章界', () => {
+    const text = '甲\n\n乙\n\n丙';
+    const { pages } = paginateText(text, ['', '   ']);
+    expect(pages).toHaveLength(1);
   });
 });

@@ -103,3 +103,59 @@ export const parseSavedPosition = (raw: string | null | undefined): SavedPositio
     return null;
   }
 };
+
+/** 每页目标字数（达到即收页，再按章界另起） */
+export const TXT_PAGE_CHARS = 3000;
+
+export interface TextPagination {
+  pages: string[];
+  /** 每页起始段落行号，用于把目录里的章节行号换算成真实页码 */
+  startLines: number[];
+}
+
+/**
+ * 把长文本切成阅读页。
+ *
+ * 两个切页条件：
+ * 1. 字数达到阈值——保证单页负荷可控；
+ * 2. 命中章节标题——标题必须落在页首。缺了这条，一页里会同时出现上一章的
+ *    结尾与下一章的开头，标题直接插在上文段落中间（实测一本书 147 页里
+ *    有 125 页如此）。
+ *
+ * 标题按**文本**而非行号匹配：一键规整会删空行、行号跟着错位，
+ * 而目录里存的 label 就是标题行原文，对规整与否都成立。
+ */
+export function paginateText(
+  text: string,
+  chapterLabels: Iterable<string> = [],
+  charsPerPage: number = TXT_PAGE_CHARS,
+): TextPagination {
+  const headings = new Set<string>();
+  for (const label of chapterLabels) {
+    const trimmed = label.trim();
+    if (trimmed) headings.add(trimmed);
+  }
+
+  const paragraphs = text.split('\n');
+  const pages: string[] = [];
+  const startLines: number[] = [];
+  let current = '';
+
+  for (let i = 0; i < paragraphs.length; i++) {
+    const line = paragraphs[i];
+    const trimmed = line.trim();
+    // 章界另起：当前页有内容，且这一行是章节标题，先把上一页收掉
+    if (current !== '' && trimmed && headings.has(trimmed)) {
+      pages.push(current);
+      current = '';
+    }
+    if (current === '') startLines.push(i);
+    current += line + '\n';
+    if (current.length >= charsPerPage) {
+      pages.push(current);
+      current = '';
+    }
+  }
+  if (current) pages.push(current);
+  return { pages, startLines };
+}
