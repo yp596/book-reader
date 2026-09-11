@@ -1,4 +1,4 @@
-import { useState, useEffect, useRef, type CSSProperties } from 'react';
+import { useState, useEffect, useMemo, useRef, type CSSProperties } from 'react';
 import ePub from 'epubjs';
 import * as pdfjsLib from 'pdfjs-dist';
 import PdfWorkerUrl from 'pdfjs-dist/build/pdf.worker.min.mjs?url';
@@ -1155,6 +1155,44 @@ export function Reader({ book, onBack, initialTarget, initialPosition }: ReaderP
     setComicPages(pages);
     setTotalPages(total);
     setPageIndex(startPage);
+  };
+
+  /** 重排视图的目录：直接取层级识别出的标题块，带上所在页与块序号以便跳转 */
+  const reflowToc = useMemo(
+    () =>
+      reflowPages.flatMap((blocks, page) =>
+        blocks
+          .map((block, index) => ({ block, index }))
+          .filter(({ block }) => block.kind === 'heading')
+          .map(({ block, index }) => ({ level: block.level, text: block.text, page, index })),
+      ),
+    [reflowPages],
+  );
+
+  /** 跨页跳转要等重排页渲染完再滚动，先把块序号挂起来 */
+  const pendingReflowIndexRef = useRef<number | null>(null);
+
+  useEffect(() => {
+    const index = pendingReflowIndexRef.current;
+    if (index == null) return;
+    pendingReflowIndexRef.current = null;
+    document
+      .querySelector(`[data-reflow-block="${reflowPage}-${index}"]`)
+      ?.scrollIntoView({ block: 'start' });
+  }, [reflowPage, reflowPages]);
+
+  /** 跳转到重排视图里的某个标题块 */
+  const jumpToReflowBlock = (page: number, index: number) => {
+    setPanel(null);
+    if (page === reflowPage) {
+      // 同一页内跳转不会触发上面的 effect，直接滚
+      document
+        .querySelector(`[data-reflow-block="${page}-${index}"]`)
+        ?.scrollIntoView({ block: 'start' });
+      return;
+    }
+    pendingReflowIndexRef.current = index;
+    setReflowPage(page);
   };
 
   const loadPdf = async (bytes: Uint8Array) => {
@@ -2490,7 +2528,9 @@ ${body}</body></html>`;
               🔳
             </button>
           )}
-          {(book.file_type === 'epub' || book.file_type === 'txt') && (
+          {(book.file_type === 'epub' ||
+            book.file_type === 'txt' ||
+            (book.file_type === 'pdf' && pdfReflow && reflowToc.length > 0)) && (
             <button onClick={() => togglePanel('toc')} className={panel === 'toc' ? 'active' : ''}>📑 目录</button>
           )}
           {(book.file_type === 'epub' || book.file_type === 'txt') && (
@@ -2694,6 +2734,27 @@ ${body}</body></html>`;
       )}
 
       <div className="reader-body">
+        {panel === 'toc' && book.file_type === 'pdf' && pdfReflow && (
+          <div className="toc-panel">
+            <h3>目录（{reflowToc.length}）</h3>
+            {reflowToc.length === 0 ? (
+              <p className="empty-text">未识别到标题，可能是扫描版或版式过于简单</p>
+            ) : (
+              reflowToc.map((item, i) => (
+                <div
+                  key={i}
+                  className="toc-item"
+                  // 按层级缩进，让目录能看出结构
+                  style={{ paddingLeft: 10 + (item.level - 1) * 14 }}
+                  onClick={() => jumpToReflowBlock(item.page, item.index)}
+                >
+                  {item.text}
+                </div>
+              ))
+            )}
+          </div>
+        )}
+
         {panel === 'toc' && book.file_type === 'txt' && (
           <div className="toc-panel">
             <div className="panel-title-row">
@@ -3165,11 +3226,15 @@ ${body}</body></html>`;
             >
               {reflowPages[reflowPage].map((block, i) =>
                 block.kind === 'heading' ? (
-                  <p key={i} className={`reflow-heading reflow-h${block.level}`}>
+                  <p
+                    key={i}
+                    data-reflow-block={`${reflowPage}-${i}`}
+                    className={`reflow-heading reflow-h${block.level}`}
+                  >
                     {block.text}
                   </p>
                 ) : (
-                  <p key={i} className="reflow-para">
+                  <p key={i} data-reflow-block={`${reflowPage}-${i}`} className="reflow-para">
                     {block.text}
                   </p>
                 ),
