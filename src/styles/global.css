@@ -822,6 +822,54 @@ body {
 .recent-date { font-size: 12px; color: var(--text-muted); white-space: nowrap; }
 
 /* ============ 继续阅读卡 ============ */
+/* 源文件变动提示条：常驻但不抢视线，展开才占用版面 */
+.source-banner {
+  margin-bottom: 20px;
+  padding: 14px 18px;
+  background: var(--bg-card);
+  border: 1px solid var(--border-light);
+  border-left: 3px solid var(--accent);
+  border-radius: var(--radius-md);
+  font-size: 13px;
+}
+
+.source-banner-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.source-banner-list {
+  margin-top: 12px;
+  border-top: 1px solid var(--border-light);
+  padding-top: 10px;
+}
+
+.source-banner-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+  padding: 8px 0;
+}
+
+.source-banner-info {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  min-width: 0;
+}
+
+.source-banner-info strong {
+  font-size: 13px;
+  font-weight: 600;
+}
+
+.source-banner-info em {
+  word-break: break-all;
+}
+
 .continue-card {
   display: flex;
   align-items: center;

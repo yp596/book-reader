@@ -34,3 +34,36 @@ export function contentHash(filePath: string): string {
     fs.closeSync(fd);
   }
 }
+
+/** 源文件在导入时的快照，用于判断它后来有没有被改动 */
+export interface SourceSnapshot {
+  path: string;
+  size: number;
+  mtimeMs: number;
+}
+
+/** 取快照；文件不在返回 null */
+export function readSourceSnapshot(filePath: string): SourceSnapshot | null {
+  try {
+    const stat = fs.statSync(filePath);
+    if (!stat.isFile()) return null;
+    return { path: filePath, size: stat.size, mtimeMs: stat.mtimeMs };
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * 快速判定源文件状态。
+ * 只看「大小 + 修改时间」——比对内容指纹要读文件（最多 2MB），
+ * 几百本书的库每次启动都全量比对不划算。只有时间变了而大小没变时，
+ * 才值得再算一次指纹确认（见调用方），避免「只是被 touch 过」的误报。
+ */
+export function classifySource(
+  current: SourceSnapshot | null,
+  recorded: SourceSnapshot | null,
+): 'ok' | 'changed' | 'missing' {
+  if (!current) return 'missing';
+  if (!recorded) return 'ok';
+  return current.size === recorded.size && current.mtimeMs === recorded.mtimeMs ? 'ok' : 'changed';
+}

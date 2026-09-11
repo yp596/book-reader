@@ -31,9 +31,31 @@ export function BookList({ books, searchQuery, onSelectBook, onShowDetail, onRef
   // 批量管理：勾选态与所选 id
   const [batchMode, setBatchMode] = useState(false);
   const [selectedIds, setSelectedIds] = useState<Set<number>>(new Set());
+  /** 源文件已改动或已移走的书：导入是复制，书库不主动看就发现不了 */
+  const [sourceIssues, setSourceIssues] = useState<
+    { id: number; title: string; status: 'changed' | 'missing'; sourcePath: string }[]
+  >([]);
+  const [sourcePanelOpen, setSourcePanelOpen] = useState(false);
+
+  const loadSourceIssues = async () => {
+    try {
+      setSourceIssues((await window.electronAPI?.checkBookSources()) ?? []);
+    } catch { /* 体检失败不打扰用户 */ }
+  };
+
+  const handleRefreshFromSource = async (id: number) => {
+    try {
+      await window.electronAPI?.refreshBookFromSource(id);
+      setSourceIssues(prev => prev.filter(b => b.id !== id));
+      onRefresh();
+    } catch (err) {
+      alert(err instanceof Error ? err.message : '更新失败');
+    }
+  };
 
   useEffect(() => {
     onRefresh();
+    void loadSourceIssues();
     window.electronAPI?.getCategories().then(setCategories).catch(() => {});
     window.electronAPI?.getSeriesList().then(setSeriesList).catch(() => {});
     window.electronAPI?.getSetting('idleDays').then(v => {
@@ -506,8 +528,7 @@ ${r.filePath}`);
       )}
 
       <div className="book-list-header">
-        <h1>我的书架</h1>
-        <div className="book-list-controls">
+        <h1>我的书架</h1>        <div className="book-list-controls">
           <button
             className={`btn-secondary small${batchMode ? ' active-preset' : ''}`}
             onClick={() => (batchMode ? exitBatch() : setBatchMode(true))}
@@ -541,6 +562,38 @@ ${r.filePath}`);
           </button>
         </div>
       </div>
+
+      {sourceIssues.length > 0 && (
+        <div className="source-banner">
+          <div className="source-banner-head">
+            <span>
+              ⚠ 有 {sourceIssues.length} 本书的源文件已被改动或移走，书库里的还是导入时的版本
+            </span>
+            <button className="link-btn" onClick={() => setSourcePanelOpen(o => !o)}>
+              {sourcePanelOpen ? '收起' : '查看'}
+            </button>
+          </div>
+          {sourcePanelOpen && (
+            <div className="source-banner-list">
+              {sourceIssues.map(b => (
+                <div key={b.id} className="source-banner-row">
+                  <div className="source-banner-info">
+                    <strong>{b.title}</strong>
+                    <em className="privacy-hint">
+                      {b.status === 'missing' ? '源文件已不在原位置' : '源文件内容已变化'} · {b.sourcePath}
+                    </em>
+                  </div>
+                  {b.status === 'changed' && (
+                    <button className="btn-secondary small" onClick={() => handleRefreshFromSource(b.id)}>
+                      用源文件更新
+                    </button>
+                  )}
+                </div>
+              ))}
+            </div>
+          )}
+        </div>
+      )}
 
       {continueBook && (
         <div className="continue-card" onClick={() => onSelectBook(continueBook)}>

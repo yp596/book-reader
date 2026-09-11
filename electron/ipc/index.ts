@@ -19,7 +19,7 @@ import {
 import { ModelService } from '../services/model-service';
 import { listComicPages, readComicPage } from '../services/comic';
 import { extractCover } from '../services/cover';
-import { contentHash } from '../services/file-hash';
+import { contentHash, classifySource, readSourceSnapshot, type SourceSnapshot } from '../services/file-hash';
 import { dirSize, clearSnapshots } from '../services/cache';
 import { folderWatcher } from '../services/watch-folder';
 import { loadRenderer } from '../renderer-window';
@@ -50,6 +50,30 @@ async function backfillCovers(db: DatabaseService) {
 }
 
 const sanitizeFileName = (name: string) => name.replace(/[\\/:*?"<>|]/g, '_');
+
+/**
+ * 源文件信息按书存键，沿用 bookPrefs 那套「按书存键值」的做法，不占表结构。
+ * 导入是把文件复制进书库的，源文件后来被改动或移走，书库这边无从感知——
+ * 记下它导入时的大小与时间，才能在下一次打开书架时给出提示。
+ */
+const sourceKey = (id: number) => `sourceInfo:${id}`;
+
+function readSourceInfo(db: DatabaseService, id: number): SourceSnapshot | null {
+  const raw = db.getSetting(sourceKey(id));
+  if (!raw) return null;
+  try {
+    const parsed = JSON.parse(raw) as SourceSnapshot;
+    return typeof parsed?.path === 'string' && typeof parsed.size === 'number' ? parsed : null;
+  } catch {
+    return null;
+  }
+}
+
+/** 记下源文件此刻的快照；源文件已经取不到就清掉记录，免得留着一条永远判不了的旧账 */
+function writeSourceInfo(db: DatabaseService, id: number, sourcePath: string) {
+  const snapshot = readSourceSnapshot(sourcePath);
+  db.setSetting(sourceKey(id), snapshot ? JSON.stringify(snapshot) : '');
+}
 
 /** 列出用户导入的本地字体；family 取文件名，渲染进程据此声明 @font-face */
 function listLocalFonts(): { name: string; family: string; url: string }[] {
@@ -103,6 +127,36 @@ async function fetchChapterContent(
 /** 导入冲突处理策略：skip=跳过 / keep=各留一本 / replace=覆盖已有记录 */
 type ImportConflictPolicy = 'skip' | 'keep' | 'replace';
 
+/**
+ * 把导入来源落成一份书库内的文件。
+ * DOCX / Markdown 先转 EPUB（后续全按 EPUB 走，阅读/目录/检索零改动），其余原样复制。
+ * 导入与「从原文件更新」共用这一条，免得转换逻辑写两份。
+ */
+async function materializeIntoLibrary(filePath: string, ext: string, title: string) {
+  const booksDir = path.join(app.getPath('userData'), 'books');
+  if (!fs.existsSync(booksDir)) fs.mkdirSync(booksDir, { recursive: true });
+  const fileName = path.basename(filePath, path.extname(filePath));
+
+  if (ext === '.docx' || ext === '.md') {
+    const label = ext === '.docx' ? 'DOCX' : 'Markdown';
+    const chapters = ext === '.docx' ? await docxToChapters(filePath) : await mdToChapters(filePath);
+    if (chapters.length === 0) throw new Error(`${label} 内容为空或解析失败`);
+    const { buildEpub } = await import('../services/epub-export');
+    const buf = await buildEpub(title, chapters);
+    const storePath = path.join(booksDir, `${Date.now()}-${fileName}.epub`);
+    fs.writeFileSync(storePath, buf);
+    return {
+      storePath,
+      storeExt: '.epub',
+      convertedToc: chapters.map((c, i) => ({ label: c.title, href: `Text/ch${i + 1}.xhtml` })),
+    };
+  }
+
+  const destPath = path.join(booksDir, `${Date.now()}-${path.basename(filePath)}`);
+  fs.copyFileSync(filePath, destPath);
+  return { storePath: destPath, storeExt: ext, convertedToc: null };
+}
+
 /** 单文件导入复用逻辑（对话框/拖拽共用） */
 async function importOneFile(db: DatabaseService, filePath: string, policyOverride?: ImportConflictPolicy) {
   const ext = path.extname(filePath).toLowerCase();
@@ -139,26 +193,8 @@ async function importOneFile(db: DatabaseService, filePath: string, policyOverri
     throw new Error(`《${conflict.title ?? title}》已锁定，无法替换。请先在书架右键解锁。`);
   }
 
-  // DOCX / Markdown：导入时转 EPUB 落盘，后续全按 EPUB 走（阅读/目录/检索零改动）
-  const convertible = ext === '.docx' || ext === '.md';
-  let storePath = filePath;
-  let storeExt = ext;
-  let convertedToc: { label: string; href: string }[] | null = null;
-  if (convertible) {
-    const label = ext === '.docx' ? 'DOCX' : 'Markdown';
-    const chapters = ext === '.docx' ? await docxToChapters(filePath) : await mdToChapters(filePath);
-    if (chapters.length === 0) throw new Error(`${label} 内容为空或解析失败`);
-    const { buildEpub } = await import('../services/epub-export');
-    const buf = await buildEpub(title, chapters);
-    storePath = path.join(booksDir, `${Date.now()}-${fileName}.epub`);
-    fs.writeFileSync(storePath, buf);
-    storeExt = '.epub';
-    convertedToc = chapters.map((c, i) => ({ label: c.title, href: `Text/ch${i + 1}.xhtml` }));
-  } else {
-    const destPath = path.join(booksDir, `${Date.now()}-${path.basename(filePath)}`);
-    fs.copyFileSync(filePath, destPath);
-    storePath = destPath;
-  }
+  // DOCX / Markdown 会在这一步转成 EPUB 落盘，其余原样复制
+  const { storePath, storeExt, convertedToc } = await materializeIntoLibrary(filePath, ext, title);
 
   // 封面提取失败不阻塞导入，书架会退回格式占位块
   let coverUrl: string | null = null;
@@ -192,12 +228,14 @@ async function importOneFile(db: DatabaseService, filePath: string, policyOverri
         fs.unlinkSync(oldPath);
       } catch { /* 删不掉就留着，不影响阅读 */ }
     }
+    writeSourceInfo(db, conflict.id, filePath);
     return { id: conflict.id, path: storePath };
   }
 
   // 无冲突，或策略是「保留」：按新书入库
   const id = db.insertBook(fields);
   if (tocJson) db.setBookToc(Number(id), tocJson);
+  writeSourceInfo(db, Number(id), filePath);
   return { id: Number(id), path: storePath };
 }
 
@@ -302,6 +340,71 @@ export function registerIpcHandlers() {
     if (!meta) throw new Error('未能从内容中识别出书名');
     db.updateBookInfo(id, meta.title, meta.author ?? null);
     return meta;
+  });
+
+  /**
+   * 源文件现状体检：导入是复制，源文件后来被改动或移走，书库这边原本无从感知。
+   * 只比对「大小 + 修改时间」，几百本书就是几百次 stat；只有时间变了而大小没变，
+   * 才多算一次指纹，避免「只是被 touch 过」的误报。
+   */
+  ipcMain.handle('books:checkSources', () => {
+    const books = db.getAllBooks() as any[];
+    const affected: { id: number; title: string; status: 'changed' | 'missing'; sourcePath: string }[] = [];
+    for (const book of books) {
+      const recorded = readSourceInfo(db, book.id);
+      if (!recorded) continue; // 早于该功能导入的书没记录，无从判断
+      const status = classifySource(readSourceSnapshot(recorded.path), recorded);
+      if (status === 'ok') continue;
+      if (status === 'changed' && book.hash) {
+        try {
+          if (contentHash(recorded.path) === book.hash) continue; // 内容没变，只是时间戳动了
+        } catch { /* 读不了就按改动处理 */ }
+      }
+      affected.push({ id: book.id, title: book.title, status, sourcePath: recorded.path });
+    }
+    return affected;
+  });
+
+  /** 用源文件的当前版本更新书库副本：只换内容，书名作者保持用户改过的样子 */
+  ipcMain.handle('books:refreshFromSource', async (_event, id: number) => {
+    const book = db.getBookById(id) as any;
+    if (!book) throw new Error('书籍不存在');
+    if (book.locked) throw new Error('这本书已锁定，请先解锁再更新');
+    const recorded = readSourceInfo(db, id);
+    if (!recorded) throw new Error('这本书没有记录源文件位置，请手动重新导入');
+    if (!fs.existsSync(recorded.path)) throw new Error('源文件已不在原位置，请手动重新导入');
+
+    const ext = path.extname(recorded.path).toLowerCase();
+    const hash = contentHash(recorded.path);
+    const { storePath, storeExt } = await materializeIntoLibrary(recorded.path, ext, book.title);
+
+    // 封面失败就留用旧的，不因为封面把整次更新打回去
+    let coverPath = book.cover_path ?? undefined;
+    try {
+      coverPath = (await extractCover(storePath, storeExt, hash)) ?? coverPath;
+    } catch { /* 保留旧封面 */ }
+
+    db.replaceBookFile(id, {
+      title: book.title,
+      author: book.author ?? undefined,
+      cover_path: coverPath,
+      file_path: storePath,
+      file_type: storeExt.slice(1),
+      hash,
+    });
+    try {
+      const toc = await extractToc(storePath, storeExt);
+      if (toc.length > 0) db.setBookToc(id, JSON.stringify(toc));
+    } catch { /* 目录失败不阻塞更新 */ }
+
+    const booksDirPath = path.join(app.getPath('userData'), 'books');
+    if (book.file_path && book.file_path !== storePath && String(book.file_path).startsWith(booksDirPath)) {
+      try {
+        fs.unlinkSync(book.file_path);
+      } catch { /* 删不掉就留着，不影响阅读 */ }
+    }
+    writeSourceInfo(db, id, recorded.path);
+    return { id, title: book.title, sourcePath: recorded.path, fileType: storeExt.slice(1) };
   });
 
   ipcMain.handle('books:getAll', () => {

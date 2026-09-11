@@ -28,6 +28,8 @@ contextBridge.exposeInMainWorld('electronAPI', {
     ipcRenderer.invoke('books:setLocations', id, locationsJson),
   refreshBookMetadata: (id: number) =>
     ipcRenderer.invoke('books:refreshMetadata', id),
+  checkBookSources: () => ipcRenderer.invoke('books:checkSources'),
+  refreshBookFromSource: (id: number) => ipcRenderer.invoke('books:refreshFromSource', id),
   renameBook: (id: number, title: string) =>
     ipcRenderer.invoke('books:rename', id, title),
   toggleFavorite: (id: number) =>

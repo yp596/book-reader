@@ -226,6 +226,12 @@ declare global {
       setAlwaysOnTop: (flag: boolean) => Promise<boolean>;
       setBookLocations: (id: number, locationsJson: string) => Promise<void>;
       refreshBookMetadata: (id: number) => Promise<{ title: string; author?: string }>;
+      checkBookSources: () => Promise<
+        { id: number; title: string; status: 'changed' | 'missing'; sourcePath: string }[]
+      >;
+      refreshBookFromSource: (
+        id: number,
+      ) => Promise<{ id: number; title: string; sourcePath: string; fileType: string }>;
       getAllSources: () => Promise<BookSource[]>;
       addSource: (source: Omit<BookSource, 'id' | 'enabled' | 'created_at'>) => Promise<any>;
       deleteSource: (id: number) => Promise<void>;
