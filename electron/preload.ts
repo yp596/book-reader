@@ -159,6 +159,7 @@ contextBridge.exposeInMainWorld('electronAPI', {
 
   // 应用信息
   getAppInfo: () => ipcRenderer.invoke('app:info'),
+  takeCrashedSession: () => ipcRenderer.invoke('app:takeCrashedSession'),
 
   // 隐私清理
   clearPrivacy: (opts: {

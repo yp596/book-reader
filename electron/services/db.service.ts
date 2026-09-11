@@ -354,6 +354,15 @@ export class DatabaseService {
     this.run('UPDATE books SET hash = ? WHERE id = ?', [hash, id]);
   }
 
+  /**
+   * 正常退出时清掉全部会话标记。
+   * 关窗时渲染进程是直接被销毁的，React 的清理函数不一定跑得到，
+   * 只靠渲染进程清会留下标记，下次启动误报「上次异常退出」。
+   */
+  clearReadingSessions() {
+    this.run("UPDATE settings SET value = '' WHERE key LIKE 'readingSession:%'");
+  }
+
   /** 批量场景：显式设置锁定态（toggleBookLock 依赖当前值，不适合批量） */
   setBookLock(id: number, locked: boolean) {
     this.run('UPDATE books SET locked = ? WHERE id = ?', [locked ? 1 : 0, id]);
@@ -777,6 +786,23 @@ export class DatabaseService {
 
   setSetting(key: string, value: string) {
     this.run('INSERT OR REPLACE INTO settings (key, value) VALUES (?, ?)', [key, value]);
+  }
+
+  /**
+   * 上次没走正常退出流程时留下的会话标记。
+   * 离开阅读器会把标记清空，所以「值非空」就等于异常退出；
+   * 同时开着多本书时取时间戳最新的那个。
+   */
+  findDanglingReadingSession(): { bookId: number; at: number } | null {
+    // 取全部再逐个校验：光靠 SQL 排序，一条畸形 key 会挡住后面正常的记录
+    const rows = this.all(
+      "SELECT key, value FROM settings WHERE key LIKE 'readingSession:%' AND value <> '' ORDER BY CAST(value AS INTEGER) DESC",
+    ) as { key?: string; value?: string }[];
+    for (const row of rows) {
+      const bookId = Number((row.key ?? '').slice('readingSession:'.length));
+      if (Number.isInteger(bookId) && bookId > 0) return { bookId, at: Number(row.value) || 0 };
+    }
+    return null;
   }
 
   // ============ 多进度断点 ============

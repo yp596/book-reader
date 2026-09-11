@@ -343,6 +343,7 @@ declare global {
       onModelProgress: (callback: (info: ModelProgressInfo) => void) => () => void;
       onOpenFile: (callback: (path?: string) => void) => () => void;
       takeOpenFile: () => Promise<string | null>;
+      takeCrashedSession: () => Promise<{ bookId: number; title: string } | null>;
     };
   }
 }

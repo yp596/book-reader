@@ -338,6 +338,17 @@ export function registerIpcHandlers() {
     shell.showItemInFolder(book.file_path);
   });
 
+  // 崩溃恢复：把上次异常退出时正在读的书捞回来（取走即清标记，只提示一次）
+  ipcMain.handle('app:takeCrashedSession', () => {
+    const session = db.findDanglingReadingSession();
+    if (!session) return null;
+    const book = db.getBookById(session.bookId) as { id: number; title?: string } | undefined;
+    // 书已经被删掉：顺手清掉标记，免得每次启动都白查一遍
+    db.setSetting(`readingSession:${session.bookId}`, '');
+    if (!book) return null;
+    return { bookId: book.id, title: book.title ?? '未命名' };
+  });
+
   // 分享/发送文件：Windows 没有通用分享面板，实用的两步是复制路径与交给默认程序
   ipcMain.handle('books:copyPath', (_event, id: number) => {
     const book = db.getBookById(id) as any;

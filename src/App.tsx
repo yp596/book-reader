@@ -83,6 +83,22 @@ function App() {
     return api.onOpenFile(openPath);
   }, []);
 
+  // 崩溃恢复：上次没走正常退出流程时，问一句要不要接着读
+  useEffect(() => {
+    const eapi = window.electronAPI;
+    if (!eapi?.takeCrashedSession) return;
+    eapi
+      .takeCrashedSession()
+      .then(session => {
+        if (!session) return;
+        if (!window.confirm(`上次没有正常退出，继续阅读《${session.title}》？`)) return;
+        return eapi.getBookById(session.bookId).then(b => {
+          if (b) openTab(b as Book);
+        });
+      })
+      .catch(() => {});
+  }, []);
+
   const dismissOnboarding = () => {
     setShowOnboarding(false);
     window.electronAPI?.setSetting('onboarded', '1').catch(() => {});

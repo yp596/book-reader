@@ -246,6 +246,8 @@ app.on('will-quit', () => {
       db.clearChapterCache();
       clipboard.clear();
     }
+    // 会话标记一律清掉：走到这里说明是正常退出，下次启动不该提示「异常退出」
+    db.clearReadingSessions();
   } catch { /* 忽略 */ }
   try { ModelService.getInstance().stopAll(); } catch {}
   try { void disposeEngine(); } catch {}

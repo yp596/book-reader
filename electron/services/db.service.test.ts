@@ -423,3 +423,28 @@ describe('导入冲突处理', () => {
     ).toThrow(/已锁定/);
   });
 });
+
+describe('崩溃恢复的会话标记', () => {
+  it('清空之后不再被认为是异常退出', () => {
+    db.setSetting('readingSession:4242', String(Date.now()));
+    expect(db.findDanglingReadingSession()?.bookId).toBe(4242);
+    db.clearReadingSessions();
+    expect(db.findDanglingReadingSession()).toBeNull();
+  });
+
+  it('多本书都残留时取时间戳最新的那本', () => {
+    db.clearReadingSessions();
+    db.setSetting('readingSession:1', '100');
+    db.setSetting('readingSession:2', '200');
+    expect(db.findDanglingReadingSession()?.bookId).toBe(2);
+    db.clearReadingSessions();
+  });
+
+  it('畸形 key 不会挡住后面正常的记录', () => {
+    db.clearReadingSessions();
+    db.setSetting('readingSession:abc', '999');
+    db.setSetting('readingSession:7', '100');
+    expect(db.findDanglingReadingSession()?.bookId).toBe(7);
+    db.clearReadingSessions();
+  });
+});
