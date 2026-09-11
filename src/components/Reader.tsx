@@ -16,6 +16,7 @@ import {
 import { parseMindmap, MindNode } from '../utils/mindmap';
 import { lookupMark, compareByPosition } from '../utils/mark-lookup';
 import { normalizeText } from '../utils/text-normalize';
+import { pageTextToParagraphs } from '../utils/pdf-layout';
 import { getPreset, resolveAction, buildKeyMap, parseShortcutOverrides, DEFAULT_SHORTCUT_PRESET } from '../utils/shortcuts';
 import { STYLE_PRESETS, resolveCustomCss, validateCustomCss, MAX_CSS_LEN } from '../utils/reading-styles';
 import { MindmapView } from './Mindmap';
@@ -1868,14 +1869,14 @@ ${body}</body></html>`;
       for (let i = 1; i <= doc.numPages; i++) {
         const page = await doc.getPage(i);
         const tc = await page.getTextContent();
-        let text = '';
-        for (const it of tc.items as any[]) {
-          if (typeof it.str === 'string') text += it.str;
-          if (it.hasEOL) text += '\n';
-        }
-        text = text.replace(/[ 	]+/g, ' ').trim();
-        if (!text) continue;
-        buf += text + '\n\n';
+        // 用坐标做版面分析：行聚类 → 分栏检测 → 段落合并（见 utils/pdf-layout）。
+        // 单纯按返回顺序拼字符串会把双栏论文交错、把每个原始行都切成一段。
+        const paragraphs = pageTextToParagraphs(
+          (tc.items as any[]).filter(it => typeof it.str === 'string'),
+          page.getViewport({ scale: 1 }).width,
+        );
+        if (paragraphs.length === 0) continue;
+        buf += paragraphs.join('\n\n') + '\n\n';
         if (buf.length >= 3000) {
           pages.push(buf);
           buf = '';

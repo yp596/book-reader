@@ -103,7 +103,7 @@ type ImportConflictPolicy = 'skip' | 'keep' | 'replace';
 /** 单文件导入复用逻辑（对话框/拖拽共用） */
 async function importOneFile(db: DatabaseService, filePath: string, policyOverride?: ImportConflictPolicy) {
   const ext = path.extname(filePath).toLowerCase();
-  if (!['.epub', '.txt', '.pdf', '.docx', '.cbz', '.cbt', '.md'].includes(ext)) {
+  if (!['.epub', '.txt', '.pdf', '.docx', '.cbz', '.cbr', '.cbt', '.cb7', '.md'].includes(ext)) {
     throw new Error(`不支持的格式：${ext || '(无后缀)'}`);
   }
   const fileName = path.basename(filePath, path.extname(filePath));
@@ -243,7 +243,7 @@ export function registerIpcHandlers() {
     const result = await dialog.showOpenDialog(win!, {
       title: '导入书籍',
       filters: [
-        { name: '电子书', extensions: ['epub', 'txt', 'pdf', 'docx', 'cbz', 'cbt', 'md'] },
+        { name: '电子书', extensions: ['epub', 'txt', 'pdf', 'docx', 'cbz', 'cbr', 'cbt', 'cb7', 'md'] },
         { name: '所有文件', extensions: ['*'] },
       ],
       properties: ['openFile', 'multiSelections'],

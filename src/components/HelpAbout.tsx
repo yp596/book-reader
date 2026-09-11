@@ -166,9 +166,19 @@ export function HelpAbout() {
           <section className="settings-section">
             <h2>开源许可</h2>
             <p className="section-desc" style={{ lineHeight: 1.9, marginBottom: 0 }}>
-              本项目基于 Electron、React、epub.js、pdf.js、sql.js、mammoth、cheerio 等开源软件构建，
-              各组件遵循其各自的许可协议。软件不内置任何书源，仅提供导入功能；
+              本项目基于 Electron、React、epub.js、pdf.js、sql.js、mammoth、cheerio、pdf-lib、marked 等
+              开源软件构建，各组件遵循其各自的许可协议。软件不内置任何书源，仅提供导入功能；
               请仅用于阅读你拥有合法版权的内容。
+            </p>
+          </section>
+
+          <section className="settings-section">
+            <h2>RAR 解压声明</h2>
+            <p className="section-desc" style={{ lineHeight: 1.9, marginBottom: 0 }}>
+              漫画压缩包（CBR / CB7）的解压能力由随包附带的 7-Zip 提供。7-Zip 主体遵循 GNU LGPL，
+              其 RAR 解压引擎基于 unRAR 源码构建，按 unRAR 许可要求在此声明：
+              <strong>该代码不得用于开发 RAR（WinRAR）兼容压缩器</strong>。
+              本软件仅使用其解压能力，不提供任何 RAR 压缩功能。
             </p>
           </section>
         </>

@@ -33,6 +33,9 @@ export const booksDir = () => path.join(app.getPath('userData'), 'books');
 /** 用户导入的字体目录 */
 export const fontsDir = () => path.join(app.getPath('userData'), 'fonts');
 
+/** 随包分发的资源目录（OCR 模型等）。与主进程产物同级，开发与打包后都能解析到 */
+export const resourcesDir = () => path.join(__dirname, '../resources');
+
 const isInside = (dir: string, filePath: string) => {
   const rel = path.relative(dir, path.resolve(filePath));
   return rel !== '' && !rel.startsWith('..') && !path.isAbsolute(rel);
@@ -43,4 +46,4 @@ const isInside = (dir: string, filePath: string) => {
  * 路径必须落在其中之一，否则等于把整个磁盘暴露给渲染进程。
  */
 export const isInsideAllowedDir = (filePath: string) =>
-  isInside(booksDir(), filePath) || isInside(fontsDir(), filePath);
+  isInside(booksDir(), filePath) || isInside(fontsDir(), filePath) || isInside(resourcesDir(), filePath);

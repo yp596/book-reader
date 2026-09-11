@@ -7,6 +7,8 @@ files:
   - dist-electron/**/*
   # 托盘图标运行时按路径读取，必须随包带上
   - build/**/*
+  # OCR 模型与字典：运行时按路径读取
+  - resources/**/*
   - node_modules/node-llama-cpp/**/*
   - node_modules/@node-llama-cpp/**/*
 # 原生 .node 不能跑在 asar 包内，必须解包

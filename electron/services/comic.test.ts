@@ -93,9 +93,9 @@ describe('容器格式判定', () => {
     expect(detectArchiveKind(head([], 'ustar'))).toBe('tar');
   });
 
-  it('rar / 7z 明确不识别，由上层给出可读错误', () => {
-    expect(detectArchiveKind(head([0x52, 0x61, 0x72, 0x21, 0x1a, 0x07]))).toBe('unknown');
-    expect(detectArchiveKind(head([0x37, 0x7a, 0xbc, 0xaf, 0x27, 0x1c]))).toBe('unknown');
+  it('识别 rar 与 7z（这两种走随包的 7z.exe 解）', () => {
+    expect(detectArchiveKind(head([0x52, 0x61, 0x72, 0x21, 0x1a, 0x07]))).toBe('rar');
+    expect(detectArchiveKind(head([0x37, 0x7a, 0xbc, 0xaf, 0x27, 0x1c]))).toBe('7z');
   });
 
   it('空数据返回 unknown', () => {
