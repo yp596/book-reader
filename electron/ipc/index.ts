@@ -778,7 +778,7 @@ export function registerIpcHandlers() {
       },
     });
     loadRenderer(win, bookId);
-    if (db.getSetting('screenProtection') === 'true') win.setContentProtection(true);
+    if (db.isSettingOn('screenProtection')) win.setContentProtection(true);
   });
 
   // 打印预览：把渲染进程生成的打印页开在独立窗口里，由该窗口的「打印」按钮调用系统打印
@@ -1179,7 +1179,7 @@ export function registerIpcHandlers() {
     const vectors = await embedTexts(
       chunks.map(c => c.text),
       getEmbedBaseUrl(),
-      () => db.assertOnlineEnabled('语义检索'),
+      () => db.assertOnlineEnabled('语义检索', getEmbedBaseUrl()),
     );
     db.clearBookVectors(bookId);
     db.saveVectors(
@@ -1206,7 +1206,7 @@ export function registerIpcHandlers() {
     const rows = bookId ? all.filter(v => v.book_id === bookId) : all;
     if (rows.length === 0) throw new Error('还没有建立索引，先去语义检索页为书籍建索引');
     const [qvec] = await embedTexts([query.trim().slice(0, 1000)], getEmbedBaseUrl(), () =>
-      db.assertOnlineEnabled('语义检索'),
+      db.assertOnlineEnabled('语义检索', getEmbedBaseUrl()),
     );
     const books = db.getAllBooks() as any[];
     const titleOf = (id: number) => books.find(b => b.id === id)?.title ?? '';
@@ -1282,10 +1282,10 @@ export function registerIpcHandlers() {
     const baseUrl = (db.getSetting('aiBaseUrl') || 'http://localhost:11434').replace(/\/$/, '');
     const model = db.getSetting('aiModel') || 'minicpm5-1b';
     const apiKey = db.getSetting('aiApiKey') || undefined;
-    // 进程内推理照用（纯本地不出网）；只有回退 HTTP 时才需要过联网闸门
+    // 进程内推理照用（纯本地不出网）；只有回退 HTTP 且目标是外部地址时才需要过联网闸门
     return new AiService(
       { provider: 'custom', baseUrl, model, apiKey },
-      () => db.assertOnlineEnabled('AI 阅读助手'),
+      () => db.assertOnlineEnabled('AI 阅读助手', baseUrl),
     );
   }
 

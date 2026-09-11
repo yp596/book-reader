@@ -481,13 +481,19 @@ describe('联网附加能力总开关', () => {
     clearSwitch();
   });
 
-  it('只有存成 1 才算开启，其余脏值一律当关闭', () => {
+  it('认 1 与历史遗留的 true，其余脏值一律当关闭', () => {
+    // 'true' 是旧版设置页保存写入的编码，存量库里很常见，必须继续认得
     db.setSetting('onlineFeaturesEnabled', 'true');
-    expect(db.isOnlineEnabled()).toBe(false);
-    db.setSetting('onlineFeaturesEnabled', '0');
-    expect(db.isOnlineEnabled()).toBe(false);
+    expect(db.isOnlineEnabled()).toBe(true);
     db.setSetting('onlineFeaturesEnabled', '1');
     expect(db.isOnlineEnabled()).toBe(true);
+    db.setSetting('onlineFeaturesEnabled', '0');
+    expect(db.isOnlineEnabled()).toBe(false);
+    db.setSetting('onlineFeaturesEnabled', 'false');
+    expect(db.isOnlineEnabled()).toBe(false);
+    // 无法识别的值不放行，保持保守立场
+    db.setSetting('onlineFeaturesEnabled', 'yes');
+    expect(db.isOnlineEnabled()).toBe(false);
   });
 
   it('关闭时拦截出站操作，并在提示里指明去哪里开', () => {
@@ -499,6 +505,30 @@ describe('联网附加能力总开关', () => {
   it('开启后放行', () => {
     db.setSetting('onlineFeaturesEnabled', '1');
     expect(() => db.assertOnlineEnabled('在线书源')).not.toThrow();
+  });
+
+  it('目标是本机服务时不受开关限制', () => {
+    db.setSetting('onlineFeaturesEnabled', '0');
+    // 默认配置里的向量服务与 AI 服务都指向本机，不该被联网开关拦住
+    expect(() => db.assertOnlineEnabled('语义检索', 'http://localhost:8081')).not.toThrow();
+    expect(() => db.assertOnlineEnabled('AI 阅读助手', 'http://127.0.0.1:11434')).not.toThrow();
+    expect(() => db.assertOnlineEnabled('WebDAV 同步', 'http://[::1]:5005')).not.toThrow();
+    // 外部地址照旧拦截
+    expect(() => db.assertOnlineEnabled('语义检索', 'http://api.example.com')).toThrow(/需要联网/);
+    // 局域网确实发生了网络请求，仍归开关管辖
+    expect(() => db.assertOnlineEnabled('AI 阅读助手', 'http://192.168.1.5:11434')).toThrow(/需要联网/);
+  });
+
+  it('回环地址识别边界', async () => {
+    const { isLoopbackUrl } = await import('./db.service');
+    expect(isLoopbackUrl('http://localhost:8081')).toBe(true);
+    expect(isLoopbackUrl('https://127.0.0.1/webdav')).toBe(true);
+    expect(isLoopbackUrl('http://[::1]:8080')).toBe(true);
+    expect(isLoopbackUrl('http://example.com')).toBe(false);
+    // 形似而非本机，不能被当成回环放行
+    expect(isLoopbackUrl('http://localhost.evil.com')).toBe(false);
+    expect(isLoopbackUrl('http://127.0.0.1.evil.com')).toBe(false);
+    expect(isLoopbackUrl('不是地址')).toBe(false);
   });
 
   it('新库初始化默认关闭', () => {

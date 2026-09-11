@@ -5,6 +5,22 @@ import { app } from 'electron';
 
 let _instance: DatabaseService | null = null;
 
+/**
+ * 请求目标是否为本机回环地址。
+ *
+ * 只有回环才算「不出机器」；局域网地址（如 192.168.x.x）虽然也在内网，
+ * 但确实发生了网络请求，仍归联网总开关管辖。
+ */
+export function isLoopbackUrl(url: string): boolean {
+  try {
+    const host = new URL(url).hostname.replace(/^\[|\]$/g, '').toLowerCase();
+    return host === 'localhost' || host === '127.0.0.1' || host === '::1' || host.endsWith('.localhost');
+  } catch {
+    // 解析不出来的地址不当作本机，交由开关决定
+    return false;
+  }
+}
+
 export class DatabaseService {
   private db!: SqlJsDatabase;
   private dbPath: string;
@@ -813,16 +829,35 @@ export class DatabaseService {
   // ============ 联网附加能力总开关 ============
 
   /**
-   * 出站请求的总闸门。纯离线定位要求默认关闭，
-   * 关闭状态下 AI 回退、书源抓取、WebDAV 同步、模型下载都不许发出请求。
-   * 只存 '1'/'0' 两个值，其余一律当关闭处理。
+   * 布尔型设置的统一读法。
+   *
+   * 约定：写入一律用 '1'/'0'；但历史版本里设置页保存写过 'true'/'false'，
+   * 宽松读取是为了让这批存量数据继续生效（否则界面显示已开启、功能仍报未开启）。
+   * 其余无法识别的值一律当关闭，保持「不认识就不放行」的保守立场。
    */
-  isOnlineEnabled(): boolean {
-    return this.getSetting('onlineFeaturesEnabled') === '1';
+  isSettingOn(key: string): boolean {
+    const value = this.getSetting(key);
+    return value === '1' || value === 'true';
   }
 
-  /** 出站前调用。未开启时给可操作提示，而不是让调用方去撞网络超时 */
-  assertOnlineEnabled(feature: string) {
+  /**
+   * 出站请求的总闸门。纯离线定位要求默认关闭，
+   * 关闭状态下 AI 回退、书源抓取、WebDAV 同步、模型下载都不许发出请求。
+   */
+  isOnlineEnabled(): boolean {
+    return this.isSettingOn('onlineFeaturesEnabled');
+  }
+
+  /**
+   * 出站请求的总闸门。纯离线定位要求默认关闭，
+   * 关闭状态下 AI 回退、书源抓取、WebDAV 同步、模型下载都不许发出请求。
+   *
+   * 传入 targetUrl 且目标为本机服务时直接放行：回环地址不离开这台机器，
+   * 不属于「联网附加能力」该管的范围。否则默认配置里指向 localhost 的
+   * 向量服务与 AI 服务会连带被拦，变成「装了本机模型却要求先允许联网」。
+   */
+  assertOnlineEnabled(feature: string, targetUrl?: string) {
+    if (targetUrl && isLoopbackUrl(targetUrl)) return;
     if (this.isOnlineEnabled()) return;
     throw new Error(`「${feature}」需要联网，当前未开启。请到「设置 → 联网附加能力」中开启后再试。`);
   }

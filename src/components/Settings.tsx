@@ -2,6 +2,7 @@ import { useState, useEffect, type KeyboardEvent as ReactKeyboardEvent } from 'r
 import { formatFileSize } from '../utils/text';
 import { THEMES } from '../utils/reader-options';
 import { DEFAULT_AUTO_THEME, isDaytime } from '../utils/auto-theme';
+import { Icon } from './Icon';
 
 import {
   SHORTCUT_PRESETS,
@@ -162,7 +163,9 @@ export function Settings() {
     if (!api) return;
     const entries = Object.entries(settings) as [keyof SettingsData, any][];
     for (const [key, value] of entries) {
-      await api.setSetting(key, String(value));
+      // 布尔设置统一落成 '1'/'0'：主进程按同一口径判断，
+      // 若写成 String(true) 会出现「界面已开启、功能仍报未开启」的错位
+      await api.setSetting(key, typeof value === 'boolean' ? (value ? '1' : '0') : String(value));
     }
     if (silent) return;
     setSaved(true);
@@ -708,9 +711,10 @@ export function Settings() {
         <p className="section-desc" style={{ lineHeight: 1.9 }}>
           软件默认纯离线运行，解析、渲染、检索、存储全部在本机完成，不发起任何网络请求。
           只有下面这一道开关打开后，需要联网的能力才会生效：在线书源与在线阅读、WebDAV 同步、
-          本地模型的下载、以及 AI 助手与语义检索在进程内推理不可用时的远端服务回退。
+          本地模型的下载、以及 AI 助手与语义检索连接外部服务时。
         </p>
         <p className="section-desc" style={{ lineHeight: 1.9 }}>
+          指向本机的服务（localhost / 127.0.0.1）不受此开关限制，只在需要访问外部地址时才要求打开。
           已下载到本机的模型、已缓存的在线章节不受影响，关闭联网后依然可用。
         </p>
         <div className="form-row" style={{ marginTop: 10 }}>
@@ -903,7 +907,7 @@ export function Settings() {
       <section className="settings-section">
         <h2>快捷键方案</h2>
         <p className="section-desc">
-          三套预设一键切换。每套都保留翻页与首末页基础键，不会出现切过去翻不了页的情况。
+          三套预设一键切换，每套都保留翻页与首末页基础键。想改单个键：点一下键位，再按新键，Esc 取消。
         </p>
         <div className="preset-row">
           {SHORTCUT_PRESETS.map(p => (
@@ -925,6 +929,7 @@ export function Settings() {
               <div key={action} className="keymap-row">
                 <kbd
                   tabIndex={0}
+                  className={recording === action ? 'recording' : ''}
                   title="点一下，再按新键；Esc 取消"
                   onClick={() => {
                     setRecording(action);
@@ -1051,10 +1056,10 @@ export function Settings() {
         </div>
         <div className="form-actions" style={{ justifyContent: 'flex-start' }}>
           <button className="btn-secondary" onClick={handleBackup} disabled={syncing}>
-            {syncing ? '同步中...' : '⬆ 备份到云端'}
+            {syncing ? '同步中...' : <><Icon name="cloud-up" size={15} /> 备份到云端</>}
           </button>
           <button className="btn-secondary" onClick={handleRestore} disabled={syncing}>
-            {syncing ? '同步中...' : '⬇ 从云端恢复'}
+            {syncing ? '同步中...' : <><Icon name="cloud-down" size={15} /> 从云端恢复</>}
           </button>
           {lastSync && <span className="book-meta">上次同步：{lastSync}</span>}
         </div>
@@ -1065,7 +1070,7 @@ export function Settings() {
 
       <div className="settings-footer">
         <button className="btn-primary" onClick={() => handleSave()}>
-          {saved ? '✓ 已保存' : '保存设置'}
+          {saved ? <><Icon name="check" size={15} /> 已保存</> : '保存设置'}
         </button>
       </div>
     </div>

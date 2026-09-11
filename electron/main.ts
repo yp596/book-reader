@@ -136,7 +136,7 @@ function createWindow() {
       db.setSetting('windowBounds', JSON.stringify(mainWindow.getBounds()));
     }
     // 托盘驻留：关窗口只隐藏，应用仍在后台（从托盘菜单退出才是真退出）
-    if (!quitting && db.getSetting('closeToTray') === 'true') {
+    if (!quitting && db.isSettingOn('closeToTray')) {
       event.preventDefault();
       mainWindow?.hide();
     }
@@ -205,7 +205,7 @@ app.whenReady().then(async () => {
   createTray();
   // 恢复防截屏设置：设置页改过之后重启也要继续生效
   try {
-    if (DatabaseService.getInstance().getSetting('screenProtection') === 'true') {
+    if (DatabaseService.getInstance().isSettingOn('screenProtection')) {
       for (const win of BrowserWindow.getAllWindows()) win.setContentProtection(true);
     }
   } catch { /* 忽略 */ }
@@ -242,7 +242,7 @@ app.on('will-quit', () => {
   // 隐私模式：退出时清掉临时数据（章节缓存与剪贴板），不含用户笔记/书签
   try {
     const db = DatabaseService.getInstance();
-    if (db.getSetting('privacyAutoClear') === 'true') {
+    if (db.isSettingOn('privacyAutoClear')) {
       db.clearChapterCache();
       clipboard.clear();
     }
