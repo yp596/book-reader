@@ -216,6 +216,11 @@ contextBridge.exposeInMainWorld('electronAPI', {
     ipcRenderer.invoke('rag:search', query, topK, bookId),
 
   // Events
-  onOpenFile: (callback: () => void) =>
-    ipcRenderer.on('menu:open-file', callback),
+  // 系统「打开方式」拉起的文件（冷启动时由渲染进程主动来取）
+  takeOpenFile: (): Promise<string | null> => ipcRenderer.invoke('app:takeOpenFile'),
+  onOpenFile: (callback: (path?: string) => void) => {
+    const listener = (_e: any, filePath?: string) => callback(filePath);
+    ipcRenderer.on('menu:open-file', listener);
+    return () => ipcRenderer.removeListener('menu:open-file', listener);
+  },
 });

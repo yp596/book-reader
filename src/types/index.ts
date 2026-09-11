@@ -319,7 +319,8 @@ declare global {
       startModel: (id: string) => Promise<boolean>;
       stopModel: (id: string) => Promise<void>;
       onModelProgress: (callback: (info: ModelProgressInfo) => void) => () => void;
-      onOpenFile: (callback: () => void) => void;
+      onOpenFile: (callback: (path?: string) => void) => () => void;
+      takeOpenFile: () => Promise<string | null>;
     };
   }
 }

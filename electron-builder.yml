@@ -5,6 +5,8 @@ directories:
 files:
   - dist/**/*
   - dist-electron/**/*
+  # 托盘图标运行时按路径读取，必须随包带上
+  - build/**/*
   - node_modules/node-llama-cpp/**/*
   - node_modules/@node-llama-cpp/**/*
 # 原生 .node 不能跑在 asar 包内，必须解包
@@ -15,7 +17,25 @@ win:
     - target: nsis
       arch:
         - x64
+    # 绿色单文件版：便携模式，数据目录随 exe 走（见 electron/main.ts 的 PORTABLE_EXECUTABLE_DIR）
+    - target: portable
+      arch:
+        - x64
   icon: build/icon.ico
+# 文件关联：与 electron/main.ts 的 ASSOCIATED_EXTS 保持一致，改了要两边同步
+fileAssociations:
+  - ext: epub
+    name: EPUB 电子书
+    description: EPUB 电子书
+  - ext: txt
+    name: 文本文档
+    description: 文本文档
+  - ext: md
+    name: Markdown 文档
+    description: Markdown 文档
+  - ext: pdf
+    name: PDF 文档
+    description: PDF 文档
 nsis:
   oneClick: false
   allowToChangeInstallationDirectory: true

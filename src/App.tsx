@@ -37,7 +37,8 @@ const api = window.electronAPI ?? {
   deleteNote: async () => {},
   getSetting: async () => null,
   setSetting: async () => {},
-  onOpenFile: () => {},
+  importPaths: async () => ({ imported: [], failed: [] }),
+  onOpenFile: () => () => {},
 };
 
 function App() {
@@ -69,6 +70,17 @@ function App() {
       .catch(() => {});
   }, []);
 
+  // 系统「打开方式」/ 双击关联文件：冷启动的路径要主动来取，运行中的等主进程推送。
+  // 不带路径就来自 Ctrl+O，走打开文件对话框
+  useEffect(() => {
+    const openPath = (filePath?: string | null) => {
+      if (filePath) void handleOpenPath(filePath);
+      else void handleOpenFile();
+    };
+    window.electronAPI?.takeOpenFile?.().then(openPath).catch(() => {});
+    return api.onOpenFile(openPath);
+  }, []);
+
   const dismissOnboarding = () => {
     setShowOnboarding(false);
     window.electronAPI?.setSetting('onboarded', '1').catch(() => {});
@@ -77,6 +89,28 @@ function App() {
   const loadBooks = async () => {
     const allBooks = await api.getAllBooks();
     setBooks(allBooks as Book[]);
+  };
+
+  /** 系统「打开方式」/ 双击关联文件打开的书：库里已有就直接读，没有才导入 */
+  const handleOpenPath = async (filePath: string) => {
+    const all = (await api.getAllBooks()) as Book[];
+    const existing = all.find(b => b.file_path === filePath);
+    if (existing) {
+      handleSelectBook(existing);
+      return;
+    }
+    const r = await api.importPaths([filePath]);
+    await loadBooks();
+    const first = r?.imported?.[0] as { id?: number } | undefined;
+    if (first?.id) {
+      const book = (await api.getBookById(first.id)) as Book | null;
+      if (book) handleSelectBook(book);
+      return;
+    }
+    // 导入没成功要说清为什么（如内容重复已跳过），静默无反应会让人以为双击没生效
+    if (r?.failed?.length) {
+      alert(['以下文件未导入：', ...r.failed.map(f => `· ${f.name}：${f.reason}`)].join('\n'));
+    }
   };
 
   const handleOpenFile = async () => {
