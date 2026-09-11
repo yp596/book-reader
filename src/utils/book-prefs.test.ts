@@ -26,6 +26,7 @@ describe('parseBookPrefs', () => {
       textColor: '#eaeaea',
       pagePadding: 72,
       paraSpacing: 1.2,
+      pageGap: 40,
     };
     expect(parseBookPrefs(JSON.stringify(prefs))).toEqual(prefs);
   });
@@ -124,5 +125,12 @@ describe('排版自定义字段校验', () => {
     expect(parseBookPrefs(JSON.stringify({ paraSpacing: 0.8 }))).toEqual({ paraSpacing: 0.8 });
     expect(parseBookPrefs(JSON.stringify({ paraSpacing: 0 }))).toEqual({ paraSpacing: 0 });
     expect(parseBookPrefs(JSON.stringify({ paraSpacing: 9 }))).toEqual({});
+  });
+
+  it('页面间距钳制在 0-200，且 0 是合法值（等于只用默认留白）', () => {
+    expect(parseBookPrefs(JSON.stringify({ pageGap: 60 }))).toEqual({ pageGap: 60 });
+    expect(parseBookPrefs(JSON.stringify({ pageGap: 0 }))).toEqual({ pageGap: 0 });
+    expect(parseBookPrefs(JSON.stringify({ pageGap: -1 }))).toEqual({});
+    expect(parseBookPrefs(JSON.stringify({ pageGap: 500 }))).toEqual({});
   });
 });

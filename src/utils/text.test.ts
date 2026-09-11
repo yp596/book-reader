@@ -8,6 +8,7 @@ import {
   lineToPageIndex,
   serializeSavedPosition,
   parseSavedPosition,
+  findKeyword,
 } from './text';
 
 describe('escapeHtml', () => {
@@ -131,5 +132,34 @@ describe('阅读位置序列化', () => {
     expect(parseSavedPosition(JSON.stringify({ cfi: 'epubcfi(/6/4!)', page: -1 }))).toEqual({
       cfi: 'epubcfi(/6/4!)',
     });
+  });
+});
+
+describe('检索关键字的匹配选项', () => {
+  it('默认不区分大小写', () => {
+    expect(findKeyword('A Cat sat', 'cat')).toEqual({ index: 2, length: 3 });
+    expect(findKeyword('A Cat sat', 'CAT')).toEqual({ index: 2, length: 3 });
+  });
+
+  it('区分大小写时只认原样写法', () => {
+    expect(findKeyword('A Cat sat', 'cat', { caseSensitive: true })).toBeNull();
+    expect(findKeyword('A Cat sat', 'Cat', { caseSensitive: true })).toEqual({ index: 2, length: 3 });
+  });
+
+  it('全词匹配不命中更长的单词', () => {
+    expect(findKeyword('category cat', 'cat')).toEqual({ index: 0, length: 3 });
+    expect(findKeyword('category cat', 'cat', { wholeWord: true })).toEqual({ index: 9, length: 3 });
+    expect(findKeyword('category', 'cat', { wholeWord: true })).toBeNull();
+  });
+
+  it('全词匹配对中文不生效（中文没有词边界）', () => {
+    expect(findKeyword('顷刻炼化第二章', '第二章', { wholeWord: true })).toEqual({ index: 4, length: 3 });
+  });
+
+  it('正则元字符按字面量处理，不会被当成语法', () => {
+    expect(findKeyword('a.b', '.')).toEqual({ index: 1, length: 1 });
+    expect(findKeyword('a.b', 'a.b')).toEqual({ index: 0, length: 3 });
+    expect(findKeyword('axb', 'a.b')).toBeNull();
+    expect(findKeyword('(x)', '(x)')).toEqual({ index: 0, length: 3 });
   });
 });

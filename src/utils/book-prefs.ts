@@ -27,6 +27,8 @@ export interface ReaderPrefs {
   pagePadding: number;
   /** 段落间距（em） */
   paraSpacing: number;
+  /** 页面上下留白（像素，叠加在默认留白之上；0=只用默认） */
+  pageGap: number;
   /** 阅读样式预设（EPUB 正文），值取自 reading-styles 的预设名 */
   readingStyle: string;
 }
@@ -46,6 +48,7 @@ export const DEFAULT_READER_PREFS: ReaderPrefs = {
   textColor: '',
   pagePadding: 56,
   paraSpacing: 0,
+  pageGap: 0,
   readingStyle: 'none',
 };
 
@@ -92,6 +95,7 @@ export function parseBookPrefs(raw: string | null | undefined): Partial<ReaderPr
   if (isHexColor(parsed.textColor)) out.textColor = parsed.textColor;
   if (numIn(parsed.pagePadding, 0, 200)) out.pagePadding = parsed.pagePadding;
   if (numIn(parsed.paraSpacing, 0, 3)) out.paraSpacing = parsed.paraSpacing;
+  if (numIn(parsed.pageGap, 0, 200)) out.pageGap = parsed.pageGap;
   // 预设名要在白名单里：脏值会让面板下拉显示空白项
   if (typeof parsed.readingStyle === 'string' && STYLE_PRESETS.some(p => p.key === parsed.readingStyle)) {
     out.readingStyle = parsed.readingStyle;

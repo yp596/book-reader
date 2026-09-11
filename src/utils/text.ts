@@ -10,6 +10,31 @@ export const excerptAround = (text: string, keyword: string, radius = 40) => {
   return clean.slice(Math.max(0, idx - radius), idx + keyword.length + radius);
 };
 
+/** 检索高级选项 */
+export interface KeywordOptions {
+  /** 区分大小写 */
+  caseSensitive?: boolean;
+  /** 全词匹配：只在完整的英文/数字单词上命中（中文没有词边界，不受影响） */
+  wholeWord?: boolean;
+}
+
+/**
+ * 关键词 → 匹配用正则。
+ * 不用 /g：exec 在同一实例上会带着 lastIndex 跨次调用串味，
+ * 而这里的正则会被复用到每个文本节点上。
+ */
+export const buildKeywordRegex = (keyword: string, opts: KeywordOptions = {}) => {
+  const escaped = keyword.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+  const body = opts.wholeWord ? `(?<!\\w)${escaped}(?!\\w)` : escaped;
+  return new RegExp(body, opts.caseSensitive ? '' : 'i');
+};
+
+/** 在文本里找关键词；命中返回位置与命中的原文，未命中返回 null */
+export const findKeyword = (text: string, keyword: string, opts: KeywordOptions = {}) => {
+  const m = buildKeywordRegex(keyword, opts).exec(text);
+  return m ? { index: m.index, length: m[0].length } : null;
+};
+
 /** 秒数转中文时长 */
 export const formatMinutes = (seconds: number) => {
   const m = Math.round(seconds / 60);

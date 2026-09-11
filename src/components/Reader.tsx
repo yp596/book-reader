@@ -3,7 +3,7 @@ import ePub from 'epubjs';
 import * as pdfjsLib from 'pdfjs-dist';
 import PdfWorkerUrl from 'pdfjs-dist/build/pdf.worker.min.mjs?url';
 import { Book, Bookmark, Note, TocEntry, ReadingPosition } from '../types';
-import { escapeHtml, excerptAround, clampPage, lineToPageIndex, parseSavedPosition, serializeSavedPosition, SavedPosition } from '../utils/text';
+import { escapeHtml, excerptAround, clampPage, lineToPageIndex, parseSavedPosition, serializeSavedPosition, findKeyword, buildKeywordRegex, type SavedPosition, type KeywordOptions } from '../utils/text';
 import { fontStackOf, highlightColorOf, HIGHLIGHT_COLORS, type ThemeName } from '../utils/reader-options';
 import { resolveThemeByClock, type AutoThemeConfig } from '../utils/auto-theme';
 import {
@@ -158,6 +158,9 @@ export function Reader({ book, onBack, initialTarget, initialPosition }: ReaderP
   const [keyword, setKeyword] = useState('');
   const [hits, setHits] = useState<SearchHit[]>([]);
   const [searching, setSearching] = useState(false);
+  /** 检索高级选项：区分大小写 / 全词匹配（中文没有词边界，全词对中文不生效） */
+  const [searchCaseSensitive, setSearchCaseSensitive] = useState(false);
+  const [searchWholeWord, setSearchWholeWord] = useState(false);
 
   // TTS
   const [speaking, setSpeaking] = useState(false);
@@ -177,7 +180,7 @@ export function Reader({ book, onBack, initialTarget, initialPosition }: ReaderP
   const [reflowPage, setReflowPage] = useState(0);
   const [reflowBusy, setReflowBusy] = useState(false);
   /** 排版自定义：背景色 / 文字色 / 页边距 / 段间距 */
-  const [typo, setTypo] = useState({ bgColor: '', textColor: '', pagePadding: 56, paraSpacing: 0 });
+  const [typo, setTypo] = useState({ bgColor: '', textColor: '', pagePadding: 56, paraSpacing: 0, pageGap: 0 });
   const typoRef = useRef(typo);
   /** 阅读样式预设：styleCssRef 存当前要注入的 CSS，切换时免去异步读设置 */
   const [stylePreset, setStylePreset] = useState('none');
@@ -789,6 +792,7 @@ export function Reader({ book, onBack, initialTarget, initialPosition }: ReaderP
         textColor: merged.textColor,
         pagePadding: merged.pagePadding,
         paraSpacing: merged.paraSpacing,
+        pageGap: merged.pageGap,
       };
       typoRef.current = typoNext;
       setTypo(typoNext);
@@ -1421,15 +1425,23 @@ export function Reader({ book, onBack, initialTarget, initialPosition }: ReaderP
         : `background:${color.css}`;
       ranges.push({ s, e: Math.min(e, text.length), cls: '', style, id: b.id });
     }
-    // 检索词（跳过与书签重叠的部分）
+    // 检索词（跳过与书签重叠的部分）：与检索用同一套匹配规则
     if (searchMark) {
-      const kw = searchMark.toLowerCase();
-      const lower = text.toLowerCase();
-      let idx = lower.indexOf(kw);
-      while (idx >= 0) {
-        const overlap = ranges.some(r => idx < r.e && idx + kw.length > r.s);
-        if (!overlap) ranges.push({ s: idx, e: idx + kw.length, cls: 'search-mark' });
-        idx = lower.indexOf(kw, idx + 1);
+      const base = buildKeywordRegex(searchMark, {
+        caseSensitive: searchCaseSensitive,
+        wholeWord: searchWholeWord,
+      });
+      // 另起一个带 g 的实例：复用同一个正则，exec 的 lastIndex 会跨节点串味
+      const re = new RegExp(base.source, base.flags + 'g');
+      let m: RegExpExecArray | null;
+      while ((m = re.exec(text)) !== null) {
+        // 空匹配会让 lastIndex 原地打转，直接跳出
+        if (m[0].length === 0) break;
+        const s = m.index;
+        const e = s + m[0].length;
+        const overlap = ranges.some(r => s < r.e && e > r.s);
+        if (!overlap) ranges.push({ s, e, cls: 'search-mark' });
+        re.lastIndex = e;
       }
     }
     if (ranges.length === 0) return null;
@@ -2132,12 +2144,19 @@ ${body}</body></html>`;
     if (!kw) return;
     setSearching(true);
     setHits([]);
+    const opts: KeywordOptions = { caseSensitive: searchCaseSensitive, wholeWord: searchWholeWord };
     try {
       if (book.file_type === 'txt') {
         const found: SearchHit[] = [];
         txtPages.forEach((page, i) => {
-          if (page.toLowerCase().includes(kw.toLowerCase())) {
-            found.push({ label: `第 ${i + 1} 页`, excerpt: excerptAround(page, kw), target: i });
+          const hit = findKeyword(page, kw, opts);
+          if (hit) {
+            // 摘要从命中处截，否则「全词匹配」命中的是后一处、看到的却是前一处的上下文
+            found.push({
+              label: `第 ${i + 1} 页`,
+              excerpt: excerptAround(page.slice(hit.index), kw),
+              target: i,
+            });
           }
         });
         setHits(found);
@@ -2149,9 +2168,10 @@ ${body}</body></html>`;
               .load(epubBook.load.bind(epubBook))
               .then((doc: any) => {
                 const text = (doc?.body?.textContent as string) || '';
-                const excerpt = excerptAround(text, kw);
+                const hit = findKeyword(text, kw, opts);
                 item.unload();
-                if (!excerpt) return null;
+                if (!hit) return null;
+                const excerpt = excerptAround(text.slice(hit.index), kw);
                 const tocLabel = chapters.find(c => item.href.includes(c.href) || c.href.includes(item.href))?.label;
                 return { label: tocLabel || item.href, excerpt, target: item.href } as SearchHit;
               })
@@ -2176,8 +2196,9 @@ ${body}</body></html>`;
     } else if (book.file_type === 'epub' && typeof hit.target === 'string') {
       const kw = keyword.trim();
       setSearchMark(kw);
-      // 章节显示完成后再框选关键词
-      renditionRef.current?.display(hit.target).then(() => markEpubKeyword(kw)).catch(() => {});
+      // 章节显示完成后再框选关键词；带上当前检索选项，标红位置才和命中列表一致
+      const opts: KeywordOptions = { caseSensitive: searchCaseSensitive, wholeWord: searchWholeWord };
+      renditionRef.current?.display(hit.target).then(() => markEpubKeyword(kw, opts)).catch(() => {});
     }
     setPanel(null);
   };
@@ -2198,11 +2219,10 @@ ${body}</body></html>`;
   };
 
   /** EPUB 当前章节内框选关键词（每文本节点首处） */
-  const markEpubKeyword = (kw: string) => {
+  const markEpubKeyword = (kw: string, opts: KeywordOptions = {}) => {
     clearEpubSearchMarks();
     if (!kw.trim()) return;
     try {
-      const lower = kw.toLowerCase();
       const contents = renditionRef.current?.getContents?.() ?? [];
       for (const c of contents) {
         const doc = c.document as Document;
@@ -2215,17 +2235,18 @@ ${body}</body></html>`;
         }
         for (const t of nodes) {
           const text = t.textContent || '';
-          const idx = text.toLowerCase().indexOf(lower);
-          if (idx < 0) continue;
+          // 与检索用同一套匹配规则，否则「区分大小写」下命中的位置和标红的位置会对不上
+          const hit = findKeyword(text, kw, opts);
+          if (!hit) continue;
           const mark = doc.createElement('mark');
           mark.className = 'epub-search';
           mark.setAttribute('style', 'background:rgba(255,152,0,.55);color:inherit;border-radius:2px;');
-          mark.textContent = text.slice(idx, idx + kw.length);
+          mark.textContent = text.slice(hit.index, hit.index + hit.length);
           const parent = t.parentNode;
           if (!parent) continue;
-          parent.insertBefore(doc.createTextNode(text.slice(0, idx)), t);
+          parent.insertBefore(doc.createTextNode(text.slice(0, hit.index)), t);
           parent.insertBefore(mark, t);
-          parent.insertBefore(doc.createTextNode(text.slice(idx + kw.length)), t);
+          parent.insertBefore(doc.createTextNode(text.slice(hit.index + hit.length)), t);
           parent.removeChild(t);
         }
       }
@@ -2776,6 +2797,18 @@ ${body}</body></html>`;
             </div>
 
             <div className="form-row">
+              <label>页面间距 +{typo.pageGap} px</label>
+              <input
+                type="range"
+                min={0}
+                max={200}
+                step={4}
+                value={typo.pageGap}
+                onChange={e => applyTypo({ pageGap: Number(e.target.value) })}
+              />
+            </div>
+
+            <div className="form-row">
               <label>段落间距 {typo.paraSpacing.toFixed(1)} 字</label>
               <input
                 type="range"
@@ -2789,6 +2822,8 @@ ${body}</body></html>`;
 
             <p className="section-desc" style={{ marginBottom: 0 }}>
               阅读样式与段落间距对 EPUB 生效，TXT 以空行分段、不受这两项影响。
+              页面间距是叠加在默认留白之上的上下留白（漫画双页合并时也用作两页之间的间隙），
+              EPUB 的版式由 epub.js 控制、此项对其不生效。
               以上设置按书记忆，下次打开自动还原；自定义 CSS 是全局的，对所有书生效。
             </p>
           </div>
@@ -2954,6 +2989,22 @@ ${body}</body></html>`;
                 {searching ? '搜...' : '搜'}
               </button>
             </div>
+            <label className="view-row">
+              <input
+                type="checkbox"
+                checked={searchCaseSensitive}
+                onChange={e => setSearchCaseSensitive(e.target.checked)}
+              />
+              <span>区分大小写</span>
+            </label>
+            <label className="view-row">
+              <input
+                type="checkbox"
+                checked={searchWholeWord}
+                onChange={e => setSearchWholeWord(e.target.checked)}
+              />
+              <span>全词匹配（中文没有词边界，不受影响）</span>
+            </label>
             {hits.length === 0 && !searching && keyword && (
               <p className="empty-text">没有找到相关内容</p>
             )}
@@ -2998,7 +3049,7 @@ ${body}</body></html>`;
                 justifyContent: 'center',
                 alignItems: 'flex-start',
                 overflow: 'auto',
-                padding: 8,
+                padding: 8 + typo.pageGap,
                 minWidth: 0,
               }}
             >
@@ -3006,7 +3057,7 @@ ${body}</body></html>`;
                 <div
                   style={{
                     display: 'flex',
-                    gap: 8,
+                    gap: 8 + typo.pageGap,
                     justifyContent: 'center',
                     alignItems: 'flex-start',
                     maxWidth: '100%',
@@ -3045,6 +3096,9 @@ ${body}</body></html>`;
                 color: typo.textColor || undefined,
                 paddingLeft: typo.pagePadding,
                 paddingRight: typo.pagePadding,
+                // 叠加在样式表的默认留白（上 40 / 下 60）之上，默认 0 时外观与原来一致
+                paddingTop: 40 + typo.pageGap,
+                paddingBottom: 60 + typo.pageGap,
                 columnCount: dualColumn ? 2 : undefined,
                 columnGap: dualColumn ? '48px' : undefined,
                 writingMode: vertical ? 'vertical-rl' : undefined,
@@ -3060,7 +3114,12 @@ ${body}</body></html>`;
             </div>
           )}
           {!loading && !error && book.file_type === 'pdf' && !pdfReflow && (
-            <div className="pdf-page" ref={pdfWrapRef}>
+            <div
+              className="pdf-page"
+              ref={pdfWrapRef}
+              // 样式表默认上下 24px，叠加页面间距
+              style={{ paddingTop: 24 + typo.pageGap, paddingBottom: 24 + typo.pageGap }}
+            >
               <canvas ref={canvasRef} />
             </div>
           )}
