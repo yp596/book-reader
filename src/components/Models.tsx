@@ -47,8 +47,9 @@ export function Models() {
     try {
       await window.electronAPI?.downloadModel(id);
       load();
+      alert('模型下载完成，点「启动」即可使用。');
     } catch (err) {
-      setError(err instanceof Error ? err.message : '下载失败');
+      setError(err instanceof Error ? err.message : '模型下载失败，请检查网络后重试');
     } finally {
       setBusyFlag(id, false);
       setProgress(p => {
@@ -68,15 +69,19 @@ export function Models() {
       await window.electronAPI?.startModel(id);
       load();
     } catch (err) {
-      setError(err instanceof Error ? err.message : '启动失败');
+      setError(err instanceof Error ? err.message : '模型启动失败，请重新下载后再试');
     } finally {
       setBusyFlag(id, false);
     }
   };
 
   const handleStop = async (id: string) => {
-    await window.electronAPI?.stopModel(id);
-    load();
+    try {
+      await window.electronAPI?.stopModel(id);
+      load();
+    } catch (err) {
+      setError(err instanceof Error ? err.message : '停止失败，请重启软件后再试');
+    }
   };
 
   const binProgress = progress['__bin__'];
@@ -96,7 +101,7 @@ export function Models() {
 
       {binProgress != null && (
         <div className="info-bar">
-          <p>正在下载 llama-server 运行环境：{binProgress}%</p>
+          <p>正在下载本地 AI 运行组件（较大，只需下载一次）：{binProgress}%</p>
           <div className="progress-bar">
             <div style={{ width: `${binProgress}%` }} />
           </div>
@@ -112,7 +117,7 @@ export function Models() {
               <div className="source-info" style={{ border: 'none', margin: 0, padding: 0 }}>
                 <h3>
                   {m.name}
-                  {m.running && <span className="badge-on">运行中 · :{m.port}</span>}
+                  {m.running && <span className="badge-on">运行中</span>}
                   {!m.running && m.downloaded && <span className="badge-off">已下载</span>}
                 </h3>
                 <p className="source-url">{m.desc} · {m.sizeMB}MB</p>
@@ -154,7 +159,7 @@ export function Models() {
 
       {models.length === 0 && (
         <div className="empty-state small">
-          <p>正在连接主进程…</p>
+          <p>正在加载…</p>
         </div>
       )}
     </div>

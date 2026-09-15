@@ -3,7 +3,21 @@ import fs from 'fs';
 import os from 'os';
 import path from 'path';
 import JSZip from 'jszip';
-import { extractMetadata, extractToc, parseTxtChapters, docxToChapters, mdToChapters, decodeTextAuto, isGenericChapterTitle } from './metadata';
+import {
+  extractMetadata,
+  extractToc,
+  parseTxtChapters,
+  docxToChapters,
+  mdToChapters,
+  mdToDocument,
+  imageMediaType,
+  collectMarkdownTags,
+  collectMarkdownTasks,
+  collectMarkdownLinks,
+  parseFrontmatter,
+  decodeTextAuto,
+  isGenericChapterTitle,
+} from './metadata';
 
 let tmpDir: string;
 
@@ -270,6 +284,7 @@ describe('Markdown', () => {
     const p = write('a.md', '# 第一章 开始\n正文一\n\n## 第二节\n正文二\n');
     const chapters = await mdToChapters(p);
     expect(chapters.map(c => c.title)).toEqual(['第一章 开始', '第二节']);
+    expect(chapters[0].html).toContain('正文一');
   });
 
   it('保留加粗与列表，空元素转为自闭合', async () => {
@@ -302,6 +317,62 @@ describe('Markdown', () => {
   it('元数据取首个一级标题（二级标题不算）', async () => {
     const p = write('f.md', '## 二级先出现\n# 真正的书名\n');
     expect(await extractMetadata(p, '.md')).toEqual({ title: '真正的书名', author: undefined });
+  });
+
+  it('GBK 编码的 .md 不乱码（记事本存出来的中文 Markdown 很常见）', async () => {
+    const p = path.join(tmpDir, 'gbk.md');
+    // "# 测试\n正文\n" 的 GBK 字节：非法 UTF-8，必须走回退解码
+    fs.writeFileSync(
+      p,
+      Buffer.from([0x23, 0x20, 0xb2, 0xe2, 0xca, 0xd4, 0x0a, 0xd5, 0xfd, 0xce, 0xc4, 0x0a]),
+    );
+    const chapters = await mdToChapters(p);
+    expect(chapters[0].title).toBe('测试');
+    expect(chapters[0].html).toContain('正文');
+  });
+
+  it('Obsidian 写法转成排版元素：高亮、wiki 链接、callout、标签', async () => {
+    const p = write(
+      'obsidian.md',
+      [
+        '# 章',
+        '含 ==高亮== 与 #标签 与 [[另一篇笔记]] 与 [[目标笔记|别名]]。',
+        '',
+        '> [!note] 提示',
+        '> 这是一段说明。',
+        '',
+        '- [ ] 待办',
+      ].join('\n'),
+    );
+    const html = (await mdToChapters(p))[0].html;
+
+    expect(html).toContain('<mark>高亮</mark>');
+    expect(html).toContain('class="wikilink"');
+    expect(html).toContain('别名');
+    expect(html).toContain('class="tag"');
+    expect(html).toContain('callout');
+    expect(html).toContain('type="checkbox"');
+    // 原样残留就说明没转换
+    expect(html).not.toContain('==');
+    expect(html).not.toContain('[[');
+    expect(html).not.toContain('[!note]');
+  });
+
+  it('代码块里的 # 与 == 不被改写', async () => {
+    const p = write('code.md', '# 章\n\n```bash\n# 注释不该变成标签，a == b 也不该变高亮\n```\n');
+    const html = (await mdToChapters(p))[0].html;
+    expect(html).toContain('# 注释不该变成标签');
+    expect(html).toContain('a == b');
+    expect(html).not.toContain('<mark>');
+  });
+
+  it('YAML frontmatter 作为信息块保留，不混进正文', async () => {
+    const p = write('fm.md', '---\ntitle: 我的笔记\ntags: 读书\n---\n\n# 章\n正文\n');
+    const html = (await mdToChapters(p))[0].html;
+    expect(html).toContain('frontmatter');
+    expect(html).toContain('title: 我的笔记');
+    // 不能被当成一条水平线 + 一段普通文字
+    expect(html).not.toContain('<hr/>\ntitle: 我的笔记');
   });
 });
 
@@ -403,5 +474,246 @@ describe('decodeTextAuto 编码判定', () => {
     return extractMetadata(file, '.txt').then(meta => {
       expect(meta?.title).toBe('标题');
     });
+  });
+});
+
+describe('Markdown 标签与待办的收集', () => {
+  const write = (name: string, text: string) => {
+    const p = path.join(tmpDir, name);
+    fs.writeFileSync(p, text, 'utf-8');
+    return p;
+  };
+
+  it('收集 #标签并去重', async () => {
+    const p = write('tags.md', '# 章\n#读书 与 #读书 与 #待整理\n');
+    const tags = collectMarkdownTags(await mdToChapters(p));
+    expect(tags.sort()).toEqual(['待整理', '读书']);
+  });
+
+  it('代码块里的 # 不算标签', async () => {
+    const p = write('tag-code.md', '# 章\n\n```sh\n# 这行注释不是标签\n```\n');
+    expect(collectMarkdownTags(await mdToChapters(p))).toEqual([]);
+  });
+
+  it('只收未完成的任务，并记下所属章节与跳转目标', async () => {
+    const p = write(
+      'tasks.md',
+      '# 第一章\n- [ ] 写提纲\n- [x] 已经做完的事\n\n## 第二章\n- [ ] 补数据\n',
+    );
+    const tasks = collectMarkdownTasks(await mdToChapters(p), i => `Text/ch${i + 1}.xhtml`);
+
+    expect(tasks.map(t => t.text)).toEqual(['写提纲', '补数据']);
+    expect(tasks[0].chapter).toBe('第一章');
+    expect(tasks[1].chapter).toBe('第二章');
+    expect(tasks[1].href).toBe('Text/ch2.xhtml');
+  });
+
+  it('任务里的行内格式被去掉，只留纯文本', async () => {
+    const p = write('task-md.md', '# 章\n- [ ] 读 **这本书** 的下半部分\n');
+    const tasks = collectMarkdownTasks(await mdToChapters(p), () => 'Text/ch1.xhtml');
+    expect(tasks[0].text).toBe('读 这本书 的下半部分');
+  });
+});
+
+describe('Markdown 图片随 EPUB 打包', () => {
+  const tmpMd = () => fs.mkdtempSync(path.join(os.tmpdir(), 'br-mdimg-'));
+
+  it('相对路径的图片被收进包，并把引用改写成包内路径', async () => {
+    const dir = tmpMd();
+    fs.mkdirSync(path.join(dir, 'images'));
+    fs.writeFileSync(path.join(dir, 'images', 'pic.png'), Buffer.from([0x89, 0x50]));
+    const md = path.join(dir, 'note.md');
+    fs.writeFileSync(md, '# 章\n\n![示意图](./images/pic.png)\n\n正文\n', 'utf-8');
+
+    const doc = await mdToDocument(md);
+    expect(doc.images).toHaveLength(1);
+    expect(doc.images[0].archiveName).toBe('Images/pic.png');
+    expect(doc.chapters[0].html).toContain('src="../Images/pic.png"');
+    expect(doc.chapters[0].html).not.toContain('./images/pic.png');
+    expect(doc.missingImages).toBe(0);
+  });
+
+  it('外链与 data: 内联不动；找不到的图片计入 missingImages 并把原样引用留着', async () => {
+    const dir = tmpMd();
+    const md = path.join(dir, 'note.md');
+    fs.writeFileSync(
+      md,
+      '# 章\n\n![外链](https://x.com/a.png)\n\n![内联](data:image/png;base64,AAA)\n\n![缺图](./nope.png)\n',
+      'utf-8',
+    );
+
+    const doc = await mdToDocument(md);
+    expect(doc.images).toHaveLength(0);
+    expect(doc.missingImages).toBe(1);
+    expect(doc.chapters[0].html).toContain('https://x.com/a.png');
+    expect(doc.chapters[0].html).toContain('data:image/png;base64,AAA');
+    expect(doc.chapters[0].html).toContain('./nope.png');
+  });
+
+  it('非图片后缀不会被塞进包里', async () => {
+    const dir = tmpMd();
+    fs.writeFileSync(path.join(dir, 'note.txt'), '不是图片');
+    const md = path.join(dir, 'n.md');
+    fs.writeFileSync(md, '# 章\n\n[附件](./note.txt)\n\n![伪装](./note.txt)\n', 'utf-8');
+
+    const doc = await mdToDocument(md);
+    expect(doc.images).toHaveLength(0);
+  });
+
+  it('不同目录下的同名图片不互相覆盖', async () => {
+    const dir = tmpMd();
+    fs.mkdirSync(path.join(dir, 'a'));
+    fs.mkdirSync(path.join(dir, 'b'));
+    fs.writeFileSync(path.join(dir, 'a', 'pic.png'), Buffer.from([1]));
+    fs.writeFileSync(path.join(dir, 'b', 'pic.png'), Buffer.from([2]));
+    const md = path.join(dir, 'n.md');
+    fs.writeFileSync(md, '# 章\n\n![一](a/pic.png)\n\n![二](b/pic.png)\n', 'utf-8');
+
+    const doc = await mdToDocument(md);
+    expect(doc.images).toHaveLength(2);
+    expect(new Set(doc.images.map(i => i.archiveName)).size).toBe(2);
+  });
+});
+
+describe('Markdown 图片：端到端（Markdown → EPUB → 取回）', () => {
+  it('导入后图片确实在包里，且能被按字节取回', async () => {
+    const { buildEpub } = await import('./epub-export');
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'br-md-e2e-'));
+    fs.mkdirSync(path.join(dir, 'images'));
+    const pngBytes = Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 0x01, 0x02]);
+    fs.writeFileSync(path.join(dir, 'images', 'shot.png'), pngBytes);
+    const md = path.join(dir, '笔记.md');
+    fs.writeFileSync(md, '# 我的笔记\n\n看这张图：\n\n![截图](./images/shot.png)\n', 'utf-8');
+
+    // 与导入链路相同的两步：解析 → 组装 EPUB
+    const doc = await mdToDocument(md);
+    const buf = await buildEpub(
+      '我的笔记',
+      doc.chapters,
+      doc.images.map(i => ({ ...i, mediaType: imageMediaType(i.sourcePath) })),
+    );
+
+    const zip = await JSZip.loadAsync(buf);
+    const entry = zip.file('OEBPS/Images/shot.png');
+    expect(entry).toBeTruthy();
+    expect(await entry!.async('nodebuffer')).toEqual(pngBytes);
+
+    const chapter = await zip.file('OEBPS/Text/ch1.xhtml')!.async('string');
+    expect(chapter).toContain('../Images/shot.png');
+
+    const opf = await zip.file('OEBPS/content.opf')!.async('string');
+    expect(opf).toContain('href="Images/shot.png"');
+  });
+});
+
+describe('Markdown wiki 链接目标的收集', () => {
+  it('取出 [[目标]] 里的目标并去重，别名不参与', async () => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'br-mdlink-'));
+    const md = path.join(dir, 'n.md');
+    fs.writeFileSync(
+      md,
+      '# 章\n\n见 [[读书笔记]] 与 [[读书笔记|别名]] 与 [[另一篇]]。\n\n```\n[[代码块里的不算]]\n```\n',
+      'utf-8',
+    );
+
+    const links = collectMarkdownLinks(await mdToChapters(md));
+    expect([...links].sort()).toEqual(['另一篇', '读书笔记'].sort());
+    expect(links).not.toContain('代码块里的不算');
+    expect(links).not.toContain('别名');
+  });
+});
+
+describe('frontmatter 属性解析', () => {
+  it('取标量键值对', () => {
+    expect(parseFrontmatter('---\ntitle: 我的笔记\nstatus: 待整理\n---\n\n正文\n')).toEqual({
+      title: ['我的笔记'],
+      status: ['待整理'],
+    });
+  });
+
+  it('行内列表与逗号分隔都拆成多个值，引号去掉', () => {
+    expect(parseFrontmatter('---\ntags: [读书, "科幻"]\nkeys: a, b\n---\n')).toEqual({
+      tags: ['读书', '科幻'],
+      keys: ['a', 'b'],
+    });
+  });
+
+  it('没有 frontmatter 时返回空对象', () => {
+    expect(parseFrontmatter('# 标题\n\n正文')).toEqual({});
+    // 只出现在文件中间的不算（frontmatter 必须在开头）
+    expect(parseFrontmatter('正文\n\n---\ntitle: x\n---\n')).toEqual({});
+  });
+
+  it('嵌套结构、缩进行、注释、空值一律跳过', () => {
+    const text = '---\n# 注释\nlink: https://example.com\nauthor:\n  name: 张三\nlist:\n  - 一\n\n---\n';
+    // 只认最朴素的 `键: 值`：拿不准的一律不解析，正文里的信息块仍保留原文
+    expect(parseFrontmatter(text)).toEqual({ link: ['https://example.com'] });
+  });
+
+  it('mdToDocument 会把属性一并带出来', async () => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'br-fm-'));
+    const md = path.join(dir, 'n.md');
+    fs.writeFileSync(md, '---\nstatus: 已完成\nrating: 5\n---\n\n# 章\n正文\n', 'utf-8');
+    const doc = await mdToDocument(md);
+    expect(doc.props).toEqual({ status: ['已完成'], rating: ['5'] });
+    // 正文里的信息块仍在（原文完整保留）
+    expect(doc.chapters[0].html).toContain('frontmatter');
+  });
+});
+
+describe('Markdown 公式与代码高亮', () => {
+  const write = (name: string, text: string) => {
+    const p = path.join(tmpDir, name);
+    fs.writeFileSync(p, text, 'utf-8');
+    return p;
+  };
+
+  it('行内与块级公式都渲染成 MathML', async () => {
+    const p = write('math.md', '# 章\n\n质能方程 $E = mc^2$ 的含义。\n\n$$\n\int_0^1 x\,dx\n$$\n');
+    const html = (await mdToDocument(p)).chapters[0].html;
+
+    expect(html).toContain('<math xmlns="http://www.w3.org/1998/Math/MathML"');
+    expect(html).not.toContain('$E = mc^2$');
+    expect((html.match(/<math/g) ?? []).length).toBe(2);
+  });
+
+  it('价格里的美元符号不会被误判成公式', async () => {
+    const p = write('price.md', '# 章\n\n这本书 $5 到 $10，符号 $ 单独出现也不算。\n');
+    const html = (await mdToDocument(p)).chapters[0].html;
+
+    expect(html).not.toContain('<math');
+    expect(html).toContain('$5');
+    expect(html).toContain('$10');
+  });
+
+  it('代码块里的 $ 不渲染成公式', async () => {
+    const p = write('code-dollar.md', '# 章\n\n```sh\necho $x$ 只是 shell 变量\n```\n');
+    const html = (await mdToDocument(p)).chapters[0].html;
+
+    expect(html).not.toContain('<math');
+    expect(html).toContain('$x$');
+  });
+
+  it('写了语言的代码块会高亮', async () => {
+    const p = write('hl.md', '# 章\n\n```js\nconst a = 1;\n```\n');
+    const html = (await mdToDocument(p)).chapters[0].html;
+
+    expect(html).toContain('hljs-keyword');
+    expect(html).toContain('const');
+  });
+
+  it('不认识的语言不高亮也不报错，代码原样留着', async () => {
+    const p = write('hl-bad.md', '# 章\n\n```nosuchlang\nfoo bar\n```\n');
+    const html = (await mdToDocument(p)).chapters[0].html;
+
+    expect(html).toContain('foo bar');
+    expect(html).not.toContain('hljs-keyword');
+  });
+
+  it('非法公式不抛错，退化成可见的错误提示而不是吃掉正文', async () => {
+    const p = write('bad-math.md', '# 章\n\n$\bad{$ 之后还有正文。\n');
+    const doc = await mdToDocument(p);
+    expect(doc.chapters[0].html).toContain('katex-error');
+    expect(doc.chapters[0].html).toContain('之后还有正文');
   });
 });

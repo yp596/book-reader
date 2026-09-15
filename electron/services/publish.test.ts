@@ -1,4 +1,7 @@
 import { describe, it, expect } from 'vitest';
+import fs from 'fs';
+import os from 'os';
+import path from 'path';
 import { applyTextFilters } from './book-source';
 import { escapeXml, chapterToXhtml, buildOpf, buildNcx, buildEpub } from './epub-export';
 import JSZip from 'jszip';
@@ -46,11 +49,21 @@ describe('epub builders', () => {
 
   it('buildNcx 目录顺序正确', () => {
     const ncx = buildNcx('测试书', [
-      { id: 'ch1', title: '第一章' },
-      { id: 'ch2', title: '第二章' },
+      { title: '第一章', href: 'Text/ch1.xhtml' },
+      { title: '第二章', href: 'Text/ch2.xhtml' },
     ]);
     expect(ncx.indexOf('第一章')).toBeLessThan(ncx.indexOf('第二章'));
     expect(ncx).toContain('playOrder="2"');
+  });
+
+  it('buildEpub 为章节注入样式表并在清单里登记', async () => {
+    const buf = await buildEpub('测试书', [{ title: '第一章', content: '正文一' }]);
+    const zip = await JSZip.loadAsync(buf);
+    expect(zip.file('OEBPS/Styles/reader.css')).toBeTruthy();
+    const opf = await zip.file('OEBPS/content.opf')!.async('string');
+    expect(opf).toContain('href="Styles/reader.css"');
+    const chapter = await zip.file('OEBPS/Text/ch1.xhtml')!.async('string');
+    expect(chapter).toContain('../Styles/reader.css');
   });
 
   it('buildEpub 生成可解包的标准结构', async () => {
@@ -67,5 +80,35 @@ describe('epub builders', () => {
     expect(zip.file('OEBPS/Text/ch2.xhtml')).not.toBeNull();
     const ch1 = await zip.file('OEBPS/Text/ch1.xhtml')!.async('string');
     expect(ch1).toContain('正文一');
+  });
+});
+
+describe('EPUB 里的本地图片', () => {
+  it('图片写进包、登记进清单、章节引用指向包内路径', async () => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'br-epubimg-'));
+    const img = path.join(dir, 'pic.png');
+    fs.writeFileSync(img, Buffer.from([0x89, 0x50, 0x4e, 0x47]));
+
+    const buf = await buildEpub(
+      '测试书',
+      [{ title: '第一章', content: '', html: '<p><img src="../Images/pic.png" alt="示意图"/></p>' }],
+      [{ archiveName: 'Images/pic.png', sourcePath: img, mediaType: 'image/png' }],
+    );
+
+    const zip = await JSZip.loadAsync(buf);
+    expect(zip.file('OEBPS/Images/pic.png')).toBeTruthy();
+
+    const opf = await zip.file('OEBPS/content.opf')!.async('string');
+    expect(opf).toContain('href="Images/pic.png"');
+    expect(opf).toContain('media-type="image/png"');
+
+    const chapter = await zip.file('OEBPS/Text/ch1.xhtml')!.async('string');
+    expect(chapter).toContain('../Images/pic.png');
+  });
+
+  it('没有图片时清单里不会出现多余项', async () => {
+    const buf = await buildEpub('测试书', [{ title: '第一章', content: '正文' }]);
+    const opf = await (await JSZip.loadAsync(buf)).file('OEBPS/content.opf')!.async('string');
+    expect(opf).not.toContain('media-type="image/');
   });
 });

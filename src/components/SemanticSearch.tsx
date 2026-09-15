@@ -57,7 +57,7 @@ export function SemanticSearch({ books, onOpenBook }: SemanticSearchProps) {
     setBuildingId(bookId);
     try {
       const r = await api.buildRagIndex(bookId);
-      alert(`索引建立完成，共 ${r.chunks} 个片段`);
+      alert(`建立完成，这本书拆成 ${r.chunks} 段内容，可以开始提问了。`);
       loadStatus();
     } catch (err) {
       alert(err instanceof Error ? err.message : '建索引失败');
@@ -67,9 +67,13 @@ export function SemanticSearch({ books, onOpenBook }: SemanticSearchProps) {
   };
 
   const handleClear = async (bookId: number) => {
-    if (!confirm('删除该书的语义索引？')) return;
-    await window.electronAPI?.clearRagIndex(bookId);
-    loadStatus();
+    if (!confirm('删除这本书的索引？删除后可随时重新建立，不影响书籍与笔记。')) return;
+    try {
+      await window.electronAPI?.clearRagIndex(bookId);
+      loadStatus();
+    } catch (err) {
+      alert(err instanceof Error ? err.message : '删除索引失败，请重试');
+    }
   };
 
   const handleSearch = async () => {
@@ -109,7 +113,7 @@ export function SemanticSearch({ books, onOpenBook }: SemanticSearchProps) {
 
       <div className="info-bar">
         <Icon name="info" size={15} />
-        <p>按意思找内容，不止关键词。先为书籍建立索引（本地向量服务），再用自然语言提问。</p>
+        <p>按意思找内容，不止关键词。先给书建立索引，再用自然语言提问。索引与检索都在本机完成，不上传任何内容。</p>
       </div>
 
       <section className="settings-section">
@@ -122,37 +126,37 @@ export function SemanticSearch({ books, onOpenBook }: SemanticSearchProps) {
             placeholder="例如：主人公为什么离开家乡？"
           />
           <button className="btn-primary" onClick={handleSearch} disabled={searching}>
-            {searching ? '找...' : '搜'}
+            {searching ? '查找中…' : '搜'}
           </button>
         </div>
         {searchError && <p className="search-error">{searchError}</p>}
         {hits.map((h, i) => (
           <div key={i} className="mark-item search-hit" onClick={() => openHit(h)}>
             <p className="mark-label">
-              《{h.bookTitle}》{h.chapter ? ` · ${h.chapter}` : ''} · {(h.score * 100).toFixed(0)}%
+              《{h.bookTitle}》{h.chapter ? ` · ${h.chapter}` : ''} · 相关度 {(h.score * 100).toFixed(0)}%
             </p>
             <p className="mark-quote">...{h.excerpt}...</p>
           </div>
         ))}
         {!searching && query && hits.length === 0 && !searchError && (
-          <p className="empty-text">没有找到语义相关的内容</p>
+          <p className="empty-text">没有找到相关内容，换个说法或换本书再试</p>
         )}
       </section>
 
       <section className="settings-section">
         <h2>索引管理</h2>
         {status.length === 0 && unindexed.length === 0 && (
-          <p className="empty-text">书架暂无书籍</p>
+          <p className="empty-text">书架里还没有书。先去书架导入一本，再回来建立索引。</p>
         )}
         {status.map(s => (
           <div key={s.book_id} className="source-card" style={{ marginBottom: 10 }}>
             <div className="source-info" style={{ border: 'none', margin: 0, padding: 0 }}>
               <h3>《{s.title}》</h3>
-              <p className="source-url">{s.chunks} 个片段 · {s.updated_at ? new Date(s.updated_at).toLocaleString() : ''}</p>
+              <p className="source-url">已整理 {s.chunks} 段 · {s.updated_at ? new Date(s.updated_at).toLocaleString() : ''}</p>
             </div>
             <div className="source-actions" style={{ gap: 8, display: 'flex' }}>
               <button className="btn-secondary small" onClick={() => handleBuild(s.book_id)} disabled={buildingId === s.book_id}>
-                {buildingId === s.book_id ? '建中...' : '重建'}
+                {buildingId === s.book_id ? '建立中…' : '重新建立'}
               </button>
               <button className="btn-danger small" onClick={() => handleClear(s.book_id)}>删除</button>
             </div>
@@ -162,11 +166,11 @@ export function SemanticSearch({ books, onOpenBook }: SemanticSearchProps) {
           <div key={b.id} className="source-card" style={{ marginBottom: 10, opacity: 0.75 }}>
             <div className="source-info" style={{ border: 'none', margin: 0, padding: 0 }}>
               <h3>《{b.title}》</h3>
-              <p className="source-url">未建索引</p>
+              <p className="source-url">尚未建立索引</p>
             </div>
             <div className="source-actions" style={{ gap: 8, display: 'flex' }}>
               <button className="btn-secondary small" onClick={() => handleBuild(b.id)} disabled={buildingId === b.id}>
-                {buildingId === b.id ? '建中...' : '建立索引'}
+                {buildingId === b.id ? '建立中…' : '建立索引'}
               </button>
             </div>
           </div>

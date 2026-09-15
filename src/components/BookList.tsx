@@ -18,15 +18,45 @@ type SortBy = SortByWithRating;
 type Filter = 'all' | 'reading' | 'finished' | 'favorite' | 'shelved' | 'idle';
 type SortByWithRating = 'recent' | 'title' | 'author' | 'rating';
 
+/**
+ * 书架编辑弹窗。Electron 的渲染进程不支持 window.prompt（调用即抛
+ * "prompt() is not supported."），所以改名、分类、系列、批量设置这些入口
+ * 必须自绘弹窗，否则点下去毫无反应。
+ */
+type EditDialog =
+  | {
+      kind: 'text';
+      title: string;
+      hint?: string;
+      value: string;
+      placeholder?: string;
+      /** 已有的分类/系列，点一下直接填入，省得手打 */
+      options?: string[];
+      confirmLabel: string;
+      onSubmit: (value: string) => Promise<void> | void;
+    }
+  | { kind: 'status'; book: Book }
+  | { kind: 'rating'; book: Book };
+
 export function BookList({ books, searchQuery, onSelectBook, onShowDetail, onRefresh, onImport }: BookListProps) {
   const [viewMode, setViewMode] = useState<ViewMode>('grid');
   const [sortBy, setSortBy] = useState<SortBy>('recent');
   const [filter, setFilter] = useState<Filter>('all');
   const [categoryFilter, setCategoryFilter] = useState('');
+  /** Markdown 正文里的 #标签，点一下按标签筛书 */
+  const [tagList, setTagList] = useState<{ tag: string; bookIds: number[]; count: number }[]>([]);
+  const [tagFilter, setTagFilter] = useState('');
+  /** frontmatter 属性（键: 值），同样点一下筛书 */
+  const [propList, setPropList] = useState<
+    { key: string; value: string; bookIds: number[]; count: number }[]
+  >([]);
+  const [propFilter, setPropFilter] = useState('');
   const [categories, setCategories] = useState<string[]>([]);
   const [seriesList, setSeriesList] = useState<string[]>([]);
   const [seriesFilter, setSeriesFilter] = useState('');
   const [contextMenu, setContextMenu] = useState<{ book: Book; x: number; y: number } | null>(null);
+  const [editDialog, setEditDialog] = useState<EditDialog | null>(null);
+  const [dialogBusy, setDialogBusy] = useState(false);
   const [dragOver, setDragOver] = useState(false);
   /** 闲置判定天数（设置页可调，默认 90 天） */
   const [idleDays, setIdleDays] = useState(90);
@@ -59,6 +89,8 @@ export function BookList({ books, searchQuery, onSelectBook, onShowDetail, onRef
     onRefresh();
     void loadSourceIssues();
     window.electronAPI?.getCategories().then(setCategories).catch(() => {});
+    window.electronAPI?.getAllTags?.().then(setTagList).catch(() => {});
+    window.electronAPI?.getAllProps?.().then(setPropList).catch(() => {});
     window.electronAPI?.getSeriesList().then(setSeriesList).catch(() => {});
     window.electronAPI?.getSetting('idleDays').then(v => {
       const d = Number(v);
@@ -92,6 +124,14 @@ export function BookList({ books, searchQuery, onSelectBook, onShowDetail, onRef
           break;
       }
       if (categoryFilter && book.category !== categoryFilter) return false;
+      if (tagFilter) {
+        const entry = tagList.find(t => t.tag === tagFilter);
+        if (entry && !entry.bookIds.includes(book.id)) return false;
+      }
+      if (propFilter) {
+        const entry = propList.find(p => `${p.key} ${p.value}` === propFilter);
+        if (entry && !entry.bookIds.includes(book.id)) return false;
+      }
       if (seriesFilter && book.series !== seriesFilter) return false;
       if (!searchQuery) return true;
       const q = searchQuery.toLowerCase();
@@ -127,19 +167,21 @@ export function BookList({ books, searchQuery, onSelectBook, onShowDetail, onRef
   const closeMenu = () => setContextMenu(null);
 
   const handleDelete = async () => {
-    if (contextMenu) {
-      if (!confirm(`确定从书架删除《${contextMenu.book.title}》？\n书签、笔记、阅读记录与书库内的文件副本将一并删除。`)) {
-        closeMenu();
-        return;
-      }
-      try {
-        await window.electronAPI?.deleteBook(contextMenu.book.id);
-      } catch (err) {
-        alert(err instanceof Error ? err.message : '删除失败');
-      }
-      closeMenu();
-      onRefresh();
+    const book = contextMenu?.book;
+    if (!book) return;
+    closeMenu();
+    // 锁定书在右键菜单里是明确「不能删」的，先拦下来，别让用户确认一通却什么都没发生
+    if (book.locked) {
+      alert(`《${book.title}》已锁定，无法删除。\n可在右键菜单点「解锁书籍」后再删除。`);
+      return;
     }
+    if (!confirm(`确定从书架删除《${book.title}》？\n书签、笔记、阅读记录与书库内的文件副本将一并删除，此操作无法撤销。`)) return;
+    try {
+      await window.electronAPI?.deleteBook(book.id);
+    } catch (err) {
+      alert(err instanceof Error ? err.message : '删除失败，请重试');
+    }
+    onRefresh();
   };
 
   const handleRefreshMetadata = async () => {
@@ -154,26 +196,53 @@ export function BookList({ books, searchQuery, onSelectBook, onShowDetail, onRef
     }
   };
 
+  /** 右键菜单：点别处、滚动或窗口失焦就收起，免得菜单一直挂在屏幕上挡路 */
+  useEffect(() => {
+    if (!contextMenu) return;
+    const close = () => setContextMenu(null);
+    document.addEventListener('click', close);
+    document.addEventListener('scroll', close, true);
+    window.addEventListener('blur', close);
+    return () => {
+      document.removeEventListener('click', close);
+      document.removeEventListener('scroll', close, true);
+      window.removeEventListener('blur', close);
+    };
+  }, [contextMenu]);
+
   const handleRename = async () => {
-    if (contextMenu) {
-      const newName = prompt('输入新书名（只改书架显示名，不动磁盘文件）:', contextMenu.book.title);
-      if (newName && newName.trim() && newName.trim() !== contextMenu.book.title) {
+    const book = contextMenu?.book;
+    if (!book) return;
+    closeMenu();
+    setEditDialog({
+      kind: 'text',
+      title: '重命名书名',
+      hint: '只改书架里显示的名字，不会改动磁盘上的文件',
+      value: book.title,
+      confirmLabel: '保存',
+      onSubmit: async value => {
+        const name = value.trim();
+        if (!name || name === book.title) return;
         try {
-          await window.electronAPI?.renameBook(contextMenu.book.id, newName.trim());
+          await window.electronAPI?.renameBook(book.id, name);
           onRefresh();
         } catch (err) {
-          alert(err instanceof Error ? err.message : '重命名失败');
+          alert(err instanceof Error ? err.message : '重命名失败，请重试');
         }
-      }
-      closeMenu();
-    }
+      },
+    });
   };
 
   const handleToggleFavorite = async () => {
-    if (contextMenu) {
-      await window.electronAPI?.toggleFavorite(contextMenu.book.id);
-      closeMenu();
+    const book = contextMenu?.book;
+    if (!book) return;
+    closeMenu();
+    try {
+      await window.electronAPI?.toggleFavorite(book.id);
       onRefresh();
+    } catch (err) {
+      // 锁定书会被主进程拦下，必须给提示：否则菜单收起、界面无变化，像点空了
+      alert(err instanceof Error ? err.message : '操作没有完成，请重试');
     }
   };
 
@@ -193,17 +262,27 @@ export function BookList({ books, searchQuery, onSelectBook, onShowDetail, onRef
   };
 
   const handleSetCategory = async () => {
-    if (contextMenu) {
-      const hint = categories.length > 0 ? `（已有：${categories.join('、')}）` : '';
-      const cat = prompt(`输入分类${hint}，留空清除：`, contextMenu.book.category || '');
-      if (cat !== null) {
-        await window.electronAPI?.setCategory(contextMenu.book.id, cat.trim());
-        const updated = await window.electronAPI?.getCategories();
-        if (updated) setCategories(updated as string[]);
-        onRefresh();
-      }
-      closeMenu();
-    }
+    const book = contextMenu?.book;
+    if (!book) return;
+    closeMenu();
+    setEditDialog({
+      kind: 'text',
+      title: '设置分类',
+      hint: '留空表示清除分类；已有分类点一下就填进去',
+      value: book.category || '',
+      options: categories,
+      confirmLabel: '保存',
+      onSubmit: async value => {
+        try {
+          await window.electronAPI?.setCategory(book.id, value.trim());
+          const updated = await window.electronAPI?.getCategories();
+          if (updated) setCategories(updated as string[]);
+          onRefresh();
+        } catch (err) {
+          alert(err instanceof Error ? err.message : '设置分类失败，请重试');
+        }
+      },
+    });
   };
 
   const STATUS_OPTIONS = [
@@ -214,43 +293,17 @@ export function BookList({ books, searchQuery, onSelectBook, onShowDetail, onRef
   ];
 
   const handleSetStatus = async () => {
-    if (!contextMenu) return;
-    const cur = contextMenu.book.status ?? '';
-    const menu = STATUS_OPTIONS.map((o, i) => `${i}=${o.label}`).join('  ');
-    const input = prompt(`设置阅读状态（${menu}）：`, String(Math.max(0, STATUS_OPTIONS.findIndex(o => o.v === cur))));
-    if (input === null) return;
-    const idx = Number(input);
-    const picked = STATUS_OPTIONS[idx];
-    if (!picked) {
-      alert('请输入列表中的序号');
-      return;
-    }
-    try {
-      await window.electronAPI?.setBookStatus(contextMenu.book.id, picked.v);
-    } catch (err) {
-      alert(err instanceof Error ? err.message : '操作失败');
-    }
+    const book = contextMenu?.book;
+    if (!book) return;
     closeMenu();
-    onRefresh();
+    setEditDialog({ kind: 'status', book });
   };
 
   const handleSetRating = async () => {
-    if (!contextMenu) return;
-    const cur = contextMenu.book.rating ?? 0;
-    const input = prompt(`给《${contextMenu.book.title}》评分（0-5，0 表示清除）：`, String(cur));
-    if (input === null) return;
-    const r = Number(input);
-    if (Number.isNaN(r) || r < 0 || r > 5) {
-      alert('请输入 0 到 5 之间的数字');
-      return;
-    }
-    try {
-      await window.electronAPI?.setBookRating(contextMenu.book.id, r);
-    } catch (err) {
-      alert(err instanceof Error ? err.message : '操作失败');
-    }
+    const book = contextMenu?.book;
+    if (!book) return;
     closeMenu();
-    onRefresh();
+    setEditDialog({ kind: 'rating', book });
   };
 
   const handleExportList = async () => {
@@ -311,37 +364,26 @@ ${r.filePath}`);
   };
 
   const handleSetSeries = async () => {
-    if (!contextMenu) return;
-    const hint = seriesList.length > 0 ? `（已有：${seriesList.join('、')}）` : '';
-    const val = prompt(`设置所属系列${hint}，留空取消分组：`, contextMenu.book.series || '');
-    if (val === null) return;
-    try {
-      await window.electronAPI?.setBookSeries(contextMenu.book.id, val.trim());
-      setSeriesList((await window.electronAPI?.getSeriesList()) ?? []);
-      onRefresh();
-    } catch (err) {
-      alert(err instanceof Error ? err.message : '操作失败');
-    }
+    const book = contextMenu?.book;
+    if (!book) return;
     closeMenu();
-  };
-
-  const handleBatchSeries = async () => {
-    const api = window.electronAPI;
-    if (!api || selectedIds.size === 0) return;
-    const hint = seriesList.length > 0 ? `（已有：${seriesList.join('、')}）` : '';
-    const val = prompt(`把所选 ${selectedIds.size} 本归入系列${hint}，留空取消分组：`, '');
-    if (val === null) return;
-    const targets = batchTargets();
-    for (const b of targets) {
-      try {
-        await api.setBookSeries(b.id, val.trim());
-      } catch { /* 单本失败不中断 */ }
-    }
-    const skipped = selectedIds.size - targets.length;
-    setSeriesList((await api.getSeriesList()) ?? []);
-    exitBatch();
-    onRefresh();
-    if (skipped > 0) alert(`已处理 ${targets.length} 本；${skipped} 本因锁定被跳过`);
+    setEditDialog({
+      kind: 'text',
+      title: '设置所属系列',
+      hint: '留空表示取消分组；已有系列点一下就填进去',
+      value: book.series || '',
+      options: seriesList,
+      confirmLabel: '保存',
+      onSubmit: async value => {
+        try {
+          await window.electronAPI?.setBookSeries(book.id, value.trim());
+          setSeriesList((await window.electronAPI?.getSeriesList()) ?? []);
+          onRefresh();
+        } catch (err) {
+          alert(err instanceof Error ? err.message : '设置系列失败，请重试');
+        }
+      },
+    });
   };
 
   const handleReveal = async () => {
@@ -395,9 +437,14 @@ ${r.filePath}`);
   };
 
   const handleClearHistory = async () => {
-    if (!confirm('确定清除全部阅读记录吗？书籍保留，进度归零。')) return;
-    await window.electronAPI?.clearReadingHistory();
-    onRefresh();
+    if (!confirm('确定清除全部阅读记录吗？\n所有书的进度归零、阅读时长清空，书籍与笔记保留。此操作无法撤销。')) return;
+    try {
+      await window.electronAPI?.clearReadingHistory();
+      onRefresh();
+      alert('已清除全部阅读记录，书籍与笔记不受影响。');
+    } catch (err) {
+      alert(err instanceof Error ? err.message : '清除阅读记录失败，请重试');
+    }
   };
 
   // ---------- 批量管理 ----------
@@ -418,52 +465,110 @@ ${r.filePath}`);
     setSelectedIds(new Set());
   };
 
+  /**
+   * 批量操作的回执。成功也要说一声，否则用户分不清「执行了」还是「被取消了」；
+   * 写入失败与锁定跳过要分开报，不能把失败混进「被跳过」里。
+   */
+  const reportBatchResult = (done: number, failed: number) => {
+    const locked = selectedIds.size - batchTargets().length;
+    const parts = [`已处理 ${done - failed} 本`];
+    if (failed > 0) parts.push(`${failed} 本写入失败，可重试`);
+    if (locked > 0) parts.push(`${locked} 本因锁定被跳过`);
+    alert(parts.join('；') + '。');
+  };
+
+  const handleBatchSeries = async () => {
+    const api = window.electronAPI;
+    if (!api || selectedIds.size === 0) return;
+    setEditDialog({
+      kind: 'text',
+      title: `把所选的 ${selectedIds.size} 本归入系列`,
+      hint: '留空表示取消分组；已有系列点一下就填进去',
+      value: '',
+      options: seriesList,
+      confirmLabel: '确定',
+      onSubmit: async value => {
+        const name = value.trim();
+        const targets = batchTargets();
+        let failed = 0;
+        for (const b of targets) {
+          try {
+            await api.setBookSeries(b.id, name);
+          } catch {
+            failed++;
+          }
+        }
+        reportBatchResult(targets.length, failed);
+        setSeriesList((await api.getSeriesList()) ?? []);
+        exitBatch();
+        onRefresh();
+      },
+    });
+  };
+
   const handleBatchCategory = async () => {
     const api = window.electronAPI;
     if (!api || selectedIds.size === 0) return;
-    const hint = categories.length > 0 ? `（已有：${categories.join('、')}）` : '';
-    const cat = prompt(`批量为 ${selectedIds.size} 本书设置分类${hint}，留空表示清除分类：`, '');
-    if (cat === null) return;
-    const targets = batchTargets();
-    for (const b of targets) {
-      try {
-        await api.setCategory(b.id, cat.trim());
-      } catch { /* 单本失败不中断整批 */ }
-    }
-    const skipped = selectedIds.size - targets.length;
-    const updated = await api.getCategories();
-    if (updated) setCategories(updated as string[]);
-    exitBatch();
-    onRefresh();
-    if (skipped > 0) alert(`已处理 ${targets.length} 本；${skipped} 本因锁定被跳过`);
+    setEditDialog({
+      kind: 'text',
+      title: `批量为 ${selectedIds.size} 本书设置分类`,
+      hint: '留空表示清除分类；已有分类点一下就填进去',
+      value: '',
+      options: categories,
+      confirmLabel: '确定',
+      onSubmit: async value => {
+        const name = value.trim();
+        const targets = batchTargets();
+        let failed = 0;
+        for (const b of targets) {
+          try {
+            await api.setCategory(b.id, name);
+          } catch {
+            failed++;
+          }
+        }
+        reportBatchResult(targets.length, failed);
+        const updated = await api.getCategories();
+        if (updated) setCategories(updated as string[]);
+        exitBatch();
+        onRefresh();
+      },
+    });
   };
 
   const handleBatchLock = async (locked: boolean) => {
     const api = window.electronAPI;
     if (!api || selectedIds.size === 0) return;
-    const targets = books.filter(b => selectedIds.has(b.id));
+    const targets = books.filter(b => selectedIds.has(b.id) && !!b.locked !== locked);
+    let failed = 0;
     for (const b of targets) {
-      if (!!b.locked === locked) continue;
       try {
         await api.setBookLock(b.id, locked);
-      } catch { /* 忽略 */ }
+      } catch {
+        failed++;
+      }
     }
     exitBatch();
     onRefresh();
+    alert(
+      `已${locked ? '锁定' : '解锁'} ${targets.length - failed} 本` +
+        (failed > 0 ? `；${failed} 本失败，可重试` : '') +
+        (locked ? '。锁定后这些书不能被删除或批量修改，随时可解锁。' : '。'),
+    );
   };
 
   /** 重置所选书籍的专属排版，回到全局默认 */
   const handleBatchResetPrefs = async () => {
     const api = window.electronAPI;
     if (!api || selectedIds.size === 0) return;
-    if (!confirm(`清除所选 ${selectedIds.size} 本书的专属排版，恢复全局默认？`)) return;
+    if (!confirm(`清除所选 ${selectedIds.size} 本书的专属排版，恢复全局默认？\n下次打开这些书会用全局排版设置。`)) return;
     for (const id of selectedIds) {
       try {
         await api.setSetting(`bookPrefs:${id}`, '');
       } catch { /* 忽略 */ }
     }
     exitBatch();
-    alert('已重置，下次打开这些书籍将使用全局默认排版');
+    alert('已重置，下次打开这些书籍将使用全局默认排版。');
   };
 
   const handleBatchDelete = async () => {
@@ -472,18 +577,24 @@ ${r.filePath}`);
     const targets = batchTargets();
     const lockedCount = selectedIds.size - targets.length;
     const msg = `确定删除所选 ${targets.length} 本书？` +
-      (lockedCount > 0 ? `（另有 ${lockedCount} 本因锁定被跳过）` : '') +
-      '\n书签、笔记、阅读记录与书库内的文件副本将一并删除。';
+      (lockedCount > 0 ? `（另有 ${lockedCount} 本因锁定被跳过，可在书架右键「解锁书籍」后再试）` : '') +
+      '\n书签、笔记、阅读记录与书库内的文件副本将一并删除，此操作无法撤销。';
     if (!confirm(msg)) return;
+    let failed = 0;
     for (const b of targets) {
       try {
         await api.deleteBook(b.id);
-      } catch (err) {
-        alert(err instanceof Error ? err.message : '删除失败');
+      } catch {
+        failed++;
       }
     }
     exitBatch();
     onRefresh();
+    alert(
+      `已删除 ${targets.length - failed} 本` +
+        (failed > 0 ? `；${failed} 本失败，请重试` : '') +
+        (lockedCount > 0 ? `；${lockedCount} 本因锁定被跳过` : '') + '。',
+    );
   };
 
   // 拖拽导入
@@ -497,13 +608,28 @@ ${r.filePath}`);
       try {
         const p = api.getPathForFile(f);
         if (p) paths.push(p);
-      } catch { /* 忽略 */ }
+      } catch { /* 单个文件取路径失败不影响其余 */ }
     }
-    if (paths.length > 0) {
-      await api.importPaths(paths);
+    if (paths.length === 0) {
+      alert('没有读到可导入的文件。请把书籍文件（EPUB / TXT / PDF / DOCX / 漫画压缩包）拖进来，文件夹请先打开再拖其中的文件。');
+      return;
+    }
+    try {
+      const r = await api.importPaths(paths);
       const updated = await api.getCategories();
       if (updated) setCategories(updated as string[]);
       onRefresh();
+      // 失败原因要说清楚：拖了没反应，用户只会一遍遍重拖
+      const imported = r?.imported?.length ?? 0;
+      if (r?.failed?.length) {
+        alert(
+          [`已导入 ${imported} 本，以下文件未导入：`, ...r.failed.map(f => `· ${f.name}：${f.reason}`)].join('\n'),
+        );
+      } else if (imported > 0) {
+        alert(`已导入 ${imported} 本书，可在书架中打开。`);
+      }
+    } catch (err) {
+      alert(err instanceof Error ? err.message : '导入失败，请重试');
     }
   };
 
@@ -515,6 +641,43 @@ ${r.filePath}`);
     { key: 'shelved', label: '搁置' },
     { key: 'idle', label: `闲置 ${idleDays} 天以上` },
   ];
+
+  /** 文本弹窗提交：期间禁用按钮，避免连点写成两条 */
+  const submitTextDialog = async (dialog: Extract<EditDialog, { kind: 'text' }>) => {
+    setDialogBusy(true);
+    try {
+      await dialog.onSubmit(dialog.value);
+      setEditDialog(null);
+    } finally {
+      setDialogBusy(false);
+    }
+  };
+
+  const applyStatus = async (book: Book, value: string) => {
+    setDialogBusy(true);
+    try {
+      await window.electronAPI?.setBookStatus(book.id, value);
+      setEditDialog(null);
+      onRefresh();
+    } catch (err) {
+      alert(err instanceof Error ? err.message : '设置阅读状态失败，请重试');
+    } finally {
+      setDialogBusy(false);
+    }
+  };
+
+  const applyRating = async (book: Book, value: number) => {
+    setDialogBusy(true);
+    try {
+      await window.electronAPI?.setBookRating(book.id, value);
+      setEditDialog(null);
+      onRefresh();
+    } catch (err) {
+      alert(err instanceof Error ? err.message : '评分失败，请重试');
+    } finally {
+      setDialogBusy(false);
+    }
+  };
 
   return (
     <div
@@ -655,6 +818,55 @@ ${r.filePath}`);
           </select>
         )}
       </div>
+
+      {/* 标签行：来自 Markdown 正文里的 #标签，点一下按标签筛书 */}
+      {tagList.length > 0 && (
+        <div className="tag-filter tag-row" style={{ marginTop: 8 }}>
+          <button
+            className={`tag-chip${tagFilter === '' ? ' active' : ''}`}
+            onClick={() => setTagFilter('')}
+          >
+            全部标签
+          </button>
+          {tagList.slice(0, 24).map(t => (
+            <button
+              key={t.tag}
+              className={`tag-chip${tagFilter === t.tag ? ' active' : ''}`}
+              title={`${t.count} 本书里有这个标签`}
+              onClick={() => setTagFilter(cur => (cur === t.tag ? '' : t.tag))}
+            >
+              #{t.tag}
+              <span className="tag-count">{t.count}</span>
+            </button>
+          ))}
+        </div>
+      )}
+
+      {/* 属性行：来自 Markdown 的 frontmatter，同样点一下筛书 */}
+      {propList.length > 0 && (
+        <div className="tag-filter tag-row" style={{ marginTop: 8 }}>
+          <button
+            className={`tag-chip${propFilter === '' ? ' active' : ''}`}
+            onClick={() => setPropFilter('')}
+          >
+            全部属性
+          </button>
+          {propList.slice(0, 12).map(p => {
+            const id = `${p.key} ${p.value}`;
+            return (
+              <button
+                key={id}
+                className={`tag-chip${propFilter === id ? ' active' : ''}`}
+                title={`frontmatter：${p.key}: ${p.value}`}
+                onClick={() => setPropFilter(cur => (cur === id ? '' : id))}
+              >
+                {p.key}: {p.value}
+                <span className="tag-count">{p.count}</span>
+              </button>
+            );
+          })}
+        </div>
+      )}
 
       {batchMode && (
         <div className="batch-bar">
@@ -811,6 +1023,118 @@ ${r.filePath}`);
               </div>
             </div>
           ))}
+        </div>
+      )}
+
+      {editDialog && (
+        <div
+          className="modal-mask"
+          onClick={() => {
+            if (!dialogBusy) setEditDialog(null);
+          }}
+        >
+          <div className="note-modal" onClick={e => e.stopPropagation()}>
+            {editDialog.kind === 'text' && (
+              <>
+                <h3>{editDialog.title}</h3>
+                {editDialog.hint && <p className="section-desc">{editDialog.hint}</p>}
+                <input
+                  className="tag-input"
+                  style={{ width: '100%' }}
+                  value={editDialog.value}
+                  placeholder={editDialog.placeholder ?? ''}
+                  autoFocus
+                  onChange={e => setEditDialog({ ...editDialog, value: e.target.value })}
+                  onKeyDown={e => {
+                    if (e.key === 'Enter') void submitTextDialog(editDialog);
+                  }}
+                />
+                {editDialog.options && editDialog.options.length > 0 && (
+                  <div className="tag-filter" style={{ marginTop: 10, marginBottom: 0 }}>
+                    {editDialog.options.map(o => (
+                      <button
+                        key={o}
+                        className="tag-chip"
+                        onClick={() => setEditDialog({ ...editDialog, value: o })}
+                      >
+                        {o}
+                      </button>
+                    ))}
+                  </div>
+                )}
+                <div className="form-actions">
+                  <button className="btn-secondary" disabled={dialogBusy} onClick={() => setEditDialog(null)}>
+                    取消
+                  </button>
+                  <button
+                    className="btn-primary"
+                    disabled={dialogBusy}
+                    onClick={() => void submitTextDialog(editDialog)}
+                  >
+                    {dialogBusy ? '处理中…' : editDialog.confirmLabel}
+                  </button>
+                </div>
+              </>
+            )}
+
+            {editDialog.kind === 'status' && (
+              <>
+                <h3>阅读状态</h3>
+                <p className="section-desc">《{editDialog.book.title}》</p>
+                <div className="tag-filter" style={{ marginBottom: 0 }}>
+                  {STATUS_OPTIONS.map(o => (
+                    <button
+                      key={o.v || 'auto'}
+                      className={`tag-chip${(editDialog.book.status ?? '') === o.v ? ' active' : ''}`}
+                      disabled={dialogBusy}
+                      onClick={() => void applyStatus(editDialog.book, o.v)}
+                    >
+                      {o.label}
+                    </button>
+                  ))}
+                </div>
+                <div className="form-actions">
+                  <button className="btn-secondary" disabled={dialogBusy} onClick={() => setEditDialog(null)}>
+                    取消
+                  </button>
+                </div>
+              </>
+            )}
+
+            {editDialog.kind === 'rating' && (
+              <>
+                <h3>评分</h3>
+                <p className="section-desc">
+                  《{editDialog.book.title}》当前 {editDialog.book.rating ?? 0} 星，点星星即可打分
+                </p>
+                <div className="rating-picker">
+                  {[1, 2, 3, 4, 5].map(n => (
+                    <button
+                      key={n}
+                      className={`rating-star${(editDialog.book.rating ?? 0) >= n ? ' on' : ''}`}
+                      disabled={dialogBusy}
+                      title={`${n} 星`}
+                      onClick={() => void applyRating(editDialog.book, n)}
+                    >
+                      ★
+                    </button>
+                  ))}
+                </div>
+                <div className="form-actions">
+                  <button
+                    className="btn-secondary"
+                    disabled={dialogBusy}
+                    onClick={() => void applyRating(editDialog.book, 0)}
+                  >
+                    清除评分
+                  </button>
+                  <button className="btn-secondary" disabled={dialogBusy} onClick={() => setEditDialog(null)}>
+                    取消
+                  </button>
+                </div>
+              </>
+            )}
+          </div>
         </div>
       )}
 

@@ -5,7 +5,51 @@ import * as pdfjsLib from 'pdfjs-dist';
 import mammoth from 'mammoth';
 import * as cheerio from 'cheerio/slim';
 import { marked } from 'marked';
+import katex from 'katex';
+import hljs from 'highlight.js/lib/core';
+// 按需注册语言：全量 highlight.js 会把主进程产物撑大近 1MB，这里只带常用的一批
+import langJavascript from 'highlight.js/lib/languages/javascript';
+import langTypescript from 'highlight.js/lib/languages/typescript';
+import langPython from 'highlight.js/lib/languages/python';
+import langJava from 'highlight.js/lib/languages/java';
+import langC from 'highlight.js/lib/languages/c';
+import langCpp from 'highlight.js/lib/languages/cpp';
+import langCsharp from 'highlight.js/lib/languages/csharp';
+import langGo from 'highlight.js/lib/languages/go';
+import langRust from 'highlight.js/lib/languages/rust';
+import langPhp from 'highlight.js/lib/languages/php';
+import langRuby from 'highlight.js/lib/languages/ruby';
+import langBash from 'highlight.js/lib/languages/bash';
+import langJson from 'highlight.js/lib/languages/json';
+import langYaml from 'highlight.js/lib/languages/yaml';
+import langXml from 'highlight.js/lib/languages/xml';
+import langCss from 'highlight.js/lib/languages/css';
+import langSql from 'highlight.js/lib/languages/sql';
+import langMarkdown from 'highlight.js/lib/languages/markdown';
 import { TXT_TOC_RULES, type TxtTocRule } from './txt-toc-rules';
+
+for (const [name, lang] of [
+  ['javascript', langJavascript],
+  ['typescript', langTypescript],
+  ['python', langPython],
+  ['java', langJava],
+  ['c', langC],
+  ['cpp', langCpp],
+  ['csharp', langCsharp],
+  ['go', langGo],
+  ['rust', langRust],
+  ['php', langPhp],
+  ['ruby', langRuby],
+  ['bash', langBash],
+  ['json', langJson],
+  ['yaml', langYaml],
+  ['xml', langXml],
+  ['css', langCss],
+  ['sql', langSql],
+  ['markdown', langMarkdown],
+] as const) {
+  hljs.registerLanguage(name, lang as never);
+}
 
 // pdfjs 解析 PDF 需要 worker 伴随文件。不显式指定的话它按包内相对路径找，
 // 打包后找不到就静默失败——PDF 目录会变成空的，且错误被上层 catch 吞掉。
@@ -516,15 +560,192 @@ const toXhtmlFragment = (html: string) =>
     (_m, tag: string, attrs: string) => `<${tag}${attrs.trimEnd()}/>`,
   );
 
+/** Obsidian / Typora 的 callout 类型 → 中文标题（用户没写标题时用它兜底） */
+const CALLOUT_LABELS: Record<string, string> = {
+  note: '提示',
+  info: '说明',
+  tip: '技巧',
+  hint: '技巧',
+  warning: '注意',
+  caution: '注意',
+  danger: '警告',
+  error: '错误',
+  success: '完成',
+  question: '疑问',
+  quote: '引用',
+  example: '示例',
+  important: '重点',
+};
+
+/**
+ * 把 Obsidian / Typora 常见写法转成标准 Markdown，再交给 marked 渲染。
+ *
+ * 代码块与行内代码先切出来原样保留——否则代码里的 `# 注释` 会被当成标签、
+ * `a == b` 会被当成高亮，这类误伤比不转换更糟。
+ */
+export function preprocessObsidianMarkdown(text: string): string {
+  const segments = text.split(/(```[\s\S]*?```|~~~[\s\S]*?~~~|`[^`\n]*`)/g);
+  return segments.map((seg, i) => (i % 2 === 1 ? seg : transformObsidianText(seg))).join('');
+}
+
+function transformObsidianText(seg: string): string {
+  // 公式先渲染：TeX 里可能含 # 或 ==，先换成 HTML 就不会被后面的标签/高亮规则误伤
+  let out = renderMath(seg);
+
+  // YAML frontmatter：包成信息块。不处理的话 marked 会把它当成一条水平线加一段正文
+  out = out.replace(/^---\r?\n([\s\S]*?)\r?\n---[ \t]*(?:\r?\n|$)/, (_m, body: string) => {
+    const items = String(body)
+      .split(/\r?\n/)
+      .map(l => l.trim())
+      .filter(Boolean)
+      .slice(0, 30)
+      .map(l => `<span class="fm-item">${l.replace(/[<>&]/g, '')}</span>`)
+      .join('');
+    return items ? `<div class="frontmatter">${items}</div>\n\n` : '';
+  });
+
+  // callout：> [!note] 标题 → 引用块里的加粗标题，正文各行仍留在引用块内
+  out = out.replace(
+    /^([ \t]*)>[ \t]*\[!(\w+)\][+-]?[ \t]*(.*)$/gm,
+    (_m, indent: string, kind: string, title: string) => {
+      const label = title.trim() || CALLOUT_LABELS[kind.toLowerCase()] || kind;
+      return `${indent}> <span class="callout callout-${kind.toLowerCase()}">${label}</span>`;
+    },
+  );
+
+  // 内嵌 ![[图片.png]] → 图片语法
+  out = out.replace(/!\[\[([^\]]+)\]\]/g, (_m, target: string) => `![](${target.trim()})`);
+
+  // wiki 链接 [[目标]] / [[目标|别名]]：带 data-target，便于以后做「点击跳转同一书库的笔记」
+  out = out.replace(/\[\[([^\]|]+)(?:\|([^\]]+))?\]\]/g, (_m, target: string, alias?: string) => {
+    const shown = (alias ?? target).trim();
+    const dataTarget = target.trim().replace(/"/g, '');
+    return `<span class="wikilink" data-target="${dataTarget}">${shown}</span>`;
+  });
+
+  // 高亮 ==文本== → <mark>
+  out = out.replace(/==([^=\n]+)==/g, '<mark>$1</mark>');
+
+  // 行内 #标签。标题是「# + 空格」，不会命中；标签后面紧跟标点也算结束
+  out = out.replace(
+    /(^|[\s(（])#([^\s#<>.,;:!?，。；：！？（）()]+)/g,
+    '$1<span class="tag">#$2</span>',
+  );
+
+  return out;
+}
+
+/** 图片扩展名 → 媒体类型；顺带当作白名单：只收这些后缀，别把别的文件塞进包里 */
+const IMAGE_MIME: Record<string, string> = {
+  '.png': 'image/png',
+  '.jpg': 'image/jpeg',
+  '.jpeg': 'image/jpeg',
+  '.gif': 'image/gif',
+  '.webp': 'image/webp',
+  '.svg': 'image/svg+xml',
+  '.bmp': 'image/bmp',
+  '.avif': 'image/avif',
+};
+
+export const imageMediaType = (filePath: string): string =>
+  IMAGE_MIME[path.extname(filePath).toLowerCase()] ?? 'application/octet-stream';
+
+/** 单张图片的体积上限：笔记里塞了超大图时不至于把内存吃爆 */
+const MAX_IMAGE_BYTES = 20 * 1024 * 1024;
+
+export interface MarkdownDocument {
+  chapters: { title: string; content: string; html: string }[];
+  /** 需要随 EPUB 打包的本地图片（zip 内路径 + 源文件路径） */
+  images: { archiveName: string; sourcePath: string }[];
+  /** 引用了但本机找不到的图片数（保持原样，浏览器会显示 alt） */
+  missingImages: number;
+  /** frontmatter 里的属性（键 → 值数组），供书架按属性筛选 */
+  props: Record<string, string[]>;
+}
+
+/**
+ * 把 Markdown 里引用的本地图片收进 EPUB。
+ *
+ * 相对路径的图片在 EPUB 里是找不到的：`./images/pic.png` 会被当成包内不存在的资源，
+ * 结果是空白或破图。这里按 Markdown 文件所在目录解析、读入字节、统一放到 `Images/` 下，
+ * 并把引用改写成 `../Images/xxx`（章节在 Text/ 下，所以要往上一级）。
+ * 外链与 data: 内联不动——前者本来就要联网，后者已经自带内容。
+ */
+function collectLocalImages(
+  chapters: { title: string; content: string; html: string }[],
+  baseDir: string,
+): { chapters: { title: string; content: string; html: string }[]; images: { archiveName: string; sourcePath: string }[]; missing: number } {
+  const images: { archiveName: string; sourcePath: string }[] = [];
+  const used = new Set<string>();
+  let missing = 0;
+
+  const rewritten = chapters.map(ch => ({
+    ...ch,
+    html: ch.html.replace(/<img\b[^>]*>/g, tag => {
+      const srcMatch = /src="([^"]*)"/.exec(tag);
+      if (!srcMatch) return tag;
+      const src = srcMatch[1];
+      if (!src || /^(https?:|data:|bookfile:|\/\/)/i.test(src)) return tag;
+
+      const abs = path.resolve(baseDir, decodeURI(src.replace(/^\.\//, '')));
+      let ok = false;
+      try {
+        const st = fs.statSync(abs);
+        ok = st.isFile() && st.size > 0 && st.size <= MAX_IMAGE_BYTES;
+      } catch { /* 文件不在 */ }
+      if (!ok) {
+        missing++;
+        return tag;
+      }
+      if (!IMAGE_MIME[path.extname(abs).toLowerCase()]) return tag;
+
+      let name = path.basename(abs);
+      // 不同目录下的同名图片：加序号避免互相覆盖
+      if (used.has(name)) name = `${used.size}-${name}`;
+      used.add(name);
+      images.push({ archiveName: `Images/${name}`, sourcePath: abs });
+      return tag.replace(/src="[^"]*"/, `src="../Images/${name}"`);
+    }),
+  }));
+
+  return { chapters: rewritten, images, missing };
+}
+
+/**
+ * Markdown 转「章 + 本地图片」。
+ * 不把整篇合成一章的原因见 mdToChapters 的注释（epubjs 不支持片段锚点）。
+ */
+export async function mdToDocument(filePath: string): Promise<MarkdownDocument> {
+  const chapters = await mdToChapters(filePath);
+  const { chapters: withImages, images, missing } = collectLocalImages(
+    chapters,
+    path.dirname(filePath),
+  );
+  // 代码高亮放在最后：它只往 <pre><code> 里加 span，不影响前面几步的结果
+  const highlighted = withImages.map(ch => ({ ...ch, html: highlightCodeBlocks(ch.html) }));
+  // 属性要从未经改写的原文里读：预处理阶段会把 frontmatter 变成信息块
+  let props: Record<string, string[]> = {};
+  try {
+    props = parseFrontmatter(decodeTextAuto(fs.readFileSync(filePath)));
+  } catch { /* 读不出来就当没有属性 */ }
+  return { chapters: highlighted, images, missingImages: missing, props };
+}
+
 /**
  * Markdown 转章节：一级 / 二级标题另起一章，其余内容保留为 HTML，
  * 以留住加粗、列表、代码块等排版。转出的 EPUB 走与 DOCX 相同的后续链路。
+ *
+ * 为什么不整篇合成一章：epubjs 不支持片段锚点（spine.get 会把 # 后面的部分丢掉），
+ * 合章之后目录里每个标题都会跳到章首，反而不如按标题分章好用。
+ * 连续阅读由阅读器的滚动模式负责——Markdown 导入的书默认就用滚动打开。
  */
 export async function mdToChapters(
   filePath: string,
 ): Promise<{ title: string; content: string; html: string }[]> {
-  const text = fs.readFileSync(filePath, 'utf-8');
-  const tokens = marked.lexer(text);
+  // 与 TXT 同一套编码判断：Windows 记事本存出来的 GBK Markdown 很常见，
+  // 直接按 utf-8 读会整篇变成替换字符，且不可逆
+  const text = decodeTextAuto(fs.readFileSync(filePath));
+  const tokens = marked.lexer(preprocessObsidianMarkdown(text));
   const chapters: { title: string; html: string[] }[] = [];
   let current: { title: string; html: string[] } = { title: '', html: [] };
   const flush = () => {
@@ -552,6 +773,163 @@ export async function mdToChapters(
     content: '',
     html: toXhtmlFragment(c.html.join('')),
   }));
+}
+
+/**
+ * 把 `$…$` / `$$…$$` / `\(…\)` / `\[…\]` 渲染成 MathML。
+ *
+ * 选 MathML 而不是 KaTeX 的 HTML 输出，是因为 HTML 版要靠 KaTeX 自己的字体与样式表才好看，
+ * 而那套东西得连字体一起塞进每本书里（约 1MB）并在阅读器的 iframe 里挂上；
+ * MathML 是 Chromium 原生支持的，零依赖、零额外体积，正合适（本应用只跑在 Electron 里）。
+ */
+function renderMath(seg: string): string {
+  const render = (tex: string, display: boolean) => {
+    try {
+      return katex.renderToString(tex, { output: 'mathml', throwOnError: false, displayMode: display });
+    } catch {
+      // 真出意外就原样留着：宁可显示原始 TeX，也不能把正文吃掉
+      return display ? `$$${tex}$$` : `$${tex}$`;
+    }
+  };
+  let out = seg;
+  out = out.replace(/\$\$([\s\S]+?)\$\$/g, (_m, tex: string) => render(tex.trim(), true));
+  out = out.replace(/\\\[([\s\S]+?)\\\]/g, (_m, tex: string) => render(tex.trim(), true));
+  // 行内公式：开头 $ 后不能是空白、结尾 $ 前不能是空白，且内容里不能再有 $。
+  // 这几条约束是为了别把「价格 $5 到 $10」这类正文误判成公式。
+  out = out.replace(
+    /(?<![\w$\\])\$(?!\s)([^$\n]+?)(?<!\s)\$(?!\d)/g,
+    (_m, tex: string) => render(tex, false),
+  );
+  out = out.replace(/\\\(([\s\S]+?)\\\)/g, (_m, tex: string) => render(tex.trim(), false));
+  return out;
+}
+
+/** 反转义实体：高亮要拿回纯文本再交给 highlight.js，它自己会重新转义 */
+const unescapeHtml = (s: string): string =>
+  s
+    .replace(/&lt;/g, '<')
+    .replace(/&gt;/g, '>')
+    .replace(/&quot;/g, '"')
+    .replace(/&#39;/g, "'")
+    .replace(/&amp;/g, '&');
+
+/**
+ * 代码块高亮。
+ * marked 已经把代码放进 `<pre><code class="language-x">` 并做了转义，这里只替换里面的内容。
+ * 没写语言时用自动识别兜底；识别不出来或语言不认识就原样留着——highlight.js 对未知语言是抛错的。
+ */
+function highlightCodeBlocks(html: string): string {
+  return html.replace(
+    /<pre><code([^>]*)>([\s\S]*?)<\/code><\/pre>/g,
+    (whole, attrs: string, code: string) => {
+      const lang = /class="language-([\w+#.-]+)"/.exec(attrs)?.[1];
+      const text = unescapeHtml(code);
+      let highlighted: { value: string } | null = null;
+      try {
+        if (lang && hljs.getLanguage(lang)) {
+          highlighted = hljs.highlight(text, { language: lang, ignoreIllegals: true });
+        } else if (!lang && text.trim() && text.length <= 20000) {
+          // 只有没写语言时才猜：写了不认识的语言就老实不高亮，免得猜错反而误导
+          highlighted = hljs.highlightAuto(text);
+        }
+      } catch {
+        highlighted = null;
+      }
+      if (!highlighted) return whole;
+      return `<pre><code class="hljs${lang ? ` language-${lang}` : ''}">${highlighted.value}</code></pre>`;
+    },
+  );
+}
+
+/** 从 Markdown 渲染结果里收集 #标签（渲染阶段已排除代码块，这里只需认标记本身） */
+export function collectMarkdownTags(chapters: unknown[]): string[] {
+  const tags = new Set<string>();
+  for (const ch of chapters) {
+    const html = (ch as { html?: unknown } | null)?.html;
+    if (typeof html !== 'string') continue;
+    for (const m of html.matchAll(/<span class="tag">#([^<]+)<\/span>/g)) {
+      const t = m[1].trim();
+      if (t) tags.add(t);
+    }
+  }
+  return [...tags];
+}
+
+/**
+ * 解析 YAML frontmatter 里的 `键: 值` 对。
+ *
+ * 只认最朴素的写法：标量、以及 `[a, b]` / `a, b` 这种行内列表（标签常用）。
+ * 嵌套结构、多行块、锚点这类一律跳过——把它们猜错比不解析更糟，
+ * 正文里的信息块本来就完整保留了原文。
+ */
+export function parseFrontmatter(text: string): Record<string, string[]> {
+  const m = /^---\r?\n([\s\S]*?)\r?\n---[ \t]*(?:\r?\n|$)/.exec(text);
+  if (!m) return {};
+  const out: Record<string, string[]> = {};
+  for (const line of m[1].split(/\r?\n/)) {
+    // 缩进行属于嵌套结构，直接跳过。必须在 trim 之前判断——先 trim 就把缩进信息丢了，
+    // 嵌套的 `name: 张三` 会被当成顶层属性。
+    if (/^\s/.test(line)) continue;
+    const raw = line.trim();
+    if (!raw || raw.startsWith('#')) continue;
+    const kv = /^([^:]+):\s*(.*)$/.exec(raw);
+    if (!kv) continue;
+    const key = kv[1].trim();
+    if (!key) continue;
+    const value = kv[2].trim();
+    if (!value) continue;
+    // 行内列表：[a, b] 或 a, b
+    const inline = /^\[(.*)\]$/.exec(value);
+    const parts = (inline ? inline[1] : value)
+      .split(',')
+      .map(v => v.trim().replace(/^["']|["']$/g, ''))
+      .filter(Boolean);
+    if (parts.length > 0) out[key] = parts.slice(0, 20);
+  }
+  return out;
+}
+
+/**
+ * 从 Markdown 渲染结果里收集 wiki 链接的目标（`[[目标]]` 里的「目标」）。
+ * 与标签一样先存下来，之后算「谁引用了谁」时不必回扫正文。
+ */
+export function collectMarkdownLinks(chapters: unknown[]): string[] {
+  const targets = new Set<string>();
+  for (const ch of chapters) {
+    const html = (ch as { html?: unknown } | null)?.html;
+    if (typeof html !== 'string') continue;
+    for (const m of html.matchAll(/<span class="wikilink"[^>]*data-target="([^"]*)"/g)) {
+      const t = m[1].trim();
+      if (t) targets.add(t);
+    }
+  }
+  return [...targets];
+}
+
+/**
+ * 从 Markdown 渲染结果里收集未完成任务（`- [ ]`）。
+ * marked 会把任务清单渲染成带 checkbox 的 `<li>`，已勾选的带 checked 属性，据此区分。
+ * 同时记下所属章节与它的跳转目标，点任务就能跳到对应位置。
+ */
+export function collectMarkdownTasks(
+  chapters: unknown[],
+  hrefOf: (index: number) => string,
+): { text: string; chapter: string; href: string }[] {
+  const tasks: { text: string; chapter: string; href: string }[] = [];
+  chapters.forEach((ch, i) => {
+    const rec = ch as { html?: unknown; title?: unknown } | null;
+    const html = rec?.html;
+    if (typeof html !== 'string') return;
+    const chapter = typeof rec?.title === 'string' ? rec.title : '';
+    // 否定预查必须放在标签开头：checked 属性出现在 type 之前，
+    // 放在 type 后面看不到它，已勾选的任务会被一并收进来
+    for (const m of html.matchAll(/<li><input(?![^>]*\bchecked)[^>]*type="checkbox"[^>]*>([\s\S]*?)<\/li>/g)) {
+      const text = m[1].replace(/<[^>]+>/g, '').trim();
+      // 上限只是防病态文档把设置项撑爆
+      if (text && tasks.length < 500) tasks.push({ text, chapter, href: hrefOf(i) });
+    }
+  });
+  return tasks;
 }
 
 /** Markdown 元数据：取首个一级标题当书名，没有则返回 null 交给调用方回退文件名 */

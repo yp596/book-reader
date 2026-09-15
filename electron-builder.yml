@@ -11,6 +11,15 @@ files:
   - resources/**/*
   - node_modules/node-llama-cpp/**/*
   - node_modules/@node-llama-cpp/**/*
+  # 只保留 CPU 版二进制（win-x64，46MB）。CUDA / Vulkan / arm64 变体合计 627MB，
+  # 而本应用自己的模型组件下载链路取的就是 CPU 版（见 model-registry 的
+  # LLAMA_CPU_ZIP_URL），本地推理不依赖它们。
+  # 代价：有 N 卡的机器失去依赖顺带带来的 GPU 加速，退回 CPU 推理。
+  # 要恢复 GPU 加速，删掉下面四行重新打包即可。
+  - "!node_modules/@node-llama-cpp/win-x64-cuda/**"
+  - "!node_modules/@node-llama-cpp/win-x64-cuda-ext/**"
+  - "!node_modules/@node-llama-cpp/win-x64-vulkan/**"
+  - "!node_modules/@node-llama-cpp/win-arm64/**"
 # 原生 .node 不能跑在 asar 包内，必须解包
 asarUnpack:
   - "**/*.node"
@@ -23,7 +32,18 @@ win:
     - target: portable
       arch:
         - x64
+    # MSI：企业内分发与静默安装用（msiexec /i xxx.msi /qn）
+    - target: msi
+      arch:
+        - x64
   icon: build/icon.ico
+  # 关闭「签名并改写可执行文件」。
+  # 原因：electron-builder 会解压 winCodeSign 工具包，包内含 macOS 的 .dylib 符号链接，
+  # 而 Windows 默认账户没有创建符号链接的特权（需要管理员或开启「开发人员模式」），
+  # 解压失败会让整次打包中断。本项目没有代码签名证书，签名本来就会被跳过；
+  # 图标与版本信息仍由 win-unpacked 阶段写入（已核对 exe 内的图标资源与版本块）。
+  # 若将来要正式签名，请开启开发人员模式或改用管理员权限构建，并去掉这一行。
+  signAndEditExecutable: false
 # 文件关联：与 electron/main.ts 的 ASSOCIATED_EXTS 保持一致，改了要两边同步
 fileAssociations:
   - ext: epub

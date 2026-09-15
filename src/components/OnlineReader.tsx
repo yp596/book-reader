@@ -104,7 +104,8 @@ export function OnlineReader({ source, book, onBack }: OnlineReaderProps) {
     setFollowing(true);
     try {
       await api.followBook({ source_id: source.id, book_url: book.detail, title: book.name });
-      alert('已加入追更，下次检查更新会提醒你');
+      // 不能说「会提醒你」：目前没有通知机制，只在「书源 → 追更」里手动检查
+      alert('已加入追更。回到「书源 → 追更」点「检查更新」即可查看最新章节。');
     } catch (err) {
       alert(err instanceof Error ? err.message : '追更失败');
     } finally {

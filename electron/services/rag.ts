@@ -1,4 +1,5 @@
 /** RAG：文本切分 + embedding 调用 + 余弦检索（纯函数可单测） */
+import { apiUrl } from './ai-service';
 
 export interface TextSection {
   /** 章节名 */
@@ -70,7 +71,7 @@ export async function embedTexts(
   // 分批防超限
   for (let i = 0; i < texts.length; i += 16) {
     const batch = texts.slice(i, i + 16);
-    const response = await fetch(`${baseUrl.replace(/\/$/, '')}/v1/embeddings`, {
+    const response = await fetch(apiUrl(baseUrl, '/embeddings'), {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ model: 'nomic-embed', input: batch }),

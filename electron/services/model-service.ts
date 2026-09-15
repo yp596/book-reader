@@ -24,6 +24,8 @@ let _instance: ModelService | null = null;
 export class ModelService {
   private procs = new Map<string, ChildProcess>();
   private downloading = new Set<string>();
+  /** 启动期间子进程自身报的错（如 spawn 失败），用于替代「启动超时」这种误导性提示 */
+  private lastStartError = new Map<string, string>();
   private win: BrowserWindow | null = null;
 
   static getInstance(): ModelService {
@@ -175,15 +177,25 @@ export class ModelService {
       await this.fetchToFile(LLAMA_CPU_ZIP_URL, zipPath, id, 'llama-server');
       const buf = fs.readFileSync(zipPath);
       const zip = await JSZip.loadAsync(buf);
-      const names = Object.keys(zip.files).filter(n => !zip.files[n].dir);
-      const exeEntry = names.find(n => n.toLowerCase().endsWith('llama-server.exe')) ?? names[0];
-      if (!exeEntry) throw new Error('压缩包内未找到 llama-server');
-      const data = await zip.file(exeEntry)!.async('nodebuffer');
-      const dest = path.join(this.binDir(), LLAMA_BIN_NAME);
-      fs.writeFileSync(dest, data);
+      const entries = Object.keys(zip.files).filter(n => !zip.files[n].dir);
+      if (entries.length === 0) throw new Error('下载的组件包是空的，请重新下载');
+      const binDir = this.binDir();
+      fs.mkdirSync(binDir, { recursive: true });
+      // 必须把包内文件全部解出来：主程序依赖同目录的一整套 DLL（llama.dll、ggml*.dll 等），
+      // 只写一个 exe 的话子进程一启动就退出，用户只会看到「启动超时」这种误导性提示。
+      // 用 basename 摊平存放：包内有一层版本目录，DLL 要和 exe 同层才找得到。
+      let hasExe = false;
+      for (const name of entries) {
+        const base = path.basename(name);
+        if (!base) continue;
+        if (base.toLowerCase() === LLAMA_BIN_NAME.toLowerCase()) hasExe = true;
+        const data = await zip.file(name)!.async('nodebuffer');
+        fs.writeFileSync(path.join(binDir, base), data);
+      }
+      if (!hasExe) throw new Error('下载的组件不完整（缺少主程序），请删除后重新下载');
       fs.unlink(zipPath, () => {});
       this.emitProgress(id, { kind: 'download', percent: 100 });
-      return dest;
+      return path.join(binDir, LLAMA_BIN_NAME);
     } finally {
       this.downloading.delete(id);
     }
@@ -202,14 +214,23 @@ export class ModelService {
     }
   }
 
-  private async waitHealthy(port: number, timeoutMs = 120000): Promise<void> {
+  /**
+   * 轮询健康检查。
+   * isDead 由调用方提供，用来在子进程已经退出时立刻失败——否则会空等整整两分钟，
+   * 最后只报一句「启动超时」，把真正的原因（缺文件、端口被占）藏起来。
+   */
+  private async waitHealthy(port: number, timeoutMs = 120000, deathReason?: () => string | null): Promise<void> {
     const start = Date.now();
     for (;;) {
       try {
         const res = await fetch(`http://127.0.0.1:${port}/health`);
         if (res.ok) return;
       } catch { /* 未就绪继续等 */ }
-      if (Date.now() - start > timeoutMs) throw new Error('模型服务启动超时');
+      const reason = deathReason?.();
+      if (reason) throw new Error(`模型服务启动失败：${reason}`);
+      if (Date.now() - start > timeoutMs) {
+        throw new Error('模型服务启动超时，请确认端口未被占用后重试');
+      }
       await new Promise(r => setTimeout(r, 1000));
     }
   }
@@ -225,14 +246,26 @@ export class ModelService {
       ['-m', this.modelPath(def), '--port', String(def.port), ...def.args],
       { stdio: 'ignore', windowsHide: true },
     );
+    // 先看进程是否已经退出：DLL 缺失、端口被占之类的问题会让子进程立刻死掉，
+    // 不查这个的话只会空等两分钟再报「启动超时」，用户拿不到真正的原因
     this.procs.set(id, proc);
+    let exited = false;
     proc.on('exit', () => {
+      exited = true;
+      if (this.procs.get(id) === proc) this.procs.delete(id);
+    });
+    proc.on('error', err => {
+      exited = true;
+      this.lastStartError.set(id, err instanceof Error ? err.message : String(err));
       if (this.procs.get(id) === proc) this.procs.delete(id);
     });
     this.emitProgress(id, { kind: 'starting' });
-    await this.waitHealthy(def.port);
+    await this.waitHealthy(def.port, 120000, () =>
+      exited ? this.lastStartError.get(id) ?? '进程已退出，请检查本地组件是否完整' : null,
+    );
     this.emitProgress(id, { kind: 'running' });
     this.fillDefaultAddresses(def);
+    this.lastStartError.delete(id);
   }
 
   /** 首次启动成功后回填默认地址（不覆盖用户手填） */

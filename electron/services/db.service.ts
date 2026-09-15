@@ -59,8 +59,15 @@ export class DatabaseService {
   private scheduleSave() {
     if (this.saveTimer) return;
     this.saveTimer = setTimeout(() => {
-      this.save();
+      // 先清定时器再落盘：save() 失败时（磁盘满、文件被占用）如果定时器还留着，
+      // 之后所有写入都会被上面的 if 拦住，自动保存会静默停摆，只有退出才可能再写一次。
       this.saveTimer = null;
+      try {
+        this.save();
+      } catch (err) {
+        // 本次失败不致命：下次写入会重新排一次落盘
+        console.error('数据库落盘失败，将在下次写入时重试', err);
+      }
     }, 5000);
   }
 
@@ -212,6 +219,9 @@ export class DatabaseService {
       `ALTER TABLE bookmarks ADD COLUMN updated_at DATETIME`,
       `ALTER TABLE notes ADD COLUMN updated_at DATETIME`,
       `ALTER TABLE words ADD COLUMN updated_at DATETIME`,
+      // 书源表也要有：增量备份对每张表都查 COALESCE(updated_at, created_at)，
+      // 少这一列会让「导出增量备份」在第二次导出时直接报 no such column
+      `ALTER TABLE book_sources ADD COLUMN updated_at DATETIME`,
       // 书籍锁定：防误删、防误改（仅保留阅读权限）
       `ALTER TABLE books ADD COLUMN locked INTEGER DEFAULT 0`,
       // 笔记标签（逗号分隔存储，无需额外建表）
@@ -322,6 +332,121 @@ export class DatabaseService {
   findBookByHash(hash: string) {
     if (!hash) return undefined;
     return this.get('SELECT id, title FROM books WHERE hash = ?', [hash]);
+  }
+
+  /**
+   * 书库属性汇总（Markdown frontmatter）：每个 `键: 值` 出现在哪些书里。
+   * 只按原样汇总，不猜语义——用户写 `status: 待整理` 还是 `状态: 待整理` 由他自己定。
+   */
+  getAllBookProps(): { key: string; value: string; bookIds: number[]; count: number }[] {
+    const byPair = new Map<string, { key: string; value: string; bookIds: number[] }>();
+    for (const b of this.all('SELECT id FROM books') as { id: number }[]) {
+      const raw = this.getSetting(`mdProps:${b.id}`);
+      if (!raw) continue;
+      try {
+        const obj = JSON.parse(raw) as Record<string, unknown>;
+        if (!obj || typeof obj !== 'object') continue;
+        for (const [key, vals] of Object.entries(obj)) {
+          if (!Array.isArray(vals)) continue;
+          for (const v of vals) {
+            if (typeof v !== 'string' || !v.trim()) continue;
+            const id = `${key} ${v}`;
+            const cur = byPair.get(id) ?? { key, value: v, bookIds: [] };
+            // 同一本书里重复写了同一个值只算一次：count 的语义是「多少本书有它」
+            if (!cur.bookIds.includes(b.id)) cur.bookIds.push(b.id);
+            byPair.set(id, cur);
+          }
+        }
+      } catch { /* 脏值忽略 */ }
+    }
+    return [...byPair.values()]
+      .map(p => ({ ...p, count: p.bookIds.length }))
+      .sort(
+        (a, b) =>
+          b.count - a.count || a.key.localeCompare(b.key) || a.value.localeCompare(b.value),
+      );
+  }
+
+  /**
+   * 引用关系（Markdown 的 `[[目标]]`）。
+   * outgoing = 本书引用了哪些书；incoming = 哪些书引用了本书。
+   *
+   * 先建一张「名字 → 书」的索引再逐个链接比对——直接对每个链接调 findBookByWikilink
+   * 会在书多、链接多时退化成反复全表扫。sourceNameOf 提供「导入时的原文件名」，
+   * 与 findBookByWikilink 的口径保持一致。
+   */
+  getBookLinks(
+    bookId: number,
+    sourceNameOf?: (id: number) => string | null,
+  ): {
+    outgoing: { id: number; title: string; via: string }[];
+    incoming: { id: number; title: string; via: string }[];
+  } {
+    const key = (s: string) => (s || '').trim().toLowerCase();
+    const books = this.all('SELECT id, title FROM books') as { id: number; title: string }[];
+    const byName = new Map<string, { id: number; title: string }>();
+    for (const b of books) {
+      if (b.title) byName.set(key(b.title), b);
+      const name = sourceNameOf?.(b.id);
+      if (name) byName.set(key(name), b);
+    }
+
+    const linksOf = (id: number): string[] => {
+      const raw = this.getSetting(`mdLinks:${id}`);
+      if (!raw) return [];
+      try {
+        const arr = JSON.parse(raw) as unknown;
+        return Array.isArray(arr)
+          ? arr.filter((t): t is string => typeof t === 'string' && !!t.trim())
+          : [];
+      } catch {
+        return [];
+      }
+    };
+
+    const outgoing: { id: number; title: string; via: string }[] = [];
+    for (const t of linksOf(bookId)) {
+      const hit = byName.get(key(t));
+      if (hit && hit.id !== bookId) outgoing.push({ id: hit.id, title: hit.title, via: t });
+    }
+
+    const incoming: { id: number; title: string; via: string }[] = [];
+    const seen = new Set<number>();
+    for (const b of books) {
+      if (b.id === bookId || seen.has(b.id)) continue;
+      for (const t of linksOf(b.id)) {
+        const hit = byName.get(key(t));
+        if (hit?.id === bookId) {
+          incoming.push({ id: b.id, title: b.title, via: t });
+          seen.add(b.id);
+          break;
+        }
+      }
+    }
+
+    return { outgoing, incoming };
+  }
+
+  /**
+   * wiki 链接解析（Markdown 的 `[[目标]]`）：先按书名匹配，再按「导入时的原文件名」匹配。
+   * 后者是必需的——Markdown 的书名取自首个一级标题，与文件名经常不一样，
+   * 而链接里写的通常是文件名。
+   */
+  findBookByWikilink(
+    target: string,
+    sourceNameOf?: (id: number) => string | null,
+  ): { id: number; title: string } | undefined {
+    const t = (target || '').trim();
+    if (!t) return undefined;
+    const byTitle = this.findBookByTitle(t) as { id: number; title: string } | undefined;
+    if (byTitle) return byTitle;
+    if (!sourceNameOf) return undefined;
+    const rows = this.all('SELECT id, title FROM books') as { id: number; title: string }[];
+    for (const row of rows) {
+      const name = sourceNameOf(row.id);
+      if (name && name.toLowerCase() === t.toLowerCase()) return row;
+    }
+    return undefined;
   }
 
   /** 按书名查重（忽略大小写与首尾空白）：同一本书的另一个版本或格式 */
@@ -998,9 +1123,14 @@ export class DatabaseService {
     since: string | null,
   ): any[] {
     if (!since) return this.all(`SELECT * FROM ${table}`);
+    // 两个时间戳格式不一样：基线存的是 ISO（2026-09-12T10:00:00.000Z），
+    // 库内是 SQLite 的 CURRENT_TIMESTAMP（2026-09-12 10:00:00，UTC、空格分隔）。
+    // 字符串比较到第 10 位时 ' '(0x20) < 'T'(0x54)，当天产生的记录会被判成「没变过」而永久漏备，
+    // 所以两边先统一成库内格式再比。
+    const normalized = since.length >= 19 ? `${since.slice(0, 10)} ${since.slice(11, 19)}` : since;
     return this.all(
-      `SELECT * FROM ${table} WHERE COALESCE(updated_at, created_at) > ?`,
-      [since],
+      `SELECT * FROM ${table} WHERE REPLACE(COALESCE(updated_at, created_at), 'T', ' ') > ?`,
+      [normalized],
     );
   }
 

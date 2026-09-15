@@ -2,14 +2,16 @@ import { ipcMain, dialog, BrowserWindow, app, shell, Notification, clipboard } f
 import fs from 'fs';
 import path from 'path';
 import { DatabaseService } from '../services/db.service';
-import { extractMetadata, extractToc, docxToChapters, mdToChapters, extractBookSections, readPlainTextFile, TXT_TOC_RULE_NAMES, type TxtTocOptions } from '../services/metadata';
+import { extractMetadata, extractToc, docxToChapters, mdToDocument, collectMarkdownTags, collectMarkdownTasks, collectMarkdownLinks, imageMediaType, extractBookSections, readPlainTextFile, TXT_TOC_RULE_NAMES, type TxtTocOptions } from '../services/metadata';
 import { buildCrawlerFromRow, applyTextFilters } from '../services/book-source';
 import { splitText, cosine, embedTexts } from '../services/rag';
 import { buildEpub } from '../services/epub-export';
 import { AiService } from '../services/ai-service';
 import {
   buildBackupFile,
-  writeBackup,
+  writeBackupArchive,
+  collectBookFileEntries,
+  extractBackupFiles,
   readBackup,
   mergeBackup,
   createSnapshot,
@@ -23,7 +25,7 @@ import { contentHash, classifySource, readSourceSnapshot, type SourceSnapshot } 
 import { dirSize, clearSnapshots } from '../services/cache';
 import { folderWatcher } from '../services/watch-folder';
 import { loadRenderer } from '../renderer-window';
-import { filePathFromUrl, fontsDir, isInsideBooksDir, localFileUrl, resourcesDir } from '../services/local-file';
+import { filePathFromUrl, booksDir, fontsDir, isInsideBooksDir, localFileUrl, resourcesDir } from '../services/local-file';
 import {
   mergePdfs,
   extractPages,
@@ -139,16 +141,36 @@ async function materializeIntoLibrary(filePath: string, ext: string, title: stri
 
   if (ext === '.docx' || ext === '.md') {
     const label = ext === '.docx' ? 'DOCX' : 'Markdown';
-    const chapters = ext === '.docx' ? await docxToChapters(filePath) : await mdToChapters(filePath);
+    // Markdown 走 mdToDocument：它额外把正文里引用的本地图片收进 EPUB
+    // （相对路径的图片不打包的话，读的时候只会看到破图）
+    const doc =
+      ext === '.md'
+        ? await mdToDocument(filePath)
+        : { chapters: await docxToChapters(filePath), images: [], missingImages: 0, props: {} };
+    const chapters = doc.chapters;
     if (chapters.length === 0) throw new Error(`${label} 内容为空或解析失败`);
     const { buildEpub } = await import('../services/epub-export');
-    const buf = await buildEpub(title, chapters);
+    const buf = await buildEpub(
+      title,
+      chapters,
+      doc.images.map(img => ({ ...img, mediaType: imageMediaType(img.sourcePath) })),
+    );
     const storePath = path.join(booksDir, `${Date.now()}-${fileName}.epub`);
     fs.writeFileSync(storePath, buf);
     return {
       storePath,
       storeExt: '.epub',
       convertedToc: chapters.map((c, i) => ({ label: c.title, href: `Text/ch${i + 1}.xhtml` })),
+      // 顺手收下正文里的 #标签 与未完成任务，书架/统计页据此做筛选与汇总
+      tags: ext === '.md' ? collectMarkdownTags(chapters) : undefined,
+      tasks:
+        ext === '.md'
+          ? collectMarkdownTasks(chapters, i => `Text/ch${i + 1}.xhtml`)
+          : undefined,
+      // wiki 链接目标：用来算「谁引用了谁」
+      links: ext === '.md' ? collectMarkdownLinks(chapters) : undefined,
+      // frontmatter 属性：书架据此按属性筛书
+      props: ext === '.md' ? doc.props : undefined,
     };
   }
 
@@ -194,7 +216,7 @@ async function importOneFile(db: DatabaseService, filePath: string, policyOverri
   }
 
   // DOCX / Markdown 会在这一步转成 EPUB 落盘，其余原样复制
-  const { storePath, storeExt, convertedToc } = await materializeIntoLibrary(filePath, ext, title);
+  const { storePath, storeExt, convertedToc, tags, tasks, links, props } = await materializeIntoLibrary(filePath, ext, title);
 
   // 封面提取失败不阻塞导入，书架会退回格式占位块
   let coverUrl: string | null = null;
@@ -229,12 +251,26 @@ async function importOneFile(db: DatabaseService, filePath: string, policyOverri
       } catch { /* 删不掉就留着，不影响阅读 */ }
     }
     writeSourceInfo(db, conflict.id, filePath);
+    if (ext === '.md') {
+      db.setSetting(`mdSource:${conflict.id}`, '1');
+      if (tags) db.setSetting(`bookTags:${conflict.id}`, JSON.stringify(tags));
+      db.setSetting(`mdTasks:${conflict.id}`, JSON.stringify(tasks ?? []));
+      db.setSetting(`mdLinks:${conflict.id}`, JSON.stringify(links ?? []));
+      db.setSetting(`mdProps:${conflict.id}`, JSON.stringify(props ?? {}));
+    }
     return { id: conflict.id, path: storePath };
   }
 
   // 无冲突，或策略是「保留」：按新书入库
   const id = db.insertBook(fields);
   if (tocJson) db.setBookToc(Number(id), tocJson);
+  if (ext === '.md') {
+    db.setSetting(`mdSource:${Number(id)}`, '1');
+    if (tags) db.setSetting(`bookTags:${Number(id)}`, JSON.stringify(tags));
+    db.setSetting(`mdTasks:${Number(id)}`, JSON.stringify(tasks ?? []));
+    db.setSetting(`mdLinks:${Number(id)}`, JSON.stringify(links ?? []));
+    db.setSetting(`mdProps:${Number(id)}`, JSON.stringify(props ?? {}));
+  }
   writeSourceInfo(db, Number(id), filePath);
   return { id: Number(id), path: storePath };
 }
@@ -418,11 +454,16 @@ export function registerIpcHandlers() {
   // 删除书籍：连同书库内的副本与封面一起回收。
   // 导入时文件是拷进 userData/books 的，只删数据库行会把副本永久留在磁盘上。
   // 先删文件再删记录——文件被占用时能报错中止，不至于记录没了、文件还在。
+  // 但锁定判断必须在删文件之前：db.deleteBook 开头就会拦锁定书，若放到后面，
+  // 会出现「文件已被删掉、记录却还在」的不可逆损坏。
   ipcMain.handle('books:delete', (_event, id: number) => {
     const book = db.getBookById(id) as
-      | { id: number; file_path?: string; cover_path?: string }
+      | { id: number; file_path?: string; cover_path?: string; locked?: number }
       | undefined;
     if (!book) return;
+    if (book.locked) {
+      throw new Error('该书籍已锁定，无法删除。可在书架右键「解锁书籍」后再删。');
+    }
     const targets = [book.file_path, book.cover_path ? filePathFromUrl(book.cover_path) : null];
     for (const target of targets) {
       if (!target || !isInsideBooksDir(target)) continue;
@@ -431,7 +472,7 @@ export function registerIpcHandlers() {
       } catch (err) {
         // 文件本来就不在（书库目录被手工清理过）不算失败，其余情况要让用户知道
         if ((err as NodeJS.ErrnoException).code !== 'ENOENT') {
-          throw new Error(`无法删除书库文件，已中止：${(err as Error).message}`);
+          throw new Error('无法删除书库文件，请先关闭正在使用该文件的程序再重试。');
         }
       }
     }
@@ -440,6 +481,103 @@ export function registerIpcHandlers() {
 
   ipcMain.handle('books:updateProgress', (_event, id: number, progress: number) => {
     db.updateBookProgress(id, progress);
+  });
+
+  /**
+   * 测试 AI 服务连通性。
+   * 外接大模型时地址、密钥、模型名任一项填错都会失败，让用户先在这里当场试出来，
+   * 而不是等点「总结本页」才发现。
+   */
+  ipcMain.handle(
+    'ai:test',
+    async (_event, cfg: { baseUrl: string; model: string; apiKey?: string }) => {
+      const svc = new AiService(
+        { provider: 'custom', baseUrl: cfg?.baseUrl ?? '', model: cfg?.model ?? '', apiKey: cfg?.apiKey },
+        () => db.assertOnlineEnabled('AI 服务'),
+      );
+      try {
+        const reply = await svc.chat([{ role: 'user', content: '只回复两个字：连通' }]);
+        return { ok: true, message: (reply || '').trim().slice(0, 60) || '服务已响应' };
+      } catch (err) {
+        return { ok: false, message: err instanceof Error ? err.message : '连接失败，请检查地址与密钥' };
+      }
+    },
+  );
+
+  // Markdown 的 [[目标]] 跳转：按书名或原文件名找同一书库里的另一本书
+  ipcMain.handle('books:findByWikilink', (_event, target: string) => {
+    const found = db.findBookByWikilink(target, id => {
+      const info = readSourceInfo(db, id);
+      return info?.path ? path.basename(info.path, path.extname(info.path)) : null;
+    });
+    return found ?? null;
+  });
+
+  /**
+   * 书库标签汇总：把各本书正文里的 #标签 收集起来供书架筛选。
+   * 目前只收 Markdown 导入的书（导入时已解析并存下），其它格式不回扫正文。
+   */
+  ipcMain.handle('books:getAllTags', () => {
+    const byTag = new Map<string, number[]>();
+    for (const b of db.getAllBooks() as { id: number }[]) {
+      const raw = db.getSetting(`bookTags:${b.id}`);
+      if (!raw) continue;
+      try {
+        const list = JSON.parse(raw) as unknown;
+        if (!Array.isArray(list)) continue;
+        for (const t of list) {
+          if (typeof t !== 'string' || !t) continue;
+          const ids = byTag.get(t) ?? [];
+          ids.push(b.id);
+          byTag.set(t, ids);
+        }
+      } catch { /* 脏值忽略 */ }
+    }
+    return [...byTag.entries()]
+      .map(([tag, bookIds]) => ({ tag, bookIds, count: bookIds.length }))
+      .sort((a, b) => b.count - a.count || a.tag.localeCompare(b.tag));
+  });
+
+  /**
+   * 未完成任务汇总：把各本书里 `- [ ]` 的项目收集起来。
+   * 与标签一样，目前只覆盖 Markdown 导入的书。
+   */
+  ipcMain.handle('books:getAllTasks', () => {
+    const out: { bookId: number; bookTitle: string; text: string; chapter: string; href: string }[] = [];
+    for (const b of db.getAllBooks() as { id: number; title: string }[]) {
+      const raw = db.getSetting(`mdTasks:${b.id}`);
+      if (!raw) continue;
+      try {
+        const list = JSON.parse(raw) as unknown;
+        if (!Array.isArray(list)) continue;
+        for (const t of list as { text?: unknown; chapter?: unknown; href?: unknown }[]) {
+          if (typeof t?.text !== 'string' || !t.text) continue;
+          out.push({
+            bookId: b.id,
+            bookTitle: b.title,
+            text: t.text,
+            chapter: typeof t.chapter === 'string' ? t.chapter : '',
+            href: typeof t.href === 'string' ? t.href : '',
+          });
+        }
+      } catch { /* 脏值忽略 */ }
+    }
+    return out;
+  });
+
+  /** frontmatter 属性汇总：书架据此按属性筛书 */
+  ipcMain.handle('books:getAllProps', () => db.getAllBookProps());
+
+  /**
+   * 引用关系：本书引用了哪些笔记、又被哪些笔记引用（Markdown 的 [[目标]]）。
+   * 与标签、待办一样，只覆盖 Markdown 导入的书。
+   */
+  ipcMain.handle('books:getLinks', (_event, bookId: number) => {
+    const sourceNameOf = (id: number) => {
+      const info = readSourceInfo(db, id);
+      return info?.path ? path.basename(info.path, path.extname(info.path)) : null;
+    };
+    return db.getBookLinks(bookId, sourceNameOf);
   });
 
   // 文件属性（名称/大小/修改时间/类型）
@@ -1717,20 +1855,47 @@ export function registerIpcHandlers() {
 
   // ============ 本地备份（纯离线，不联网） ============
 
-  // 导出：默认增量（自上次导出后的变更），可显式要求全量
+  // 导出：默认增量（自上次导出后的变更），可显式要求全量。
+  // 全量备份连书籍文件与封面一起打包成 zip——只导出数据的话，换台机器恢复出来
+  // 书架仍是空的（库里记的是书库内副本的路径，新机器上那份文件并不存在）。
   ipcMain.handle('backup:export', async (event, full = false) => {
     const win = BrowserWindow.fromWebContents(event.sender) ?? undefined;
     const stamp = localDateStamp();
     const { canceled, filePath } = await dialog.showSaveDialog(win!, {
-      title: '导出备份',
-      defaultPath: `book-reader-backup-${stamp}.json`,
-      filters: [{ name: '备份文件', extensions: ['json'] }],
+      title: full ? '导出全量备份（含书籍文件）' : '导出增量备份',
+      defaultPath: `book-reader-backup-${stamp}.zip`,
+      filters: [{ name: '备份归档', extensions: ['zip'] }],
     });
     if (canceled || !filePath) return null;
 
     const since = full ? null : db.getSetting('lastLocalBackupAt');
     const payload = buildBackupFile(db, since);
-    writeBackup(filePath, payload);
+
+    // 只有全量才带文件：增量备份的语义是「上次之后的变更」，文件没有增量概念
+    const { files, skipped: skippedFiles } = full
+      ? collectBookFileEntries(db.getAllBooks() as any[])
+      : { files: [], skipped: 0 };
+
+    // 归档是在内存里组装的，书库特别大时先打个招呼，免得用户以为程序卡死
+    let totalBytes = 0;
+    for (const f of files) {
+      try {
+        totalBytes += fs.statSync(f.sourcePath).size;
+      } catch { /* 刚刚还在的文件也可能已被移走，忽略即可 */ }
+    }
+    if (totalBytes > 1.5 * 1024 ** 3) {
+      const { response } = await dialog.showMessageBox(win!, {
+        type: 'question',
+        buttons: ['继续导出', '取消'],
+        defaultId: 0,
+        cancelId: 1,
+        message: `这次要打包的书籍文件共 ${(totalBytes / 1024 ** 3).toFixed(1)} GB`,
+        detail: '导出期间会读入内存并占用较多资源、耗时较长，建议先关闭其它占用内存的程序。',
+      });
+      if (response !== 0) return null;
+    }
+
+    await writeBackupArchive(filePath, payload, files);
     // 仅在成功后推进增量基线，避免失败后丢变更
     db.setSetting('lastLocalBackupAt', payload.createdAt);
     const count =
@@ -1739,21 +1904,35 @@ export function registerIpcHandlers() {
       (payload.data.notes?.length ?? 0) +
       (payload.data.words?.length ?? 0) +
       (payload.data.sources?.length ?? 0);
-    return { filePath, kind: payload.kind, count };
+    const bookFiles = files.filter(f => f.archiveName.startsWith('books/')).length;
+    return {
+      filePath,
+      kind: payload.kind,
+      count,
+      bookFiles,
+      skippedFiles,
+      sizeBytes: fs.statSync(filePath).size,
+    };
   });
 
-  // 从备份文件恢复（幂等合并）
+  // 从备份恢复（幂等合并）。zip 归档里的书籍文件会先落回书库目录，再重建书籍记录
   ipcMain.handle('backup:import', async (event) => {
     const win = BrowserWindow.fromWebContents(event.sender) ?? undefined;
     const { canceled, filePaths } = await dialog.showOpenDialog(win!, {
       title: '选择备份文件',
-      filters: [{ name: '备份文件', extensions: ['json'] }],
+      filters: [{ name: '备份归档', extensions: ['zip', 'json'] }],
       properties: ['openFile'],
     });
     if (canceled || filePaths.length === 0) return null;
-    const payload = readBackup(filePaths[0]);
-    const restored = mergeBackup(db, payload);
-    return { restored, createdAt: payload.createdAt, kind: payload.kind };
+    const payload = await readBackup(filePaths[0]);
+    const restoredFiles = await extractBackupFiles(filePaths[0], booksDir());
+    const restored = mergeBackup(db, payload, restoredFiles);
+    return {
+      restored,
+      createdAt: payload.createdAt,
+      kind: payload.kind,
+      books: restoredFiles.size,
+    };
   });
 
   // 本地快照：手动生成一份全量快照
@@ -1765,9 +1944,9 @@ export function registerIpcHandlers() {
 
   ipcMain.handle('backup:snapshots', () => listSnapshots());
 
-  // 从快照回退
-  ipcMain.handle('backup:restoreSnapshot', (_event, file: string) => {
-    const payload = readBackup(file);
+  // 从快照回退（纯数据，不含书籍文件；要连书一起找回请用全量备份归档）
+  ipcMain.handle('backup:restoreSnapshot', async (_event, file: string) => {
+    const payload = await readBackup(file);
     const restored = mergeBackup(db, payload);
     return { restored, createdAt: payload.createdAt };
   });

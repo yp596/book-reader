@@ -1,4 +1,4 @@
-import { useState, useEffect } from 'react';
+import { useState, useEffect, useRef } from 'react';
 import { Book, TocEntry } from './types';
 import { BookList } from './components/BookList';
 import { BookDetail } from './components/BookDetail';
@@ -55,11 +55,31 @@ function App() {
   /** 首次启动引导：仅在未标记过时展示一次 */
   const [showOnboarding, setShowOnboarding] = useState(false);
 
+  /** 轻量提示：后台自动入库这类不必打断用户的消息用它，不用弹窗 */
+  const [toast, setToast] = useState('');
+  const toastTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const showToast = (message: string) => {
+    setToast(message);
+    if (toastTimerRef.current) clearTimeout(toastTimerRef.current);
+    toastTimerRef.current = setTimeout(() => setToast(''), 3000);
+  };
+
   useEffect(() => {
     window.electronAPI
       ?.getSetting('onboarded')
       .then(v => { if (v !== '1') setShowOnboarding(true); })
       .catch(() => {});
+  }, []);
+
+  // 文件夹监视自动入库：主进程推来书名后刷新书架并说一句。
+  // 之前只发不订阅，看完书回来书架还是旧的，用户会以为监视没生效。
+  useEffect(() => {
+    const eapi = window.electronAPI;
+    if (!eapi?.onWatchImported) return;
+    return eapi.onWatchImported(name => {
+      showToast(`监视的文件夹有新书：《${name}》，已加入书架`);
+      void loadBooks();
+    });
   }, []);
 
   // 多窗口：本窗口带 book 参数时，启动即打开这本书（由主进程 window:openReader 创建）
@@ -73,14 +93,17 @@ function App() {
   }, []);
 
   // 系统「打开方式」/ 双击关联文件：冷启动的路径要主动来取，运行中的等主进程推送。
-  // 不带路径就来自 Ctrl+O，走打开文件对话框
+  // 两条来源的空值含义不同：冷启动取不到路径就是普通启动，什么都不该做；
+  // 只有运行中收到的无路径推送才代表菜单/快捷键发起的导入（Ctrl+O）。
   useEffect(() => {
-    const openPath = (filePath?: string | null) => {
+    window.electronAPI
+      ?.takeOpenFile?.()
+      .then(filePath => { if (filePath) void handleOpenPath(filePath); })
+      .catch(() => {});
+    return api.onOpenFile(filePath => {
       if (filePath) void handleOpenPath(filePath);
       else void handleOpenFile();
-    };
-    window.electronAPI?.takeOpenFile?.().then(openPath).catch(() => {});
-    return api.onOpenFile(openPath);
+    });
   }, []);
 
   // 崩溃恢复：上次没走正常退出流程时，问一句要不要接着读
@@ -132,12 +155,18 @@ function App() {
   };
 
   const handleOpenFile = async () => {
-    const r = await api.importBook();
-    await loadBooks();
-    // 明确告知哪些没导进来、为什么——静默跳过会让人以为成功了
-    if (r?.failed?.length) {
-      const lines = r.failed.map(f => `· ${f.name}：${f.reason}`);
-      alert(['以下文件未导入：', ...lines].join('\n'));
+    try {
+      const r = await api.importBook();
+      await loadBooks();
+      // 明确告知哪些没导进来、为什么——静默跳过会让人以为成功了
+      if (r?.failed?.length) {
+        const lines = r.failed.map(f => `· ${f.name}：${f.reason}`);
+        alert(['以下文件未导入：', ...lines].join('\n'));
+      } else if (r?.imported?.length) {
+        showToast(`已导入 ${r.imported.length} 本书`);
+      }
+    } catch (err) {
+      alert(err instanceof Error ? err.message : '导入失败，请重试');
     }
   };
 
@@ -254,6 +283,7 @@ function App() {
             initialTarget={readerTarget}
             initialPosition={readerPosition}
             onBack={handleBack}
+            onOpenBook={handleSelectBook}
           />
         );
         // 只有一个标签时不套外壳，布局与原来完全一致
@@ -328,6 +358,7 @@ function App() {
           onClose={dismissOnboarding}
         />
       )}
+      {toast && <div className="toast">{toast}</div>}
     </div>
   );
 }

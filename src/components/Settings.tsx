@@ -22,6 +22,49 @@ import {
 
 /** 0-23 整点选项 */
 const HOURS = Array.from({ length: 24 }, (_, i) => i);
+
+/**
+ * 常用 OpenAI 兼容服务：只预填地址与建议模型，密钥仍需自己填。
+ * 地址都实测过（无密钥请求返回 401，说明端点存在、路径正确）。
+ * OpenAI 与 LM Studio 在本机连不通、没能核实，因此不入列表，需要时手动填地址即可。
+ */
+const AI_PRESETS = [
+  {
+    key: 'deepseek',
+    name: 'DeepSeek（深度求索）',
+    provider: 'openai' as const,
+    baseUrl: 'https://api.deepseek.com',
+    model: 'deepseek-chat',
+  },
+  {
+    key: 'moonshot',
+    name: 'Kimi（月之暗面）',
+    provider: 'openai' as const,
+    baseUrl: 'https://api.moonshot.cn',
+    model: 'moonshot-v1-8k',
+  },
+  {
+    key: 'dashscope',
+    name: '通义千问（阿里云）',
+    provider: 'openai' as const,
+    baseUrl: 'https://dashscope.aliyuncs.com/compatible-mode/v1',
+    model: 'qwen-plus',
+  },
+  {
+    key: 'zhipu',
+    name: '智谱 GLM',
+    provider: 'openai' as const,
+    baseUrl: 'https://open.bigmodel.cn/api/paas/v4',
+    model: 'glm-4-flash',
+  },
+  {
+    key: 'ollama',
+    name: 'Ollama（本机）',
+    provider: 'ollama' as const,
+    baseUrl: 'http://localhost:11434',
+    model: '',
+  },
+];
 const fmtHour = (h: number) => `${String(h).padStart(2, '0')}:00`;
 
 interface SettingsData {
@@ -129,8 +172,10 @@ export function Settings() {
   const loadLastSync = async () => {
     const api = window.electronAPI;
     if (!api) return;
-    const v = await api.getSetting('lastSyncAt');
-    if (v) setLastSync(v);
+    try {
+      const v = await api.getSetting('lastSyncAt');
+      if (v) setLastSync(v);
+    } catch { /* 读不到就保持空，不影响其它设置项 */ }
   };
 
   const loadSettings = async () => {
@@ -162,10 +207,16 @@ export function Settings() {
     const api = window.electronAPI;
     if (!api) return;
     const entries = Object.entries(settings) as [keyof SettingsData, any][];
-    for (const [key, value] of entries) {
-      // 布尔设置统一落成 '1'/'0'：主进程按同一口径判断，
-      // 若写成 String(true) 会出现「界面已开启、功能仍报未开启」的错位
-      await api.setSetting(key, typeof value === 'boolean' ? (value ? '1' : '0') : String(value));
+    try {
+      for (const [key, value] of entries) {
+        // 布尔设置统一落成 '1'/'0'：主进程按同一口径判断，
+        // 若写成 String(true) 会出现「界面已开启、功能仍报未开启」的错位
+        await api.setSetting(key, typeof value === 'boolean' ? (value ? '1' : '0') : String(value));
+      }
+    } catch (err) {
+      // 逐项写入，中途失败会让后面的设置默默没保存，必须让用户知道
+      alert(`设置有部分没能保存：${err instanceof Error ? err.message : '写入失败'}\n请重试。`);
+      return;
     }
     if (silent) return;
     setSaved(true);
@@ -261,19 +312,26 @@ export function Settings() {
     { file: string; name: string; createdAt: string; sizeKB: number }[]
   >([]);
   const [backupBusy, setBackupBusy] = useState(false);
+  /** AI 服务连通性测试：外接大模型时先试一下，别等用的时候才发现填错 */
+  const [aiTesting, setAiTesting] = useState(false);
+  const [aiTestResult, setAiTestResult] = useState('');
   const [lastBackup, setLastBackup] = useState('');
 
   const loadSnapshots = async () => {
     const api = window.electronAPI;
     if (!api) return;
-    setSnapshots(await api.listSnapshots());
+    try {
+      setSnapshots(await api.listSnapshots());
+    } catch { /* 列表读不到不影响其它内容 */ }
   };
 
   const loadLastBackup = async () => {
     const api = window.electronAPI;
     if (!api) return;
-    const v = await api.getSetting('lastLocalBackupAt');
-    if (v) setLastBackup(new Date(v).toLocaleString());
+    try {
+      const v = await api.getSetting('lastLocalBackupAt');
+      if (v) setLastBackup(new Date(v).toLocaleString());
+    } catch { /* 同上 */ }
   };
 
   const handleExportBackup = async (full: boolean) => {
@@ -284,10 +342,17 @@ export function Settings() {
       const r = await api.exportBackup(full);
       if (r) {
         await loadLastBackup();
-        alert(`已导出${r.kind === 'incremental' ? '增量' : '全量'}备份（${r.count} 条记录）\n${r.filePath}`);
+        const fileText = r.bookFiles > 0 ? `，含 ${r.bookFiles} 个书籍文件` : '';
+        const skipText =
+          r.skippedFiles > 0
+            ? `\n有 ${r.skippedFiles} 本书的源文件已不在本机，没能打包（恢复后需重新导入）`
+            : '';
+        alert(
+          `已导出${r.kind === 'incremental' ? '增量' : '全量'}备份：${r.count} 条记录${fileText}，共 ${formatFileSize(r.sizeBytes)}。\n${r.filePath}${skipText}`,
+        );
       }
     } catch (err) {
-      alert(`导出失败：${err instanceof Error ? err.message : '未知错误'}`);
+      alert(`导出失败：${err instanceof Error ? err.message : '请确认目标位置可写后重试'}`);
     } finally {
       setBackupBusy(false);
     }
@@ -296,14 +361,53 @@ export function Settings() {
   const handleImportBackup = async () => {
     const api = window.electronAPI;
     if (!api) return;
+    if (
+      !confirm(
+        '从备份恢复会把备份中的书籍、书签、笔记、进度与设置合并进当前书库。\n' +
+          '备份里带着书籍文件的，书会一起重建；没有文件的只合并批注与设置。\n' +
+          '现有笔记不会被删除；同一条记录以备份里的版本为准。\n\n' +
+          '下一步选择备份文件，选完立即开始恢复。',
+      )
+    )
+      return;
     setBackupBusy(true);
     try {
       const r = await api.importBackup();
-      if (r) alert(`恢复完成，合并 ${r.restored} 条数据（备份时间：${new Date(r.createdAt).toLocaleString()}）`);
+      if (r) {
+        // 设置项也在备份里：必须重新读一遍，否则用户接着点保存会把刚恢复的配置写回旧值
+        await loadSettings();
+        await loadSnapshots();
+        await loadLastBackup();
+        alert(
+          `恢复完成：合并 ${r.restored} 条数据` +
+            (r.books > 0 ? `，重建 ${r.books} 本书` : '') +
+            `（备份时间：${new Date(r.createdAt).toLocaleString()}）。`,
+        );
+      }
     } catch (err) {
-      alert(`恢复失败：${err instanceof Error ? err.message : '未知错误'}`);
+      alert(`恢复失败：${err instanceof Error ? err.message : '备份文件可能已损坏或不完整'}`);
     } finally {
       setBackupBusy(false);
+    }
+  };
+
+  /** 测试 AI 服务连通性：地址、密钥、模型名任一项填错都会在这里暴露出来 */
+  const handleTestAi = async () => {
+    const api = window.electronAPI;
+    if (!api?.testAi) return;
+    setAiTesting(true);
+    setAiTestResult('');
+    try {
+      const r = await api.testAi({
+        baseUrl: settings.aiBaseUrl,
+        model: settings.aiModel,
+        apiKey: settings.aiApiKey,
+      });
+      setAiTestResult(r.ok ? `连接成功，服务返回「${r.message}」` : `连接失败：${r.message}`);
+    } catch (err) {
+      setAiTestResult(`连接失败：${err instanceof Error ? err.message : '请重试'}`);
+    } finally {
+      setAiTesting(false);
     }
   };
 
@@ -314,24 +418,31 @@ export function Settings() {
     try {
       const r = await api.createSnapshot();
       await loadSnapshots();
-      alert(`快照已生成${r.pruned > 0 ? `，清理旧快照 ${r.pruned} 份` : ''}`);
+      alert(`已生成一份备份存档${r.pruned > 0 ? `，并清理了 ${r.pruned} 份最旧的存档` : ''}。`);
     } catch (err) {
-      alert(`快照失败：${err instanceof Error ? err.message : '未知错误'}`);
+      alert(`生成备份存档失败：${err instanceof Error ? err.message : '请重试'}`);
     } finally {
       setBackupBusy(false);
     }
   };
 
   const handleRestoreSnapshot = async (file: string) => {
-    if (!confirm('从该快照回退会合并历史数据，确定继续？')) return;
+    if (
+      !confirm(
+        '从这份存档回退会把存档里的书签、笔记、进度与设置合并回来。\n' +
+          '回退只做合并，不会删除现有记录。确定继续？',
+      )
+    )
+      return;
     const api = window.electronAPI;
     if (!api) return;
     setBackupBusy(true);
     try {
       const r = await api.restoreSnapshot(file);
-      alert(`回退完成，合并 ${r.restored} 条数据`);
+      await loadSettings();
+      alert(`回退完成，合并 ${r.restored} 条数据。`);
     } catch (err) {
-      alert(`回退失败：${err instanceof Error ? err.message : '未知错误'}`);
+      alert(`回退失败：${err instanceof Error ? err.message : '存档文件可能已损坏'}`);
     } finally {
       setBackupBusy(false);
     }
@@ -403,7 +514,7 @@ export function Settings() {
       await loadCacheStats();
       await loadSnapshots();
       const parts: string[] = [];
-      if (r.snapshots) parts.push(`快照 ${r.snapshots} 份`);
+      if (r.snapshots) parts.push(`备份存档 ${r.snapshots} 份`);
       if (r.chapterCache) parts.push(`章节缓存 ${r.chapterCache} 条`);
       alert(`已清理：${parts.length > 0 ? parts.join('、') : '没有需要清理的内容'}`);
     } catch (err) {
@@ -416,10 +527,12 @@ export function Settings() {
   // ---------- 隐私清理 ----------
 
   const [privacyOpts, setPrivacyOpts] = useState({
-    positions: true,
+    // 默认只勾最无害的在线章节缓存：剪贴板与阅读位置一旦清掉无法恢复，
+    // 让用户自己勾，别替他决定
+    positions: false,
     chapterCache: true,
     timestamps: false,
-    clipboard: true,
+    clipboard: false,
   });
   const [privacyBusy, setPrivacyBusy] = useState(false);
 
@@ -430,7 +543,7 @@ export function Settings() {
       alert('请至少选择一项要清理的内容');
       return;
     }
-    if (!confirm('确定清理所选隐私数据？此操作不可撤销。')) return;
+    if (!confirm('确定清理所选隐私数据？清理后无法恢复。')) return;
     setPrivacyBusy(true);
     try {
       const r = await api.clearPrivacy(privacyOpts);
@@ -438,10 +551,10 @@ export function Settings() {
       if (r.positions) parts.push(`阅读位置记录 ${r.positions} 条`);
       if (r.chapterCache) parts.push(`章节缓存 ${r.chapterCache} 条`);
       if (r.timestamps) parts.push(`阅读时间戳 ${r.timestamps} 本`);
-      if (r.clipboard) parts.push('剪贴板已清空');
+      if (r.clipboard) parts.push('系统剪贴板已清空');
       alert(`清理完成：${parts.length > 0 ? parts.join('、') : '没有需要清理的数据'}`);
     } catch (err) {
-      alert(`清理失败：${err instanceof Error ? err.message : '未知错误'}`);
+      alert(`清理失败：${err instanceof Error ? err.message : '请重试'}`);
     } finally {
       setPrivacyBusy(false);
     }
@@ -450,15 +563,15 @@ export function Settings() {
   const handleBackup = async () => {
     const api = window.electronAPI;
     if (!api) return;
-    // 先保存当前配置再同步
-    await handleSave(true);
     setSyncing(true);
     try {
+      // 先保存当前配置再同步；保存失败也要有反馈，不能按钮点了没动静
+      await handleSave(true);
       await api.syncBackup();
       await loadLastSync();
-      alert('备份成功');
+      alert('已备份到云端。');
     } catch (err) {
-      alert(`备份失败：${err instanceof Error ? err.message : '未知错误'}`);
+      alert(`备份失败：${err instanceof Error ? err.message : '请检查云端地址与账号后重试'}`);
     } finally {
       setSyncing(false);
     }
@@ -709,7 +822,7 @@ export function Settings() {
       <section className="settings-section">
         <h2>联网附加能力</h2>
         <p className="section-desc" style={{ lineHeight: 1.9 }}>
-          软件默认纯离线运行，解析、渲染、检索、存储全部在本机完成，不发起任何网络请求。
+          软件默认纯离线运行，解析、显示、检索、存储全部在本机完成，不发起任何网络请求。
           只有下面这一道开关打开后，需要联网的能力才会生效：在线书源与在线阅读、WebDAV 同步、
           本地模型的下载、以及 AI 助手与语义检索连接外部服务时。
         </p>
@@ -740,7 +853,28 @@ export function Settings() {
 
       <section className="settings-section">
         <h2>AI 设置</h2>
-        <p className="section-desc">配置本地 Ollama 或其他 AI 服务用于阅读辅助</p>
+        <p className="section-desc">
+          用来做总结、问答、翻译与思维导图。留空的本地模型够用；要接外部的 OpenAI 兼容服务
+          （DeepSeek、Kimi、通义、智谱等），把地址与密钥填上，并先在「联网附加能力」里打开联网开关。
+        </p>
+        <div className="form-row">
+          <label>常用服务</label>
+          <select
+            value=""
+            onChange={e => {
+              const p = AI_PRESETS.find(x => x.key === e.target.value);
+              if (!p) return;
+              handleChange('aiProvider', p.provider);
+              handleChange('aiBaseUrl', p.baseUrl);
+              if (p.model) handleChange('aiModel', p.model);
+            }}
+          >
+            <option value="">选择后自动填入地址与模型…</option>
+            {AI_PRESETS.map(p => (
+              <option key={p.key} value={p.key}>{p.name}</option>
+            ))}
+          </select>
+        </div>
         <div className="form-row">
           <label>AI 服务</label>
           <select value={settings.aiProvider} onChange={e => handleChange('aiProvider', e.target.value)}>
@@ -763,8 +897,14 @@ export function Settings() {
             <input type="password" value={settings.aiApiKey} onChange={e => handleChange('aiApiKey', e.target.value)} placeholder="sk-..." />
           </div>
         )}
+        <div className="form-actions" style={{ justifyContent: 'flex-start', alignItems: 'center', gap: 10 }}>
+          <button className="btn-secondary" onClick={handleTestAi} disabled={aiTesting}>
+            {aiTesting ? '测试中…' : '测试连接'}
+          </button>
+          {aiTestResult && <span className="section-desc" style={{ margin: 0 }}>{aiTestResult}</span>}
+        </div>
         <div className="form-row">
-          <label>向量服务地址（语义检索用）</label>
+          <label>语义检索服务地址（高级，一般留默认）</label>
           <input value={settings.aiEmbedUrl} onChange={e => handleChange('aiEmbedUrl', e.target.value)} placeholder="http://localhost:8081" />
         </div>
       </section>
@@ -783,7 +923,7 @@ export function Settings() {
           </select>
         </div>
         <p className="section-desc">
-          按内容指纹或书名判定重复。选「替换」时只更新文件，书签、笔记、阅读进度都保留；
+          按文件内容或书名判定重复。选「替换」时只更新文件，书签、笔记、阅读进度都保留；
           文件夹监视自动入库的一律跳过重复，不受此项影响。
         </p>
       </section>
@@ -826,7 +966,7 @@ export function Settings() {
             <span>{cacheStats ? formatFileSize(cacheStats.booksBytes) : '统计中...'}</span>
           </div>
           <div className="info-row">
-            <span style={{ width: 110 }}>本地快照</span>
+            <span style={{ width: 110 }}>备份存档</span>
             <span>{cacheStats ? formatFileSize(cacheStats.snapshotBytes) : '统计中...'}</span>
           </div>
           <div className="info-row">
@@ -840,7 +980,7 @@ export function Settings() {
             onClick={() => handleClearCache({ snapshots: true })}
             disabled={cacheBusy}
           >
-            清理快照
+            清理备份存档
           </button>
           <button
             className="btn-secondary"
@@ -862,20 +1002,22 @@ export function Settings() {
       <section className="settings-section">
         <h2>本地备份（离线）</h2>
         <p className="section-desc">
-          数据只写入你自己选择的文件，不上传任何服务器。增量导出仅包含上次导出后变更的笔记、书签、生词与设置。
+          数据只写入你自己选择的文件，不上传任何服务器。
+          全量备份是 zip 归档，连书籍文件与封面一起打包（换机器恢复时书能一起回来，体积取决于书库大小）；
+          增量备份只含上次导出后变更的笔记、书签、生词与设置，体积很小。
         </p>
         <div className="form-actions" style={{ justifyContent: 'flex-start', flexWrap: 'wrap', gap: 10 }}>
           <button className="btn-primary" onClick={() => handleExportBackup(false)} disabled={backupBusy}>
-            导出增量备份
+            {backupBusy ? '处理中…' : '导出增量备份'}
           </button>
           <button className="btn-secondary" onClick={() => handleExportBackup(true)} disabled={backupBusy}>
-            导出全量
+            导出全量（含书籍）
           </button>
           <button className="btn-secondary" onClick={handleImportBackup} disabled={backupBusy}>
             从文件恢复
           </button>
           <button className="btn-secondary" onClick={handleSnapshot} disabled={backupBusy}>
-            立即生成快照
+            {backupBusy ? '处理中…' : '立即生成备份存档'}
           </button>
         </div>
         {lastBackup && (
@@ -886,7 +1028,7 @@ export function Settings() {
 
         {snapshots.length > 0 && (
           <div className="snapshot-list">
-            <div className="snapshot-title">本地快照（自动保留最近 14 份）</div>
+            <div className="snapshot-title">备份存档（自动保留最近 14 份，可随时回退）</div>
             {snapshots.slice(0, 6).map(s => (
               <div key={s.file} className="snapshot-row">
                 <span className="snapshot-time">{new Date(s.createdAt).toLocaleString()}</span>
@@ -971,7 +1113,7 @@ export function Settings() {
             ['positions', '阅读位置记录', '正常退出/异常退出自动留下的断点（手动标记的保留）'],
             ['chapterCache', '在线章节缓存', '在线书源抓取的正文缓存，需要时可重新抓取'],
             ['timestamps', '阅读时间戳', '抹掉「什么时候读过」，阅读进度不受影响'],
-            ['clipboard', '剪贴板', '清空系统剪贴板中的内容'],
+            ['clipboard', '系统剪贴板', '会清掉你在其它软件里复制的内容，无法恢复'],
           ] as [keyof typeof privacyOpts, string, string][]).map(([key, label, hint]) => (
             <label key={key} className="checkbox-row" title={hint}>
               <input

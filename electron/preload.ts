@@ -10,6 +10,19 @@ contextBridge.exposeInMainWorld('electronAPI', {
   deleteBook: (id: number) => ipcRenderer.invoke('books:delete', id),
   updateProgress: (id: number, progress: number) =>
     ipcRenderer.invoke('books:updateProgress', id, progress),
+  /** Markdown 的 [[目标]] 跳转：按书名或原文件名找书 */
+  findBookByWikilink: (target: string) => ipcRenderer.invoke('books:findByWikilink', target),
+  /** 书库标签汇总（Markdown 正文里的 #标签） */
+  getAllTags: () => ipcRenderer.invoke('books:getAllTags'),
+  /** 未完成任务汇总（Markdown 里的 - [ ]） */
+  getAllTasks: () => ipcRenderer.invoke('books:getAllTasks'),
+  /** frontmatter 属性汇总（书架按属性筛选用） */
+  getAllProps: () => ipcRenderer.invoke('books:getAllProps'),
+  /** 引用关系：本书引用了谁、又被谁引用（Markdown 的 [[目标]]） */
+  getBookLinks: (bookId: number) => ipcRenderer.invoke('books:getLinks', bookId),
+  /** 测试 AI 服务连通性（外接大模型用） */
+  testAi: (cfg: { baseUrl: string; model: string; apiKey?: string }) =>
+    ipcRenderer.invoke('ai:test', cfg),
   getBookFileData: (id: number): Promise<string> =>
     ipcRenderer.invoke('books:getFileData', id),
   getBookFileInfo: (id: number) =>
@@ -177,8 +190,7 @@ contextBridge.exposeInMainWorld('electronAPI', {
   }) => ipcRenderer.invoke('privacy:clear', opts),
 
   // 本地备份（纯离线）
-  exportBackup: (full?: boolean) => ipcRenderer.invoke('backup:export', full),
-  importBackup: () => ipcRenderer.invoke('backup:import'),
+  exportBackup: (full?: boolean) => ipcRenderer.invoke('backup:export', full),  importBackup: () => ipcRenderer.invoke('backup:import'),
   createSnapshot: () => ipcRenderer.invoke('backup:snapshot'),
   listSnapshots: () => ipcRenderer.invoke('backup:snapshots'),
   restoreSnapshot: (file: string) => ipcRenderer.invoke('backup:restoreSnapshot', file),

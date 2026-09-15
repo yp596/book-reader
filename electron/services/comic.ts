@@ -121,7 +121,11 @@ const sevenZipPath = () => path.join(resourcesDir(), 'tools', '7z.exe');
 
 /** 列出 rar / 7z 内的文件条目（-slt 每条带 Folder = +，据此排除目录） */
 async function listEntriesVia7z(archivePath: string): Promise<string[]> {
-  const { stdout } = await execFileAsync(sevenZipPath(), ['l', '-slt', archivePath], {
+  // -sccUTF-8 必给：7z 在中文 Windows 上默认按本地代码页（GBK）写 stdout，
+  // 用 utf8 解码会把中文/日文条目名变成乱码，回传给 `x -so` 时再也匹配不上条目，
+  // 整本漫画都读不出来。
+  const { stdout } = await execFileAsync(sevenZipPath(), ['l', '-slt', '-sccUTF-8', archivePath], {
+    encoding: 'utf8',
     maxBuffer: 64 * 1024 * 1024,
     windowsHide: true,
   });
@@ -148,7 +152,7 @@ async function listEntriesVia7z(archivePath: string): Promise<string[]> {
 
 /** 取出单个条目的原始字节（-so 把内容写到 stdout） */
 async function readEntryVia7z(archivePath: string, name: string): Promise<Buffer> {
-  const result = (await execFileAsync(sevenZipPath(), ['x', '-so', archivePath, name], {
+  const result = (await execFileAsync(sevenZipPath(), ['x', '-so', '-sccUTF-8', archivePath, name], {
     encoding: 'buffer',
     maxBuffer: 256 * 1024 * 1024,
     windowsHide: true,

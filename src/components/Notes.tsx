@@ -43,15 +43,24 @@ export function Notes({ onOpenNote }: NotesProps) {
 
   const saveNote = async () => {
     if (!editing) return;
-    await window.electronAPI?.updateNote(editing.id, editing.note, normalizeTags(editing.tags));
-    setEditing(null);
-    await load();
+    try {
+      await window.electronAPI?.updateNote(editing.id, editing.note, normalizeTags(editing.tags));
+      setEditing(null);
+      await load();
+    } catch (err) {
+      // 保存失败时弹窗要留着：关掉会让用户以为已经存上了
+      alert(err instanceof Error ? err.message : '笔记保存失败，请重试');
+    }
   };
 
   const handleDelete = async (id: number) => {
-    if (!confirm('删除这条笔记？')) return;
-    await window.electronAPI?.deleteNote(id);
-    await load();
+    if (!confirm('删除这条笔记？笔记正文与对应的高亮标记一并删除，无法恢复。')) return;
+    try {
+      await window.electronAPI?.deleteNote(id);
+      await load();
+    } catch (err) {
+      alert(err instanceof Error ? err.message : '删除失败，请重试');
+    }
   };
 
   return (

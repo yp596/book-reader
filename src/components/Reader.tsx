@@ -54,6 +54,8 @@ interface ReaderProps {
   initialTarget?: TocEntry | null;
   /** 从笔记跳入的原始位置串：EPUB 为 CFI，TXT 为 txt:页:起:止 */
   initialPosition?: string | null;
+  /** Markdown 的 [[目标]] 跳转：把另一本书交给上层打开（同窗口多标签） */
+  onOpenBook?: (book: Book) => void;
 }
 
 type Panel = 'toc' | 'notes' | 'marks' | 'search' | 'ai' | 'positions' | 'typo' | 'thumbs' | 'ocr' | null;
@@ -73,7 +75,7 @@ interface SearchHit {
   target: string | number;
 }
 
-export function Reader({ book, onBack, initialTarget, initialPosition }: ReaderProps) {
+export function Reader({ book, onBack, initialTarget, initialPosition, onOpenBook }: ReaderProps) {
   const viewerRef = useRef<HTMLDivElement>(null);
   const bookRef = useRef<any>(null);
   const renditionRef = useRef<any>(null);
@@ -176,6 +178,8 @@ export function Reader({ book, onBack, initialTarget, initialPosition }: ReaderP
 
   // EPUB 版式
   const [flowMode, setFlowMode] = useState<'paginated' | 'scrolled'>('paginated');
+  /** 打开这本书时该用的版式：Markdown 导入的书默认连续滚动，其余按偏好 */
+  const initialFlowRef = useRef<'paginated' | 'scrolled'>('paginated');
 
   // 检索
   const [keyword, setKeyword] = useState('');
@@ -494,6 +498,30 @@ export function Reader({ book, onBack, initialTarget, initialPosition }: ReaderP
     toastTimerRef.current = setTimeout(() => setToast(''), 2000);
   };
 
+  /**
+   * 应用内输入弹窗。Electron 的渲染进程不支持 window.prompt（调用即抛
+   * "prompt() is not supported."），所以章节命名、书签改名这类输入要自绘。
+   */
+  const [textPrompt, setTextPrompt] = useState<{
+    title: string;
+    hint?: string;
+    value: string;
+    confirmLabel?: string;
+    onConfirm: (value: string) => Promise<void> | void;
+  } | null>(null);
+  const [textPromptBusy, setTextPromptBusy] = useState(false);
+
+  const submitTextPrompt = async () => {
+    if (!textPrompt) return;
+    setTextPromptBusy(true);
+    try {
+      await textPrompt.onConfirm(textPrompt.value);
+      setTextPrompt(null);
+    } finally {
+      setTextPromptBusy(false);
+    }
+  };
+
   const updateView = (patch: Partial<typeof view>) => setView(v => ({ ...v, ...patch }));
 
   /** 窗口置顶开关 */
@@ -505,7 +533,7 @@ export function Reader({ book, onBack, initialTarget, initialPosition }: ReaderP
       const actual = await api?.setAlwaysOnTop(next);
       if (typeof actual === 'boolean') updateView({ alwaysOnTop: actual });
     } catch {
-      showToast('当前环境不支持窗口置顶');
+      showToast('本系统暂不支持窗口置顶');
     }
   };
 
@@ -587,7 +615,9 @@ export function Reader({ book, onBack, initialTarget, initialPosition }: ReaderP
       alive = false;
       const api = window.electronAPI;
       if (!api) return;
-      const d = describeCurrentPos();
+      // 取同步好的最新位置，不能直接调 describeCurrentPos——那个闭包是挂载时的，
+      // 非 EPUB 分支会读到第 1 页
+      const d = exitPosRef.current;
       if (d) api.addReadingPosition({ book_id: book.id, ...d, source: 'exit' });
       api.setSetting(`readingSession:${book.id}`, '');
     };
@@ -636,6 +666,13 @@ export function Reader({ book, onBack, initialTarget, initialPosition }: ReaderP
 
   /** 当前位置（不落盘），用于入栈 */
   const currentPosRef = useRef<SavedPosition | null>(null);
+  /**
+   * 退出时断点用的最新位置。
+   * 记录断点那个 effect 的 cleanup 闭包停在挂载那一刻，里面直接读 pageIndex/totalPages
+   * 这两个 state 的话永远拿到 0，TXT/PDF/漫画的「退出时」断点会一直是第 1 页
+   * （EPUB 走 rendition ref 所以没这个问题）。下面每次渲染同步一份供 cleanup 取用。
+   */
+  const exitPosRef = useRef<{ position: string; label: string; progress: number } | null>(null);
   const histRef = useRef<{ stack: SavedPosition[]; idx: number }>({ stack: [], idx: -1 });
   const [histState, setHistState] = useState({ canBack: false, canForward: false });
 
@@ -699,11 +736,14 @@ export function Reader({ book, onBack, initialTarget, initialPosition }: ReaderP
     let cfi = '';
     if (locationsRef.current.length > 0) {
       try {
-        cfi = bookRef.current?.locations?.cfiFromPercentage?.(0.999) || '';
+        // 索引不可用时这里拿到的可能是 -1（数字），只有字符串才是可用的 CFI。
+        // 以前 -1 会被当成真值直接 display，跳不动又不再回退目录。
+        const got = bookRef.current?.locations?.cfiFromPercentage?.(0.999);
+        if (typeof got === 'string') cfi = got;
       } catch { /* 忽略，走目录回退 */ }
     }
     if (cfi) {
-      renditionRef.current?.display(cfi);
+      void renditionRef.current?.display(cfi)?.catch?.(() => { /* 跳不动就停在原位 */ });
       return;
     }
     const toc = chaptersRef.current;
@@ -721,9 +761,13 @@ export function Reader({ book, onBack, initialTarget, initialPosition }: ReaderP
     }
     try {
       const cfi = bookRef.current?.locations?.cfiFromPercentage?.(percent / 100);
-      if (cfi) {
+      // 索引为空时 cfiFromPercentage 返回 -1 而不是字符串，直接 display 会抛
+      // “No Section Found”，表现为点了没反应，所以先判类型
+      if (typeof cfi === 'string' && cfi) {
         pushHistory();
-        renditionRef.current?.display(cfi);
+        void renditionRef.current?.display(cfi)?.catch?.(() => showToast('跳转失败，请重试'));
+      } else {
+        showToast('这本书的位置索引不可用，可改用目录跳转');
       }
     } catch {
       showToast('跳转失败，请重试');
@@ -810,7 +854,17 @@ export function Reader({ book, onBack, initialTarget, initialPosition }: ReaderP
       fontKeyRef.current = merged.fontFamily;
       setFontKey(merged.fontFamily);
       setDualColumn(merged.dualColumn);
-      setFlowMode(merged.flowMode);
+      // Markdown 导入的书默认用连续滚动阅读：一篇笔记从头读到尾才顺，也贴近
+      // Typora / Obsidian 的习惯。用户自己切过分页/滚动之后，以他的选择为准。
+      let mdFlow: 'paginated' | 'scrolled' = merged.flowMode;
+      try {
+        const isMdBook = (await window.electronAPI?.getSetting(`mdSource:${book.id}`)) === '1';
+        const rawPrefs = await window.electronAPI?.getSetting(bookPrefsKey(book.id));
+        const userChoseFlow = parseBookPrefs(rawPrefs).flowMode !== undefined;
+        if (isMdBook && !userChoseFlow) mdFlow = 'scrolled';
+      } catch { /* 读不到就按默认分页 */ }
+      initialFlowRef.current = mdFlow;
+      setFlowMode(mdFlow);
       setPdfScale(merged.pdfScale);
       const typoNext = {
         bgColor: merged.bgColor,
@@ -892,7 +946,7 @@ export function Reader({ book, onBack, initialTarget, initialPosition }: ReaderP
       width: '100%',
       height: '100%',
       spread: 'none',
-      flow: 'paginated',
+      flow: initialFlowRef.current,
     });
 
     renditionRef.current = rendition;
@@ -905,6 +959,14 @@ export function Reader({ book, onBack, initialTarget, initialPosition }: ReaderP
       // 每章渲染时注入一次，翻页与跳章都自动带上
       applyReadingStyleTo(contents, styleCssRef.current);
       doc.addEventListener('click', (e: MouseEvent) => {
+        // Markdown 的 [[目标]]：跳到同一书库里的另一篇笔记，不是外链也不是章节锚点
+        const wikilink = (e.target as HTMLElement)?.closest?.('.wikilink') as HTMLElement | null;
+        if (wikilink) {
+          e.preventDefault();
+          void openWikilink(wikilink.getAttribute('data-target') || '');
+          return;
+        }
+
         const anchor = (e.target as HTMLElement)?.closest?.('a[href]') as HTMLAnchorElement | null;
         if (!anchor) return;
         const href = anchor.getAttribute('href') || '';
@@ -969,6 +1031,10 @@ export function Reader({ book, onBack, initialTarget, initialPosition }: ReaderP
           const arr = JSON.parse(cached);
           if (Array.isArray(arr) && arr.length > 0) {
             locationsRef.current = arr;
+            // 必须把缓存一并喂回 epubjs：cfiFromPercentage 读的是它内部 Locations 的
+            // _locations 与 total，只填自己的 ref 的话那个索引是空的，百分比跳转与末页
+            // 跳转会拿到 -1 并静默失败（重开一本书就复现）。load() 会连 total 一起设好。
+            epubBook.locations.load(cached);
             locationsDoneRef.current = true;
             return;
           }
@@ -1138,14 +1204,30 @@ export function Reader({ book, onBack, initialTarget, initialPosition }: ReaderP
     if (line == null) return;
     const firstLine =
       (txtPages[pageIndex] || '').split('\n').map(s => s.trim()).find(Boolean) ?? '';
-    const label = prompt('章节名称：', firstLine.slice(0, 30));
-    if (!label) return;
-    const next = [...txtToc, { label, href: '', page: pageIndex, line }].sort(
-      (a, b) => (a.line ?? 0) - (b.line ?? 0),
-    );
-    setTxtToc(next);
-    chapterLabelsRef.current = new Set(next.map(t => t.label.trim()).filter(Boolean));
-    await window.electronAPI?.saveToc(book.id, next);
+    setTextPrompt({
+      title: '添加章节',
+      hint: '把当前页的开头登记为一章；目录会转为手动编辑，不再被自动解析覆盖',
+      value: firstLine.slice(0, 30),
+      confirmLabel: '添加',
+      onConfirm: async label => {
+        const name = label.trim();
+        if (!name) {
+          showToast('章节名不能为空，未添加');
+          return;
+        }
+        const next = [...txtToc, { label: name, href: '', page: pageIndex, line }].sort(
+          (a, b) => (a.line ?? 0) - (b.line ?? 0),
+        );
+        setTxtToc(next);
+        chapterLabelsRef.current = new Set(next.map(t => t.label.trim()).filter(Boolean));
+        try {
+          await window.electronAPI?.saveToc(book.id, next);
+          showToast(`已添加章节「${name}」`);
+        } catch (err) {
+          showToast(err instanceof Error ? err.message : '章节保存失败，请重试');
+        }
+      },
+    });
   };
 
   /** 漫画：取页面清单并恢复上次页码，图片由下方 effect 按需拉取 */
@@ -1256,6 +1338,11 @@ export function Reader({ book, onBack, initialTarget, initialPosition }: ReaderP
     }
   };
 
+  /** 每次渲染同步最新位置给退出时的断点（声明见上方 ref 区） */
+  useEffect(() => {
+    exitPosRef.current = describeCurrentPos();
+  });
+
   const handleMarkPosition = async () => {
     const api = window.electronAPI;
     if (!api) return;
@@ -1266,19 +1353,32 @@ export function Reader({ book, onBack, initialTarget, initialPosition }: ReaderP
   };
 
   const handleDeletePosition = async (id: number) => {
-    await window.electronAPI?.deleteReadingPosition(id);
-    await refreshPositions();
+    if (!confirm('删除这个阅读位置？删除后无法恢复。')) return;
+    try {
+      await window.electronAPI?.deleteReadingPosition(id);
+      await refreshPositions();
+      showToast('已删除该阅读位置');
+    } catch (err) {
+      showToast(err instanceof Error ? err.message : '删除失败，请重试');
+    }
   };
 
   const handleJumpPosition = (p: ReadingPosition) => {
     const pos = parseSavedPosition(p.position);
     if (!pos) {
-      alert('该位置已失效（可能书籍已更换或重新解析过）');
+      alert('这个位置已失效（书籍可能重新解析过）。建议从目录重新定位。');
       return;
     }
     pushHistory();
-    if (book.file_type === 'epub' && pos.cfi) renditionRef.current?.display(pos.cfi);
-    else if (pos.page != null) setPageIndex(pos.page);
+    if (book.file_type === 'epub' && pos.cfi) {
+      // 失效的 CFI 会让 display 抛错：接住它，别变成一次无声的空跳
+      void renditionRef.current?.display(pos.cfi)?.catch?.(() => {
+        showToast('这个位置已失效，建议从目录重新定位');
+      });
+    } else if (pos.page != null) {
+      // 规整、重新解析都会让页数变少，按当时的页码直接跳会落到不存在的空白页
+      setPageIndex(totalPages > 0 ? clampPage(pos.page + 1, totalPages) - 1 : pos.page);
+    }
     setPanel(null);
   };
 
@@ -1465,34 +1565,55 @@ export function Reader({ book, onBack, initialTarget, initialPosition }: ReaderP
     if (blockedByReadonly('修改书签')) return;
     const api = window.electronAPI;
     if (!api) return;
-    const next = prompt('修改书签名称：', b.text || '');
-    if (next !== null && next.trim() && next.trim() !== (b.text || '')) {
-      try {
-        await api.updateBookmark(b.id, next.trim());
-        await refreshMarks();
-      } catch (err) {
-        showToast(err instanceof Error ? err.message : '修改失败');
-      }
-    }
+    setTextPrompt({
+      title: '修改书签名称',
+      hint: '只改书签标签，不影响正文内容',
+      value: b.text || '',
+      confirmLabel: '保存',
+      onConfirm: async next => {
+        const name = next.trim();
+        if (!name || name === (b.text || '')) return;
+        try {
+          await api.updateBookmark(b.id, name);
+          await refreshMarks();
+          showToast('书签名称已更新');
+        } catch (err) {
+          showToast(err instanceof Error ? err.message : '修改失败，请重试');
+        }
+      },
+    });
   };
 
   const handleDeleteBookmark = async (b: Bookmark) => {
     if (blockedByReadonly('删除书签')) return;
     const api = window.electronAPI;
     if (!api) return;
-    if (book.file_type === 'epub' && renditionRef.current) {
-      try { renditionRef.current.annotations.remove(b.position, 'highlight'); } catch { /* 忽略 */ }
+    // 删除不可恢复，统一在这里确认，调用方不必各自再问一遍
+    if (!confirm(`删除书签「${b.text || '未命名'}」？删除后无法恢复。`)) return;
+    try {
+      if (book.file_type === 'epub' && renditionRef.current) {
+        try { renditionRef.current.annotations.remove(b.position, 'highlight'); } catch { /* 忽略 */ }
+      }
+      await api.deleteBookmark(b.id);
+      await refreshMarks();
+      showToast('已删除该书签');
+    } catch (err) {
+      showToast(err instanceof Error ? err.message : '删除失败，请重试');
     }
-    await api.deleteBookmark(b.id);
-    await refreshMarks();
   };
 
   const handleDeleteNote = async (id: number) => {
     if (blockedByReadonly('删除笔记')) return;
     const api = window.electronAPI;
     if (!api) return;
-    await api.deleteNote(id);
-    await refreshMarks();
+    if (!confirm('删除这条笔记？笔记正文与高亮标记一并删除，无法恢复。')) return;
+    try {
+      await api.deleteNote(id);
+      await refreshMarks();
+      showToast('已删除该笔记');
+    } catch (err) {
+      showToast(err instanceof Error ? err.message : '删除失败，请重试');
+    }
   };
 
   /**
@@ -1616,7 +1737,7 @@ export function Reader({ book, onBack, initialTarget, initialPosition }: ReaderP
 
   const speak = (text: string) => {
     if (!('speechSynthesis' in window)) {
-      showToast('当前环境不支持语音朗读');
+      showToast('本系统暂不支持语音朗读');
       return;
     }
     window.speechSynthesis.cancel();
@@ -1972,29 +2093,54 @@ ${body}</body></html>`;
     return () => mq.removeEventListener('change', onChange);
   }, [dpr]);
 
+  /** 当前在跑的 PDF 渲染任务：同一张 canvas 上不能再起第二个 */
+  const pdfRenderTaskRef = useRef<{ cancel: () => void; promise: Promise<void> } | null>(null);
+
   const renderPdfPage = async (pdfDoc: any, pageNum: number, scale: number, rotation = 0) => {
     if (!canvasRef.current) return;
     const page = await pdfDoc.getPage(pageNum);
     if (!pdfBaseWidthRef.current) {
       pdfBaseWidthRef.current = page.getViewport({ scale: 1 }).width;
     }
+    // 上一次渲染可能还在往这张 canvas 上画。页数、缩放、旋转快速变化时，
+    // pdfjs 会直接抛「Cannot use the same canvas during multiple render() operations」，
+    // 表现就是快速翻页出现空白页，所以先取消并等它收尾再改画布尺寸。
+    const prev = pdfRenderTaskRef.current;
+    if (prev) {
+      try { prev.cancel(); } catch { /* 已结束 */ }
+      try { await prev.promise; } catch { /* 被取消是预期内的 */ }
+    }
+    const canvas = canvasRef.current;
+    if (!canvas) return;
     // 高分屏：画布背衬按设备像素比放大，再按 CSS 像素指定显示宽度，
     // 否则 4K/200% 缩放下 PDF 会被拉糊。不写死高度——宽度交给样式里的
     // max-width:100% 去夹，高度靠 height:auto 跟比例，窄窗口才不会被压扁。
     // 上限取 2：200% 已经足够清晰，再高只是白吃内存（一页背衬能到几十 MB）。
     const dpr = Math.min(2, Math.max(1, window.devicePixelRatio || 1));
     const viewport = page.getViewport({ scale: scale * dpr, rotation });
-    const canvas = canvasRef.current;
     canvas.width = Math.floor(viewport.width);
     canvas.height = Math.floor(viewport.height);
     canvas.style.width = `${Math.round(viewport.width / dpr)}px`;
     const ctx = canvas.getContext('2d')!;
-    await page.render({ canvasContext: ctx, viewport }).promise;
+    const task = page.render({ canvasContext: ctx, viewport });
+    pdfRenderTaskRef.current = task;
+    try {
+      await task.promise;
+    } catch (err) {
+      // 被下一次渲染取消属于正常路径，其余错误交给调用方提示
+      if ((err as { name?: string } | null)?.name !== 'RenderingCancelledException') throw err;
+    } finally {
+      if (pdfRenderTaskRef.current === task) pdfRenderTaskRef.current = null;
+    }
   };
 
   useEffect(() => {
     if (book.file_type === 'pdf' && pdfReady && pdfDocRef.current && !loading && !pdfReflow) {
-      renderPdfPage(pdfDocRef.current, pageIndex + 1, pdfScale, pdfRotation);
+      renderPdfPage(pdfDocRef.current, pageIndex + 1, pdfScale, pdfRotation).catch(err => {
+        if ((err as { name?: string } | null)?.name !== 'RenderingCancelledException') {
+          showToast('这一页渲染失败，文件可能已损坏');
+        }
+      });
     }
   }, [pdfReady, pageIndex, loading, pdfScale, pdfReflow, pdfRotation, dpr]);
 
@@ -2237,6 +2383,37 @@ ${body}</body></html>`;
     setPanel(null);
   };
 
+  /**
+   * Markdown 的 [[目标]] 跳转：按书名或原文件名在书库中找另一篇笔记并打开。
+   * 找不到时说清楚「没导入」，而不是静默无反应。
+   */
+  const openWikilink = async (target: string) => {
+    const name = target.trim();
+    if (!name) return;
+    const api = window.electronAPI;
+    if (!api?.findBookByWikilink) return;
+    try {
+      const found = await api.findBookByWikilink(name);
+      if (!found) {
+        showToast(`书库里没有《${name}》，需要先把它导入书架`);
+        return;
+      }
+      if (found.id === book.id) {
+        showToast('链接指向的就是当前这本书');
+        return;
+      }
+      const target2 = (await api.getBookById(found.id)) as Book | null;
+      if (!target2) {
+        showToast(`《${found.title}》已不在书库`);
+        return;
+      }
+      if (onOpenBook) onOpenBook(target2);
+      else showToast(`找到《${found.title}》，当前窗口不支持跳转`);
+    } catch {
+      showToast(`跳转失败，请确认《${name}》已经导入`);
+    }
+  };
+
   const handleToggleFullscreen = async () => {
     try {
       await window.electronAPI?.toggleFullscreen();
@@ -2294,15 +2471,27 @@ ${body}</body></html>`;
         case 'toggleTheme': cycleTheme(); break;
         case 'fontUp': changeFontSize(2); break;
         case 'fontDown': changeFontSize(-2); break;
-        case 'openToc': if (book.file_type === 'epub') togglePanel('toc'); break;
-        case 'openSearch': if (book.file_type === 'epub' || book.file_type === 'txt') togglePanel('search'); break;
+        case 'openToc':
+          // TXT 也有目录面板（自动解析或手动登记），别让人按了没反应
+          if (book.file_type === 'epub' || book.file_type === 'txt') togglePanel('toc');
+          else showToast('这种格式没有目录面板，PDF 与漫画可用缩略图跳页');
+          break;
+        case 'openSearch':
+          if (book.file_type === 'epub' || book.file_type === 'txt') togglePanel('search');
+          else showToast('这种格式暂不支持书内检索');
+          break;
         case 'openNotes': togglePanel('notes'); break;
         case 'openPositions': togglePanel('positions'); break;
-        case 'highlight': if (sel) handleHighlight(); break;
+        case 'highlight':
+          if (sel) handleHighlight();
+          else showToast('请先选中一段文字，再按高亮键');
+          break;
         case 'addNote':
           if (sel) {
             setNoteDraft({ text: sel.text, position: sel.position });
             setNoteContent('');
+          } else {
+            showToast('请先选中一段文字，再按笔记键');
           }
           break;
         case 'toggleDualColumn': toggleDualColumn(); break;
@@ -3214,12 +3403,12 @@ ${body}</body></html>`;
               </button>
               <button className="btn-secondary small" onClick={handleAiMindmap} disabled={aiLoading}>
                 <Icon name="network" size={14} />
-                脑图
+                思维导图
               </button>
               {supportsTextOps && (
                 <button className="btn-secondary small" onClick={handleBookMindmap} disabled={aiLoading}>
                   <Icon name="library" size={14} />
-                  本书脑图
+                  本书思维导图
                 </button>
               )}
               {aiContext && (
@@ -3242,7 +3431,7 @@ ${body}</body></html>`;
             {aiLoading && (
               <div style={{ display: 'flex', alignItems: 'center', gap: 12 }}>
                 <p className="empty-text" style={{ padding: 0 }}>
-                  {aiAnswer ? '生成中...' : '思考中...'}
+                  {aiAnswer ? '生成中…' : '思考中…'}
                 </p>
                 <button className="btn-secondary small" onClick={stopAi}>
                   ⏹ 停止
@@ -3273,7 +3462,7 @@ ${body}</body></html>`;
                 placeholder="输入关键词..."
               />
               <button className="btn-primary" onClick={handleSearch} disabled={searching}>
-                {searching ? '搜...' : '搜'}
+                {searching ? '查找中…' : '搜'}
               </button>
             </div>
             <label className="view-row">
@@ -3318,15 +3507,30 @@ ${body}</body></html>`;
               <span>5G <Icon name="battery" size={14} /></span>
             </div>
           )}
-          {loading && <div className="loading">加载中...</div>}
+          {loading && <div className="loading">加载中…</div>}
           {!loading && error && (
             <div className="loading">
-              <div style={{ textAlign: 'center' }}>
+              <div style={{ textAlign: 'center', maxWidth: 420 }}>
                 <div style={{ color: 'var(--text-muted)', marginBottom: 16 }}>
                   <Icon name="alert" size={38} strokeWidth={1.4} />
                 </div>
-                <div>{error}</div>
-                <button className="btn-primary" style={{ marginTop: 16 }} onClick={loadBook}>重新加载</button>
+                <div style={{ marginBottom: 6 }}>这本书打不开了</div>
+                <div style={{ color: 'var(--text-muted)', fontSize: 12.5, lineHeight: 1.8 }}>
+                  {book.file_type.toUpperCase()} 文件可能已损坏，或这种格式暂不支持。
+                  可以先回书架换一本；想确认文件是否完好，可用系统默认程序打开它。
+                </div>
+                <div className="form-actions" style={{ justifyContent: 'center', marginTop: 16 }}>
+                  <button className="btn-secondary" onClick={onBack}>返回书架</button>
+                  <button className="btn-primary" onClick={loadBook}>重新加载</button>
+                </div>
+                <details style={{ marginTop: 14, textAlign: 'left' }}>
+                  <summary style={{ cursor: 'pointer', color: 'var(--text-muted)', fontSize: 12 }}>
+                    查看详情
+                  </summary>
+                  <p style={{ color: 'var(--text-muted)', fontSize: 12, marginTop: 8, wordBreak: 'break-all' }}>
+                    {error}
+                  </p>
+                </details>
               </div>
             </div>
           )}
@@ -3566,7 +3770,13 @@ ${body}</body></html>`;
           </button>
           <button
             onClick={async () => {
-              try { await navigator.clipboard.writeText(sel.text); } catch { /* 忽略 */ }
+              // 复制成功与否都要说一声：不出声的话用户会反复点，不知道到底复制上没有
+              try {
+                await navigator.clipboard.writeText(sel.text);
+                showToast('已复制到剪贴板');
+              } catch {
+                showToast('复制失败，请手动选中文本后按 Ctrl+C');
+              }
               setSel(null);
               clearEpubSelection();
             }}
@@ -3579,6 +3789,39 @@ ${body}</body></html>`;
           <button onClick={() => { setSel(null); clearEpubSelection(); }} title="关闭">
             <Icon name="x" size={14} />
           </button>
+        </div>
+      )}
+
+      {/* 文本输入弹窗：章节命名、书签改名共用（Electron 不支持 window.prompt） */}
+      {textPrompt && (
+        <div
+          className="modal-mask"
+          onClick={() => {
+            if (!textPromptBusy) setTextPrompt(null);
+          }}
+        >
+          <div className="note-modal" onClick={e => e.stopPropagation()}>
+            <h3>{textPrompt.title}</h3>
+            {textPrompt.hint && <p className="section-desc">{textPrompt.hint}</p>}
+            <input
+              className="tag-input"
+              style={{ width: '100%' }}
+              value={textPrompt.value}
+              autoFocus
+              onChange={e => setTextPrompt({ ...textPrompt, value: e.target.value })}
+              onKeyDown={e => {
+                if (e.key === 'Enter') void submitTextPrompt();
+              }}
+            />
+            <div className="form-actions">
+              <button className="btn-secondary" disabled={textPromptBusy} onClick={() => setTextPrompt(null)}>
+                取消
+              </button>
+              <button className="btn-primary" disabled={textPromptBusy} onClick={() => void submitTextPrompt()}>
+                {textPromptBusy ? '处理中…' : textPrompt.confirmLabel ?? '保存'}
+              </button>
+            </div>
+          </div>
         </div>
       )}
 
@@ -3628,7 +3871,7 @@ ${body}</body></html>`;
                 <button
                   className="btn-secondary"
                   onClick={async () => {
-                    if (!confirm('删除这条笔记？')) return;
+                    // 确认统一由 handleDeleteNote 负责，这里不再重复问一次
                     await handleDeleteNote(markPreview.noteId!);
                     setMarkPreview(null);
                   }}

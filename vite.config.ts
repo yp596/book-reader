@@ -39,6 +39,67 @@ function dropOrtWasmAssets() {
   };
 }
 
+/**
+ * 清掉历次构建留下的失效分块。
+ * vite-plugin-electron 每次构建都按内容哈希写新文件名，旧文件既不覆盖也不删除；
+ * 而 electron-builder 的 files 是整目录收录，不清的话安装包里会塞进几百 MB 的死代码
+ * （实测曾累积到 406MB / 348 个文件，其中只有 4 个是活的）。
+ *
+ * 做法：从入口 main.js / preload.js 出发做可达性闭包，只删 .js 里没人引用的。
+ * 不用「按文件名删除」是因为分块命名由构建器决定，写死了迟早失配。
+ */
+function pruneStaleElectronChunks() {
+  return {
+    name: 'prune-stale-electron-chunks',
+    closeBundle() {
+      const dir = path.resolve(process.cwd(), 'dist-electron');
+      if (!fs.existsSync(dir)) return;
+      const entries = ['main.js', 'preload.js'].filter(f => fs.existsSync(path.join(dir, f)));
+      if (entries.length === 0) return;
+
+      // 可达性闭包：静态 require / import 逐层展开
+      const alive = new Set<string>(entries);
+      const queue = [...entries];
+      while (queue.length > 0) {
+        const name = queue.pop() as string;
+        const full = path.join(dir, name);
+        if (!fs.existsSync(full)) continue;
+        const code = fs.readFileSync(full, 'utf-8');
+        const refs = [
+          ...code.matchAll(/require\(\s*["']\.\/([^"']+)["']\s*\)/g),
+          ...code.matchAll(/(?:from|import)\s*\(?\s*["']\.\/([^"']+)["']/g),
+        ];
+        for (const m of refs) {
+          if (!alive.has(m[1])) {
+            alive.add(m[1]);
+            queue.push(m[1]);
+          }
+        }
+      }
+
+      // 刚写出来的文件不碰：万一两个子构建有并发，删到正在写的分块会把包打坏，
+      // 留到下次构建再清没有代价
+      const guardMs = 5000;
+      let removed = 0;
+      let freed = 0;
+      for (const f of fs.readdirSync(dir)) {
+        if (!f.endsWith('.js') || alive.has(f)) continue;
+        const full = path.join(dir, f);
+        try {
+          const st = fs.statSync(full);
+          if (Date.now() - st.mtimeMs < guardMs) continue;
+          freed += st.size;
+          fs.unlinkSync(full);
+          removed++;
+        } catch { /* 删不掉就跳过 */ }
+      }
+      if (removed > 0) {
+        console.log(`[prune] 清理失效分块 ${removed} 个，释放 ${(freed / 1048576).toFixed(1)} MB`);
+      }
+    },
+  };
+}
+
 export default defineConfig({
   plugins: [
     react(),
@@ -64,9 +125,9 @@ export default defineConfig({
           args.reload();
         },
         vite: {
-          build: {
-            outDir: 'dist-electron',
-          },
+          // 清理挂在第二个入口上：等两个子构建都写完再算可达性，避免删到正在写的分块
+          build: { outDir: 'dist-electron' },
+          plugins: [pruneStaleElectronChunks()],
         },
       },
     ]),

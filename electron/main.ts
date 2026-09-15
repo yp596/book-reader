@@ -1,4 +1,4 @@
-import { app, BrowserWindow, globalShortcut, clipboard, protocol, net, ipcMain, Tray, Menu, nativeImage, screen } from 'electron';
+import { app, BrowserWindow, clipboard, protocol, net, ipcMain, Tray, Menu, nativeImage, screen } from 'electron';
 import fs from 'fs';
 import path from 'path';
 import { pathToFileURL } from 'url';
@@ -41,7 +41,9 @@ let pendingOpenPath: string | null = null;
 // 已在运行的窗口，免得两个窗口各自打开同一个数据库。
 // 开发态不加锁——vite 重启进程时旧进程可能还没退干净，加锁会让新窗口静默起不来。
 if (app.isPackaged && !app.requestSingleInstanceLock()) {
-  app.quit();
+  // 拿不到锁说明已有实例在跑，本进程要立刻退干净。
+  // 用 quit() 会继续往下执行到 ready，可能与第一个实例同时初始化数据库与窗口。
+  app.exit(0);
 }
 
 /**
@@ -60,11 +62,22 @@ function bookPathFromArgv(argv: string[]): string | null {
   return null;
 }
 
+/**
+ * 把主窗口唤回前台。
+ * 开启「关闭到托盘」后窗口是 hide() 过的，只调 focus() 唤不出来——用户双击一本书
+ * 会以为没反应，所以这里必须先 show()。
+ */
+function showMainWindow() {
+  if (!mainWindow) return;
+  mainWindow.show();
+  if (mainWindow.isMinimized()) mainWindow.restore();
+  mainWindow.focus();
+}
+
 /** 把文件交给渲染进程，走既有的导入/入库流程 */
 function openBookFile(filePath: string) {
   if (!mainWindow) return;
-  if (mainWindow.isMinimized()) mainWindow.restore();
-  mainWindow.focus();
+  showMainWindow();
   mainWindow.webContents.send('menu:open-file', filePath);
 }
 
@@ -72,9 +85,8 @@ app.on('second-instance', (_event, argv) => {
   const filePath = bookPathFromArgv(argv);
   if (filePath) {
     openBookFile(filePath);
-  } else if (mainWindow) {
-    if (mainWindow.isMinimized()) mainWindow.restore();
-    mainWindow.focus();
+  } else {
+    showMainWindow();
   }
 });
 
@@ -147,8 +159,17 @@ function createWindow() {
   });
 }
 
+/**
+ * Ctrl+O 打开文件：只在本应用窗口内响应。
+ * 早先用 globalShortcut 注册成系统级热键，只要本应用在运行（含托盘驻留、窗口失焦）
+ * 就会把别的软件里的 Ctrl+O 抢过来，还会在隐藏窗口上弹出文件框。
+ */
 function registerShortcuts() {
-  globalShortcut.register('CommandOrControl+O', () => {
+  mainWindow?.webContents.on('before-input-event', (event, input) => {
+    if (input.type !== 'keyDown') return;
+    if (!(input.control || input.meta) || input.alt || input.shift) return;
+    if (input.key.toLowerCase() !== 'o') return;
+    event.preventDefault();
     mainWindow?.webContents.send('menu:open-file');
   });
 }
@@ -160,12 +181,7 @@ function createTray() {
   const image = nativeImage.createFromPath(iconPath);
   tray = new Tray(image.isEmpty() ? nativeImage.createEmpty() : image);
   tray.setToolTip('Book Reader');
-  const show = () => {
-    if (!mainWindow) return;
-    mainWindow.show();
-    if (mainWindow.isMinimized()) mainWindow.restore();
-    mainWindow.focus();
-  };
+  const show = () => showMainWindow();
   tray.setContextMenu(
     Menu.buildFromTemplate([
       { label: '显示主窗口', click: show },
@@ -237,17 +253,20 @@ app.on('before-quit', () => {
 });
 
 app.on('will-quit', () => {
-  globalShortcut.unregisterAll();
   try { folderWatcher().stop(); } catch { /* 忽略 */ }
-  // 隐私模式：退出时清掉临时数据（章节缓存与剪贴板），不含用户笔记/书签
+  // 隐私模式：退出时清掉临时数据（章节缓存与剪贴板），不含用户笔记/书签。
+  // 与下面的会话标记分开 try：隐私清理失败不该连累会话标记，否则正常退出也会
+  // 残留 readingSession，下次启动误报「上次没有正常退出」。
   try {
     const db = DatabaseService.getInstance();
     if (db.isSettingOn('privacyAutoClear')) {
       db.clearChapterCache();
       clipboard.clear();
     }
+  } catch { /* 忽略 */ }
+  try {
     // 会话标记一律清掉：走到这里说明是正常退出，下次启动不该提示「异常退出」
-    db.clearReadingSessions();
+    DatabaseService.getInstance().clearReadingSessions();
   } catch { /* 忽略 */ }
   try { ModelService.getInstance().stopAll(); } catch {}
   try { void disposeEngine(); } catch {}

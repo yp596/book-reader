@@ -1,8 +1,14 @@
 import fs from 'fs';
 import path from 'path';
 
-/** 可自动入库的扩展名（与导入对话框保持一致） */
-export const IMPORTABLE_EXTS = ['.epub', '.txt', '.pdf', '.docx', '.cbz'];
+/**
+ * 可自动入库的扩展名。
+ * 漫画三种压缩包必须与 ipc 里 importOneFile 的白名单一致，否则拖进监视目录的
+ * CBR/CBT/CB7 会永远等不到入库，用户也看不到任何提示。
+ * 不含 .md：Markdown 常和说明文档混在同一个文件夹里，一并入库会把书架搞脏，
+ * 需要时手动导入即可（这是有意与导入对话框不同的地方）。
+ */
+export const IMPORTABLE_EXTS = ['.epub', '.txt', '.pdf', '.docx', '.cbz', '.cbr', '.cbt', '.cb7'];
 
 /** 是否为可导入文件（纯函数，便于单测） */
 export function isImportableFile(name: string): boolean {

@@ -117,7 +117,10 @@ export function SourceManager() {
     setForm(s => ({ ...s, [key]: value }));
 
   const handleAdd = async () => {
-    if (!form.name || !form.url) return;
+    if (!form.name.trim() || !form.url.trim()) {
+      alert('请先填写书源名称和书源主页地址。');
+      return;
+    }
     const api = window.electronAPI;
     if (!api) return;
     // 组装抓取规则
@@ -133,17 +136,21 @@ export function SourceManager() {
       chapters: { list: form.chapters_list, name: form.chapters_name, url: '' },
       content: { content: form.content_selector },
     });
-    await api.addSource({
-      name: form.name,
-      url: form.url,
-      search_url: form.search_url,
-      chapters_url: '',
-      content_url: '',
-      rules,
-    });
-    setForm(emptyForm);
-    setShowAdd(false);
-    loadSources();
+    try {
+      await api.addSource({
+        name: form.name,
+        url: form.url,
+        search_url: form.search_url,
+        chapters_url: '',
+        content_url: '',
+        rules,
+      });
+      setForm(emptyForm);
+      setShowAdd(false);
+      loadSources();
+    } catch (err) {
+      alert(err instanceof Error ? err.message : '书源保存失败，请重试');
+    }
   };
 
   const handleDelete = async (id: number) => {
@@ -367,7 +374,7 @@ export function SourceManager() {
           <h2 style={{ marginBottom: 0 }}>文本净化（{filters.length}）</h2>
           <button className="btn-secondary" onClick={() => setShowFilterForm(true)}>添加规则</button>
         </div>
-        <p className="section-desc">正则替换在线章节里的广告、乱码（例： pattern 填 <code>.*?小说网</code>，replacement 留空即删除）。</p>
+        <p className="section-desc">按规则替换在线章节里的广告、乱码（例：匹配内容填 <code>.*?小说网</code>，「替换为」留空即删除）。</p>
         {showFilterForm && (
           <div className="source-form" style={{ marginBottom: 16 }}>
             <div className="form-row">
@@ -375,12 +382,12 @@ export function SourceManager() {
               <input value={filterForm.name} onChange={e => setFilterForm(s => ({ ...s, name: e.target.value }))} placeholder="去广告" />
             </div>
             <div className="form-row">
-              <label>正则表达式</label>
+              <label>匹配内容（正则）</label>
               <input value={filterForm.pattern} onChange={e => setFilterForm(s => ({ ...s, pattern: e.target.value }))} placeholder="广告.*?\n" />
             </div>
             <div className="form-row">
               <label>替换为（留空=删除）</label>
-              <input value={filterForm.replacement} onChange={e => setFilterForm(s => ({ ...s, replacement: e.target.value }))} placeholder="" />
+              <input value={filterForm.replacement} onChange={e => setFilterForm(s => ({ ...s, replacement: e.target.value }))} placeholder="留空表示删除匹配到的内容" />
             </div>
             <div className="form-actions">
               <button className="btn-secondary" onClick={() => setShowFilterForm(false)}>取消</button>
@@ -422,16 +429,17 @@ export function SourceManager() {
             <input value={form.url} onChange={e => set('url', e.target.value)} placeholder="https://example.com" />
           </div>
           <h4 className="form-sub">搜索规则</h4>
+          <p className="section-desc">以下「选择器」用来告诉软件去网页的哪个位置取内容，需要懂一点网页结构；不懂的话可以先留空，只填搜索地址。</p>
           <div className="form-row">
             <label>搜索地址（用 {"{{keyword}}"} 替代关键词）</label>
             <input value={form.search_url} onChange={e => set('search_url', e.target.value)} placeholder="https://example.com/s?q={{keyword}}" />
           </div>
           <div className="form-row">
-            <label>结果列表选择器（CSS）</label>
+            <label>搜索结果列表位置（CSS 选择器，高级）</label>
             <input value={form.search_list} onChange={e => set('search_list', e.target.value)} placeholder=".result-list .item" />
           </div>
           <div className="form-row">
-            <label>书名 / 作者 / 详情链接选择器（CSS，逗号分隔）</label>
+            <label>书名 / 作者 / 详情链接位置（CSS 选择器，高级）</label>
             <div className="form-inline">
               <input value={form.search_name} onChange={e => set('search_name', e.target.value)} placeholder="书名：.title" />
               <input value={form.search_author} onChange={e => set('search_author', e.target.value)} placeholder="作者：.author" />
@@ -440,14 +448,14 @@ export function SourceManager() {
           </div>
           <h4 className="form-sub">章节与正文规则</h4>
           <div className="form-row">
-            <label>章节列表 / 章节名选择器（CSS）</label>
+            <label>章节列表 / 章节名位置（CSS 选择器，高级）</label>
             <div className="form-inline">
               <input value={form.chapters_list} onChange={e => set('chapters_list', e.target.value)} placeholder="列表：.chapter-list a" />
               <input value={form.chapters_name} onChange={e => set('chapters_name', e.target.value)} placeholder="留空取链接文本" />
             </div>
           </div>
           <div className="form-row">
-            <label>正文内容选择器（CSS）</label>
+            <label>正文内容位置（CSS 选择器，高级）</label>
             <input value={form.content_selector} onChange={e => set('content_selector', e.target.value)} placeholder=".content" />
           </div>
           <div className="form-actions">

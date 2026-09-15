@@ -1,8 +1,17 @@
-import { useState, useEffect } from 'react';
+import { useState, useEffect, useRef } from 'react';
 import { Book } from '../types';
 import { formatMinutes } from '../utils/text';
 import { buildWeekSeries, DayStat } from '../utils/stats';
 import { Icon } from './Icon';
+
+/** Markdown 笔记里收集来的未完成任务 */
+interface OpenTask {
+  bookId: number;
+  bookTitle: string;
+  text: string;
+  chapter: string;
+  href: string;
+}
 
 interface StatsData {
   totalBooks: number;
@@ -16,6 +25,12 @@ interface StatsData {
 export function Statistics({ onOpenBook }: { onOpenBook: (book: Book) => void }) {
   /** 每日目标（分钟），0 表示未设目标 */
   const [goalMinutes, setGoalMinutes] = useState(0);
+  /** 读取失败的原因：不为空时页面明确报错并可重试，而不是假装「没有数据」 */
+  const [loadError, setLoadError] = useState('');
+  /** 书库里的未完成任务（来自 Markdown 笔记） */
+  const [tasks, setTasks] = useState<OpenTask[]>([]);
+  /** 打开任务时要拿到完整的书对象，这里留一份最近一次读到的书库 */
+  const booksRef = useRef<Book[]>([]);
 
   const [stats, setStats] = useState<StatsData>({
     totalBooks: 0,
@@ -38,25 +53,33 @@ export function Statistics({ onOpenBook }: { onOpenBook: (book: Book) => void })
   const loadStats = async () => {
     const api = window.electronAPI;
     if (!api) return;
-    const books = await api.getAllBooks() as Book[];
-    const reading = books.filter(b => b.progress > 0 && b.progress < 1);
-    const finished = books.filter(b => b.progress >= 0.95);
-    const recent = books
-      .filter(b => b.last_read_at)
-      .sort((a, b) => (b.last_read_at || '').localeCompare(a.last_read_at || ''))
-      .slice(0, 5);
-    const time = await api.getReadingTimeStats();
+    setLoadError('');
+    try {
+      const books = await api.getAllBooks() as Book[];
+      booksRef.current = books;
+      const reading = books.filter(b => b.progress > 0 && b.progress < 1);
+      const finished = books.filter(b => b.progress >= 0.95);
+      const recent = books
+        .filter(b => b.last_read_at)
+        .sort((a, b) => (b.last_read_at || '').localeCompare(a.last_read_at || ''))
+        .slice(0, 5);
+      const time = await api.getReadingTimeStats();
 
-    setStats({
-      totalBooks: books.length,
-      readingBooks: reading.length,
-      finishedBooks: finished.length,
-      recentBooks: recent,
-      todayMinutes: time.today,
-      totalMinutes: time.total,
-    });
-    const week = await api.getWeeklyStats(7);
-    setWeekSeries(buildWeekSeries(week as { date: string; duration: number }[]));
+      setStats({
+        totalBooks: books.length,
+        readingBooks: reading.length,
+        finishedBooks: finished.length,
+        recentBooks: recent,
+        todayMinutes: time.today,
+        totalMinutes: time.total,
+      });
+      const week = await api.getWeeklyStats(7);
+      setWeekSeries(buildWeekSeries(week as { date: string; duration: number }[]));
+      setTasks((await api.getAllTasks?.()) ?? []);
+    } catch (err) {
+      // 不吭声的话页面停在 0，用户分不清「真没数据」和「没读出来」
+      setLoadError(err instanceof Error ? err.message : '统计读取失败，请重试');
+    }
   };
 
   const handleExportAll = async () => {
@@ -76,6 +99,13 @@ export function Statistics({ onOpenBook }: { onOpenBook: (book: Book) => void })
         <h1>阅读统计</h1>
         <button className="btn-secondary" onClick={handleExportAll}>导出全部笔记</button>
       </div>
+
+      {loadError && (
+        <div className="info-bar">
+          <p>统计数据没能读出来：{loadError}</p>
+          <button className="btn-secondary small" onClick={() => void loadStats()}>重试</button>
+        </div>
+      )}
 
       <div className="stats-grid">
         <div className="stats-card">
@@ -194,6 +224,38 @@ export function Statistics({ onOpenBook }: { onOpenBook: (book: Book) => void })
           </div>
         )}
       </section>
+
+      {/* 未完成任务：来自各本 Markdown 笔记里的 - [ ]，点一下跳到它所在的章节 */}
+      {tasks.length > 0 && (
+        <section className="stats-section">
+          <h2>待办（{tasks.length} 项，来自 Markdown 笔记）</h2>
+          <div className="recent-list">
+            {tasks.slice(0, 50).map((t, i) => (
+              <div
+                key={`${t.bookId}-${i}`}
+                className="recent-item clickable"
+                title="跳转到这一章"
+                onClick={() => {
+                  const b = booksRef.current.find(x => x.id === t.bookId);
+                  if (!b) return;
+                  // 带上目标章节，阅读器据此直接落到对应的那一章
+                  onOpenBook(
+                    t.href ? ({ ...b, _tocTarget: { label: t.chapter, href: t.href } } as Book) : b,
+                  );
+                }}
+              >
+                <div className="recent-info">
+                  <h3>{t.text}</h3>
+                  <p>
+                    《{t.bookTitle}》{t.chapter ? ` · ${t.chapter}` : ''}
+                  </p>
+                </div>
+              </div>
+            ))}
+          </div>
+          {tasks.length > 50 && <p className="empty-text">只显示前 50 项，其余可在各本笔记里查看</p>}
+        </section>
+      )}
     </div>
   );
 }

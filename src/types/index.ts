@@ -208,6 +208,26 @@ declare global {
       getBookById: (id: number) => Promise<Book>;
       deleteBook: (id: number) => Promise<void>;
       updateProgress: (id: number, progress: number) => Promise<void>;
+      /** Markdown 的 [[目标]] 跳转：按书名或原文件名找书，找不到返回 null */
+      findBookByWikilink: (target: string) => Promise<{ id: number; title: string } | null>;
+      /** 书库标签汇总：按出现次数降序 */
+      getAllTags: () => Promise<{ tag: string; bookIds: number[]; count: number }[]>;
+      /** 未完成任务汇总（Markdown 里的 - [ ]） */
+      getAllTasks: () => Promise<
+        { bookId: number; bookTitle: string; text: string; chapter: string; href: string }[]
+      >;
+      /** frontmatter 属性汇总：每个「键: 值」出现在哪些书里 */
+      getAllProps: () => Promise<{ key: string; value: string; bookIds: number[]; count: number }[]>;
+      /** 引用关系：outgoing = 本书引用了谁，incoming = 谁引用了本书 */
+      getBookLinks: (bookId: number) => Promise<{
+        outgoing: { id: number; title: string; via: string }[];
+        incoming: { id: number; title: string; via: string }[];
+      }>;
+      /** 测试 AI 服务连通性：ok 为 false 时 message 是给用户看的原因 */
+      testAi: (cfg: { baseUrl: string; model: string; apiKey?: string }) => Promise<{
+        ok: boolean;
+        message: string;
+      }>;
       getBookFileData: (id: number) => Promise<string>;
       getBookFileInfo: (id: number) => Promise<{
         title: string;
@@ -309,8 +329,17 @@ declare global {
         timestamps?: boolean;
         clipboard?: boolean;
       }) => Promise<Record<string, number | boolean>>;
-      exportBackup: (full?: boolean) => Promise<{ filePath: string; kind: string; count: number } | null>;
-      importBackup: () => Promise<{ restored: number; createdAt: string; kind: string } | null>;
+      exportBackup: (full?: boolean) => Promise<{
+        filePath: string;
+        kind: string;
+        count: number;
+        /** 随归档打包的书籍文件数（增量备份为 0） */
+        bookFiles: number;
+        /** 源文件已不在本机、没能打包进来的书数 */
+        skippedFiles: number;
+        sizeBytes: number;
+      } | null>;
+      importBackup: () => Promise<{ restored: number; createdAt: string; kind: string; books: number } | null>;
       createSnapshot: () => Promise<{ file: string; pruned: number }>;
       listSnapshots: () => Promise<{ file: string; name: string; createdAt: string; sizeKB: number }[]>;
       restoreSnapshot: (file: string) => Promise<{ restored: number; createdAt: string }>;

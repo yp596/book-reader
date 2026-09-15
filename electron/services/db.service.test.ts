@@ -556,3 +556,183 @@ describe('联网附加能力总开关', () => {
     expect(db.getSetting('onlineFeaturesEnabled')).toBe('0');
   });
 });
+
+describe('增量备份的时间戳筛选', () => {
+  it('书源表也能按时间筛选：曾经缺 updated_at 列，第二次导出必然抛 no such column', () => {
+    db.insertSource({
+      name: '增量备份测试源',
+      url: 'https://example.com',
+      search_url: '',
+      chapters_url: '',
+      content_url: '',
+      rules: '',
+    });
+    expect(() => db.exportRowsSince('book_sources', '2020-01-01 00:00:00')).not.toThrow();
+    expect(db.exportRowsSince('book_sources', '2020-01-01 00:00:00').length).toBeGreaterThan(0);
+  });
+
+  it('ISO 基线（设置里存的就是这种）能覆盖当天新产生的记录', () => {
+    const id = db.insertBook({
+      title: '增量当天变更测试',
+      file_path: '/tmp/iso-baseline.epub',
+      file_type: 'epub',
+    });
+    // 基线是当天更早的一分钟，且为 ISO 格式（带 T 与 Z），与库内 CURRENT_TIMESTAMP 格式不同
+    const earlierIso = new Date(Date.now() - 60_000).toISOString();
+    const rows = db.exportRowsSince('books', earlierIso) as any[];
+    expect(rows.some(r => r.id === id)).toBe(true);
+  });
+
+  it('两种格式的基线给出一致结果，不会因格式差异漏备或多备', () => {
+    const sqliteForm = db.exportRowsSince('books', '2000-01-01 00:00:00').length;
+    const isoForm = db.exportRowsSince('books', '2000-01-01T00:00:00.000Z').length;
+    expect(isoForm).toBe(sqliteForm);
+  });
+});
+
+describe('全量备份归档的端到端往返（真实数据库）', () => {
+  it('导出归档 → 删光书库 → 恢复，书与批注一起回来', async () => {
+    const {
+      buildBackupFile,
+      writeBackupArchive,
+      archiveEntryName,
+      extractBackupFiles,
+      readBackup,
+      mergeBackup,
+    } = await import('./local-backup');
+
+    const workDir = fs.mkdtempSync(path.join(os.tmpdir(), 'br-archive-'));
+    const bookFile = path.join(workDir, '归档往返.epub');
+    fs.writeFileSync(bookFile, 'fake-epub-bytes');
+
+    // 1) 造一本书，带进度、分类与一条书签
+    const id = db.insertBook({
+      title: '归档往返测试',
+      file_path: bookFile,
+      file_type: 'epub',
+    }) as number;
+    db.updateBookProgress(id, 0.42);
+    db.setCategory(id, '科幻');
+    db.insertBookmark({ book_id: id, position: 'p1', text: '标记' });
+
+    // 2) 导出全量归档（数据 + 书籍文件）
+    const zipPath = path.join(workDir, 'full.zip');
+    const payload = buildBackupFile(db, null);
+    await writeBackupArchive(zipPath, payload, [
+      { archiveName: archiveEntryName('book', id, bookFile), sourcePath: bookFile },
+    ]);
+    expect(fs.existsSync(zipPath)).toBe(true);
+
+    // 3) 模拟用户把这本书删掉
+    db.deleteBook(id);
+    expect((db.getAllBooks() as { title: string }[]).some(b => b.title === '归档往返测试')).toBe(false);
+
+    // 4) 从归档恢复
+    const back = await readBackup(zipPath);
+    const restoredDir = path.join(workDir, 'books');
+    const files = await extractBackupFiles(zipPath, restoredDir);
+    mergeBackup(db, back, files);
+
+    const book = (db.getAllBooks() as any[]).find(b => b.title === '归档往返测试');
+    expect(book).toBeTruthy();
+    // 书籍文件真的落到书库目录了，记录指向新路径
+    expect(fs.existsSync(book.file_path)).toBe(true);
+    expect(book.file_path).not.toBe(bookFile);
+    expect(book.progress).toBeCloseTo(0.42, 5);
+    expect(book.category).toBe('科幻');
+    expect((db.getBookmarksByBookId(book.id) as any[]).some(m => m.position === 'p1')).toBe(true);
+  });
+});
+
+describe('wiki 链接解析（Markdown 的 [[目标]]）', () => {
+  it('按书名匹配，且不区分大小写与首尾空格', () => {
+    const id = db.insertBook({ title: '读书笔记 Alpha', file_path: '/tmp/wiki-a.md', file_type: 'epub' });
+    expect(db.findBookByWikilink('  读书笔记 alpha  ')?.id).toBe(id);
+  });
+
+  it('按「导入时的原文件名」匹配（书名取自一级标题，常与文件名不同）', () => {
+    // 文件名是 2026-计划，一级标题是「年度计划」，链接里写的通常是文件名
+    const id = db.insertBook({ title: '年度计划', file_path: '/tmp/wiki-b.epub', file_type: 'epub' });
+    const names = new Map<number, string>([[id, '2026-计划']]);
+
+    expect(db.findBookByWikilink('2026-计划', (n: number) => names.get(n) ?? null)?.id).toBe(id);
+  });
+
+  it('找不到时返回 undefined，不误配到别的书', () => {
+    expect(db.findBookByWikilink('这本书不存在', () => null)).toBeUndefined();
+  });
+
+  it('空目标直接返回 undefined', () => {
+    expect(db.findBookByWikilink('   ')).toBeUndefined();
+  });
+});
+
+describe('引用关系（Markdown 的 [[目标]]）', () => {
+  it('正向与反向都能算出来，并按原文件名匹配', () => {
+    const a = db.insertBook({ title: '总纲', file_path: '/tmp/rel-a.epub', file_type: 'epub' });
+    const b = db.insertBook({ title: '读书笔记', file_path: '/tmp/rel-b.epub', file_type: 'epub' });
+    db.setSetting(`mdLinks:${a}`, JSON.stringify(['读书笔记', '不存在的笔记']));
+    db.setSetting(`mdLinks:${b}`, JSON.stringify(['总纲']));
+
+    const links = db.getBookLinks(a) as {
+      outgoing: { id: number; title: string }[];
+      incoming: { id: number; title: string }[];
+    };
+    expect(links.outgoing.map(l => l.id)).toEqual([b]);
+    expect(links.incoming.map(l => l.id)).toEqual([b]);
+
+    // 链接里写的是文件名时也能对上
+    const names = new Map<number, string>([[b, '笔记-2026']]);
+    db.setSetting(`mdLinks:${a}`, JSON.stringify(['笔记-2026']));
+    const byName = db.getBookLinks(a, (id: number) => names.get(id) ?? null) as {
+      outgoing: { id: number }[];
+    };
+    expect(byName.outgoing.map(l => l.id)).toEqual([b]);
+  });
+
+  it('指向自己、指向不存在的书都不计入；同一本多处引用只算一次', () => {
+    const c = db.insertBook({ title: '自引用测试', file_path: '/tmp/rel-c.epub', file_type: 'epub' });
+    const d = db.insertBook({ title: '引用方', file_path: '/tmp/rel-d.epub', file_type: 'epub' });
+    db.setSetting(`mdLinks:${c}`, JSON.stringify(['自引用测试']));
+    db.setSetting(`mdLinks:${d}`, JSON.stringify(['自引用测试', '自引用测试（第二次）', '查无此书']));
+
+    const links = db.getBookLinks(c) as {
+      outgoing: { id: number }[];
+      incoming: { id: number }[];
+    };
+    expect(links.outgoing).toEqual([]);
+    expect(links.incoming.map(l => l.id)).toEqual([d]);
+  });
+});
+
+describe('frontmatter 属性汇总（书架按属性筛选）', () => {
+  it('按「键: 值」汇总，统计出现在多少本书里', () => {
+    const a = db.insertBook({ title: '属性测试甲', file_path: '/tmp/prop-a.epub', file_type: 'epub' });
+    const b = db.insertBook({ title: '属性测试乙', file_path: '/tmp/prop-b.epub', file_type: 'epub' });
+    db.setSetting(`mdProps:${a}`, JSON.stringify({ status: ['待整理'], tags: ['读书'] }));
+    db.setSetting(`mdProps:${b}`, JSON.stringify({ status: ['待整理'] }));
+
+    const props = db.getAllBookProps() as { key: string; value: string; count: number; bookIds: number[] }[];
+    const status = props.find(p => p.key === 'status' && p.value === '待整理');
+    expect(status?.count).toBe(2);
+    expect(status?.bookIds.sort()).toEqual([a, b].sort());
+    const tags = props.find(p => p.key === 'tags');
+    expect(tags?.count).toBe(1);
+  });
+
+  it('同一本书里重复写同一个值只算一次', () => {
+    const c = db.insertBook({ title: '属性重复测试', file_path: '/tmp/prop-c.epub', file_type: 'epub' });
+    db.setSetting(`mdProps:${c}`, JSON.stringify({ tags: ['读书', '读书'] }));
+    const hit = (
+      db.getAllBookProps() as { key: string; value: string; bookIds: number[] }[]
+    ).find(p => p.key === 'tags' && p.value === '读书');
+    // 同一本书里写两遍，bookIds 里只应出现一次（count 的语义是「多少本书有它」）
+    expect(hit?.bookIds.filter(id => id === c)).toHaveLength(1);
+  });
+
+  it('脏值不影响其它书', () => {
+    const d = db.insertBook({ title: '属性脏值测试', file_path: '/tmp/prop-d.epub', file_type: 'epub' });
+    db.setSetting(`mdProps:${d}`, '{不是 JSON');
+    expect(() => db.getAllBookProps()).not.toThrow();
+  });
+});
