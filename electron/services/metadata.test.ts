@@ -3,7 +3,7 @@ import fs from 'fs';
 import os from 'os';
 import path from 'path';
 import JSZip from 'jszip';
-import { extractMetadata, extractToc, parseTxtChapters, docxToChapters, mdToChapters, decodeTextAuto } from './metadata';
+import { extractMetadata, extractToc, parseTxtChapters, docxToChapters, mdToChapters, decodeTextAuto, isGenericChapterTitle } from './metadata';
 
 let tmpDir: string;
 
@@ -337,6 +337,29 @@ describe('DOCX', () => {
   it('无 core.xml 回退首标题', async () => {
     const p = await makeDocx();
     expect(await extractMetadata(p, '.docx')).toEqual({ title: '第一章' });
+  });
+
+  it('通篇没有小标题时，不用合成的「正文」当书名', async () => {
+    const p = await makeDocx({ body: '<w:p><w:r><w:t>只是一段正文，没有小标题</w:t></w:r></w:p>' });
+    // 返回 null 让调用方回退到文件名，而不是把占位名当书名
+    expect(await extractMetadata(p, '.docx')).toBeNull();
+  });
+
+  it('正文排在首个标题之前时，跳过「第 1 节」继续找真标题', async () => {
+    const p = await makeDocx({
+      body: '<w:p><w:r><w:t>前言部分</w:t></w:r></w:p><w:p><w:pPr><w:pStyle w:val="Heading1"/></w:pPr><w:r><w:t>品牌管理模块最终汇报稿</w:t></w:r></w:p>',
+    });
+    expect(await extractMetadata(p, '.docx')).toEqual({ title: '品牌管理模块最终汇报稿' });
+  });
+
+  it('占位章节名识别', () => {
+    expect(isGenericChapterTitle('正文')).toBe(true);
+    expect(isGenericChapterTitle('第 3 节')).toBe(true);
+    expect(isGenericChapterTitle('第3节')).toBe(true);
+    // 真实标题不该被误判
+    expect(isGenericChapterTitle('第一章')).toBe(false);
+    expect(isGenericChapterTitle('正文之后')).toBe(false);
+    expect(isGenericChapterTitle('第 3 节 概述')).toBe(false);
   });
 
   it('按标题切章', async () => {

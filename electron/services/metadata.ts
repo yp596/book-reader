@@ -432,6 +432,23 @@ async function extractPdfToc(filePath: string): Promise<TocEntry[]> {
 }
 
 // ============ DOCX ============
+
+/**
+ * 文档没有小标题时合成的占位章节名。
+ *
+ * 它们只是为了让目录有个条目，绝不能反过来当成书名——「正文」「第 1 节」做了书名，
+ * 文件名里真正有用的信息（如「品牌管理模块最终汇报稿」）就白白丢了。
+ * 生成与识别共用同一组定义，避免两边各写各的又对不上。
+ */
+const SINGLE_CHAPTER_NAME = '正文';
+const untitledChapterName = (index: number) => `第 ${index + 1} 节`;
+const GENERIC_CHAPTER_TITLE = /^(正文|第\s*\d+\s*节)$/;
+
+/** 是否是合成出来的占位章节名（而非文档里真实存在的小标题） */
+export function isGenericChapterTitle(title: string): boolean {
+  return GENERIC_CHAPTER_TITLE.test((title ?? '').trim());
+}
+
 /** DOCX：读 core.xml 的标题作者 */
 async function extractDocxMetadata(filePath: string): Promise<BookMetadata | null> {
   const buffer = fs.readFileSync(filePath);
@@ -443,9 +460,10 @@ async function extractDocxMetadata(filePath: string): Promise<BookMetadata | nul
     const author = /<dc:creator>([^<]*)<\/dc:creator>/.exec(core)?.[1]?.trim();
     if (title) return { title: decodeXmlEntities(title), author: author || undefined };
   }
-  // 回退：首个标题
+  // 回退：首个真实标题。占位名（正文 / 第 N 节）不能当书名——这种情况下返回 null，
+  // 由调用方回退到文件名，那通常才是用户认得出的名字。
   const chapters = await docxToChapters(filePath);
-  const firstTitle = chapters.find(c => c.title)?.title;
+  const firstTitle = chapters.find(c => c.title && !isGenericChapterTitle(c.title))?.title;
   return firstTitle ? { title: firstTitle } : null;
 }
 
@@ -482,10 +500,10 @@ export async function docxToChapters(
   if (chapters.length === 0) return [];
   // 无标题文档：合成单章
   if (chapters.length === 1 && !chapters[0].title) {
-    return [{ title: '正文', content: chapters[0].paras.join('\n') }];
+    return [{ title: SINGLE_CHAPTER_NAME, content: chapters[0].paras.join('\n') }];
   }
   return chapters.map((c, i) => ({
-    title: c.title || `第 ${i + 1} 节`,
+    title: c.title || untitledChapterName(i),
     content: c.paras.join('\n'),
   }));
 }
@@ -527,10 +545,10 @@ export async function mdToChapters(
   if (chapters.length === 0) return [];
   // 无标题文档：合成单章
   if (chapters.length === 1 && !chapters[0].title) {
-    return [{ title: '正文', content: text, html: toXhtmlFragment(chapters[0].html.join('')) }];
+    return [{ title: SINGLE_CHAPTER_NAME, content: text, html: toXhtmlFragment(chapters[0].html.join('')) }];
   }
   return chapters.map((c, i) => ({
-    title: c.title || `第 ${i + 1} 节`,
+    title: c.title || untitledChapterName(i),
     content: '',
     html: toXhtmlFragment(c.html.join('')),
   }));
