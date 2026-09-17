@@ -433,13 +433,108 @@ describe('DOCX', () => {
     expect(isGenericChapterTitle('第 3 节 概述')).toBe(false);
   });
 
-  it('按标题切章', async () => {
+  it('标题层级被识别为章节边界', async () => {
+    // 两章都撑过合并阈值，才断言它们各自独立成章；
+    // 否则短章会被并进后一章，测到的就不是「标题能不能切章」了
+    const longText = (n: number) => '字'.repeat(n);
+    const p = await makeDocx({
+      body:
+        '<w:p><w:pPr><w:pStyle w:val="Heading1"/></w:pPr><w:r><w:t>上篇</w:t></w:r></w:p><w:p><w:r><w:t>' + longText(1200) + '</w:t></w:r></w:p>' +
+        '<w:p><w:pPr><w:pStyle w:val="Heading2"/></w:pPr><w:r><w:t>第一节</w:t></w:r></w:p><w:p><w:r><w:t>' + longText(1200) + '</w:t></w:r></w:p>',
+    });
+    const chapters = await docxToChapters(p);
+    expect(chapters.map(c => c.title)).toEqual(['上篇', '第一节']);
+    expect(chapters[0].content.startsWith('字')).toBe(true);
+  });
+
+  it('全篇正文都短于阈值时合并成一章，不产生碎章', async () => {
+    // 实测那本 DOCX 合起来才 5.7 万字却切出 113 章，中位数只有 500 字，
+    // 大半是「三、迭代体系合理性分析」这种几十字的标题章 —— 翻页按不动就是这么来的
     const p = await makeDocx({
       body: '<w:p><w:pPr><w:pStyle w:val="Heading1"/></w:pPr><w:r><w:t>上篇</w:t></w:r></w:p><w:p><w:r><w:t>内容一</w:t></w:r></w:p><w:p><w:pPr><w:pStyle w:val="Heading2"/></w:pPr><w:r><w:t>第一节</w:t></w:r></w:p><w:p><w:r><w:t>内容二</w:t></w:r></w:p>',
     });
     const chapters = await docxToChapters(p);
-    expect(chapters.map(c => c.title)).toEqual(['上篇', '第一节']);
+    expect(chapters).toHaveLength(1);
+    // 保留后一章的真实标题，前面的标题降级成正文首行
+    expect(chapters[0].title).toBe('第一节');
+    expect(chapters[0].content).toContain('上篇');
     expect(chapters[0].content).toContain('内容一');
+    expect(chapters[0].content).toContain('内容二');
+  });
+
+  // 长正文用来把章撑过合并阈值，短正文用来触发合并
+  const longText = (n: number) => '字'.repeat(n);
+  const headBody = (title: string, text: string) =>
+    `<w:p><w:pPr><w:pStyle w:val="Heading2"/></w:pPr><w:r><w:t>${title}</w:t></w:r></w:p><w:p><w:r><w:t>${text}</w:t></w:r></w:p>`;
+
+  it('纯标题章（正文为空）被丢弃', async () => {
+    // 实测那本 DOCX 里「三、迭代体系合理性分析」这种纯标题章重复出现三次，
+    // 每章在 EPUB 里都算作 1/1 页，翻页按不动
+    const p = await makeDocx({
+      body:
+        headBody('第一章', longText(1200)) +
+        '<w:p><w:pPr><w:pStyle w:val="Heading2"/></w:pPr><w:r><w:t>空标题章</w:t></w:r></w:p>' +
+        headBody('第二章', longText(1200)),
+    });
+    const chapters = await docxToChapters(p);
+    expect(chapters.map(c => c.title)).toEqual(['第一章', '第二章']);
+  });
+
+  it('末尾空章保留 —— 它可能是正文唯一的载体', async () => {
+    // 正文全排在标题之前是 Word 常见形状，extractDocxMetadata 的书名回退
+    // 正是靠这一章；如果按「空章一律丢」处理，书名就回退成文件名了
+    const p = await makeDocx({
+      body:
+        headBody('第一章', longText(1200)) +
+        '<w:p><w:pPr><w:pStyle w:val="Heading1"/></w:pPr><w:r><w:t>品牌管理模块最终汇报稿</w:t></w:r></w:p>',
+    });
+    const chapters = await docxToChapters(p);
+    expect(chapters.map(c => c.title)).toEqual(['第一章', '品牌管理模块最终汇报稿']);
+    expect(chapters[1].content).toBe('');
+  });
+
+  it('短章并入后一章，被并标题降级为正文首行', async () => {
+    const p = await makeDocx({
+      body: headBody('小节', '很短的一段正文') + headBody('第一章', longText(1200)),
+    });
+    const chapters = await docxToChapters(p);
+    expect(chapters).toHaveLength(1);
+    // 保留后一章的真实标题，短章的标题降级成正文
+    expect(chapters[0].title).toBe('第一章');
+    expect(chapters[0].content).toContain('小节');
+    expect(chapters[0].content).toContain('很短的一段正文');
+  });
+
+  it('章节顺序在合并后仍与原文一致', async () => {
+    const p = await makeDocx({
+      body: headBody('第一章', longText(1200)) + headBody('第二章', longText(1200)),
+    });
+    const chapters = await docxToChapters(p);
+    expect(chapters.map(c => c.title)).toEqual(['第一章', '第二章']);
+    // 后合并的实现容易把逆序栈顶写回原数组，顺序是最先崩的地方
+    expect(chapters[0].content.startsWith('字')).toBe(true);
+  });
+
+  it('连续多个短章合并后不再是碎章', async () => {
+    // 复现实测场景：一个长章打底，后面 20 个短要点一路并进最后一章，
+    // 中间那些「要点 N」的标题降级成正文行，不再各自占一章
+    const body =
+      headBody('总纲', longText(1100)) +
+      Array.from({ length: 20 }, (_, i) => headBody(`要点 ${i + 1}`, '一句话要点')).join('');
+    const chapters = await docxToChapters(await makeDocx({ body }));
+    expect(chapters).toHaveLength(2);
+    expect(chapters[0].title).toBe('总纲');
+    expect(chapters[1].title).toBe('要点 20');
+    // 19 个短章的标题 + 正文全部并进来了，顺序保持原样
+    const paras = chapters[1].content.split('\n');
+    expect(paras).toHaveLength(39);
+    expect(paras[0]).toBe('一句话要点');
+    expect(paras[1]).toBe('要点 1');
+    expect(paras[2]).toBe('一句话要点');
+    expect(paras[3]).toBe('要点 2');
+    expect(paras[38]).toBe('一句话要点');
+    // 阈值之上的「总纲」没有被吃掉
+    expect(chapters[0].content).toHaveLength(1100);
   });
 });
 

@@ -9,6 +9,72 @@ files:
   - build/**/*
   # OCR 模型与字典：运行时按路径读取
   - resources/**/*
+  # 下面这批包在主进程产物里是 external（见 vite.config.ts 的 rollupOptions.external），
+  # 运行时靠 require 从 node_modules 取，不打进包里就会一启动就 Cannot find module。
+  # ⚠️ 两边必须同步：改了那边的 external，这里就要跟着加。
+  - node_modules/pdfjs-dist/**/*
+  - node_modules/epubjs/**/*
+  - node_modules/mammoth/**/*
+  - node_modules/marked/**/*
+  - node_modules/katex/**/*
+  - node_modules/jszip/**/*
+  - node_modules/pdf-lib/**/*
+  - node_modules/cheerio/**/*
+  - node_modules/webdav/**/*
+  # cheerio/slim 走子路径导出，依赖的解析器不在 cheerio 包内，要一起带上
+  - node_modules/htmlparser2/**/*
+  - node_modules/domhandler/**/*
+  - node_modules/domutils/**/*
+  - node_modules/dom-serializer/**/*
+  - node_modules/domelementtype/**/*
+  - node_modules/entities/**/*
+  - node_modules/css-select/**/*
+  - node_modules/css-what/**/*
+  - node_modules/boolbase/**/*
+  - node_modules/nth-check/**/*
+  - node_modules/parse5/**/*
+  - node_modules/parse5-htmlparser2-tree-adapter/**/*
+  - node_modules/parse5-parser-stream/**/*
+  - node_modules/encoding-sniffer/**/*
+  - node_modules/whatwg-mimetype/**/*
+  - node_modules/undici/**/*
+  # 各包的运行时传递依赖（没有打进 bundle，必须随包分发）
+  - node_modules/tslib/**/*
+  - node_modules/lie/**/*
+  - node_modules/immediate/**/*
+  - node_modules/setimmediate/**/*
+  - node_modules/pako/**/*
+  - node_modules/readable-stream/**/*
+  - node_modules/string_decoder/**/*
+  - node_modules/safe-buffer/**/*
+  - node_modules/inherits/**/*
+  - node_modules/base64-js/**/*
+  - node_modules/ieee754/**/*
+  - node_modules/fast-xml-parser/**/*
+  - node_modules/strnum/**/*
+  - node_modules/hot-patcher/**/*
+  - node_modules/layerr/**/*
+  - node_modules/commander/**/*
+  - node_modules/iconv-lite/**/*
+  - node_modules/safer-buffer/**/*
+  - node_modules/xml-name-validator/**/*
+  # 下面是校验脚本（.tmp-verify/check-packlist.cjs）跑出来的闭包补漏：
+  # 手工凭印象列白名单一定漏，漏一个就是打包版启动即崩，所以补完必须重跑脚本
+  - node_modules/@pdf-lib/**/*
+  - node_modules/@xmldom/**/*
+  - node_modules/argparse/**/*
+  - node_modules/bluebird/**/*
+  - node_modules/cheerio-select/**/*
+  - node_modules/dingbat-to-unicode/**/*
+  - node_modules/duck/**/*
+  - node_modules/lop/**/*
+  - node_modules/option/**/*
+  - node_modules/path-is-absolute/**/*
+  - node_modules/sql.js/**/*
+  - node_modules/underscore/**/*
+  - node_modules/util-deprecate/**/*
+  - node_modules/whatwg-encoding/**/*
+  - node_modules/xmlbuilder/**/*
   - node_modules/node-llama-cpp/**/*
   - node_modules/@node-llama-cpp/**/*
   # 只保留 CPU 版二进制（win-x64，46MB）。CUDA / Vulkan / arm64 变体合计 627MB，

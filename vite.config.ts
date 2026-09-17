@@ -114,7 +114,29 @@ export default defineConfig({
               // 主进程原生/外部依赖保持 require，不打进 bundle。
               // libarchive 必须外部：它顶层用 import.meta.url 算 worker 路径，
               // 打成 CJS 后 import.meta 失效，会在模块加载阶段抛 Invalid URL。
-              external: ['sql.js', 'node-llama-cpp', 'libarchive.js/dist/libarchive-node.mjs'],
+              //
+              // 下面这批重型解析库同样必须外部：内联它们会让 rollup 展开整棵依赖树，
+              // 构建期内存溢出（实测 dev 崩在 transforming 阶段，把 Node 堆抬到 4GB
+              // 也只是从「JS heap 溢出」变成「Zone 分配失败」）。用正则而非字符串，
+              // 是为了同时命中子路径（cheerio/slim、pdfjs-dist/build/...）。
+              //
+              // ⚠️ 改这里必须同步改 electron-builder.yml 的 files 白名单——
+              // external 的包运行时靠 require 从 node_modules 取，打包时不在包里就会
+              // 一启动就 Cannot find module。
+              external: [
+                'sql.js',
+                'node-llama-cpp',
+                'libarchive.js/dist/libarchive-node.mjs',
+                /^pdfjs-dist/,
+                /^epubjs/,
+                /^mammoth/,
+                /^marked/,
+                /^katex/,
+                /^jszip/,
+                /^pdf-lib/,
+                /^cheerio/,
+                /^webdav/,
+              ],
             },
           },
         },

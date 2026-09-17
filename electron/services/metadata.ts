@@ -511,7 +511,85 @@ async function extractDocxMetadata(filePath: string): Promise<BookMetadata | nul
   return firstTitle ? { title: firstTitle } : null;
 }
 
-/** DOCX 转章节：mammoth 转 HTML，按 h1/h2 切章，正文转纯文本段落 */
+/**
+ * 一个章节短于这个字数时并入相邻章。
+ *
+ * 为什么需要：Word 文档里「标题直接跟下一个标题」是常见写法（目录式罗列、
+ * 分节页），mammoth 会为每个标题单独开一章，产出大量纯标题、正文为空的章。
+ * 在 EPUB 里每章独立成篇，这类空章算出来就是「1/1 页」，翻页按不动。
+ *
+ * 1000 字约是一屏到两屏的正文量，低于它的章并进邻章既不会丢内容，
+ * 也不会把作者有意分节的长章节揉在一起。
+ */
+const DOCX_MIN_CHAPTER_CHARS = 1000;
+
+/**
+ * 一个段落最多多少字，才有资格被当成伪标题。
+ *
+ * 中文小标题极少超过这个长度；放宽了正文短句会被大量误判成章，收紧了两级标题
+ * （「2.1 核心阅读体验模块｜【用户感知最强、留存最高】」这种）又会被漏掉。
+ */
+const DOCX_PSEUDO_TITLE_MAX_CHARS = 40;
+
+/** 伪标题的排版特征：整段加粗，或整段居中 / 大字号。 */
+function looksLikeHeadingParagraph($: cheerio.CheerioAPI, el: any): boolean {
+  const $el = $(el);
+  // 整段加粗：文档里「问题」「答案」「一、没逻辑是什么样子？」都是这么排的
+  const inner = $el.html() ?? '';
+  const strongWrapped = /^\s*<(?:strong|b)\b[^>]*>[\s\S]*<\/(?:strong|b)>\s*$/i.test(inner);
+  if (strongWrapped) return true;
+  // 整段居中：Word 里居中排的小标题很常见
+  if (/\btext-align\s*:\s*center/i.test($el.attr('style') ?? '')) return true;
+  return false;
+}
+
+/**
+ * 伪标题的文本特征：编号式开头，或独立成段的提示词。
+ *
+ * 只认「行首编号」，不认正文里出现的编号——「二、有逻辑的说话核心 3 件事」是标题，
+ * 「用「第一、第二、第三」串联」不是，前者编号在行首、后者在引号里。
+ */
+const DOCX_PSEUDO_TITLE_PATTERNS: RegExp[] = [
+  /^第\s*[0-9一二三四五六七八九十百]+\s*[章节讲节篇部]/,
+  /^[一二三四五六七八九十]+\s*[、.．]/,
+  /^[（(]\s*[一二三四五六七八九十0-9]+\s*[）)]/,
+  /^\d+(?:\.\d+){0,3}\s*[、.．]?\s+\S/,
+  /^\d+(?:\.\d+){1,3}\s*[、.．]?\s*$/,
+  /^(?:问题|答案|结论|小结|总结|要点|注意|提示|附|附录|前言|序言|后记|附录)\s*[:：]?\s*$/,
+];
+
+/**
+ * 段落能否当章节边界。
+ *
+ * 为什么需要：Word 文档里只有一部分小标题用了「标题 1/2」样式，mammoth 转成
+ * h1/h2；其余用「标题 3/4」的转成 h3/h4，更多的干脆是加粗的普通段落。
+ * 只看 h1/h2 会让这类文档要么一章切不出来（合出占位名「正文」），
+ * 要么只抓到零星几个真标题（书名回退成「原文」这种半吊子）。
+ */
+function isPseudoTitle($: cheerio.CheerioAPI, el: any, text: string): boolean {
+  if (text.length === 0 || text.length > DOCX_PSEUDO_TITLE_MAX_CHARS) return false;
+  // 长段落哪怕加粗也不是标题——正文首句加粗做强调的情况太常见
+  if (!looksLikeHeadingParagraph($, el)) return false;
+  return DOCX_PSEUDO_TITLE_PATTERNS.some(re => re.test(text));
+}
+
+/**
+ * DOCX 转章节：mammoth 转 HTML，按 h1~h4 与伪标题切章，正文转纯文本段落。
+ *
+ * 切完还要做一遍收敛，否则 Word 那种「一个标题一个标题往下排」的写法会切出
+ * 上百个碎章（实测某 11 万字节文档切出 113 章，过半是纯标题）。
+ *
+ * 收敛从后往前扫，方向很关键：只有「后面还存在有正文的章」时，当前空章才可以丢。
+ * 无条件丢弃会误伤两种形状——
+ *   ① 文档以空章收尾（末尾那个标题是全书最后一条信息）
+ *   ② 正文全部排在标题之前（此时非空章在前、空标题章在后，正是书名回退
+ *      `extractDocxMetadata` 依赖的形状，丢了它书名就没了）
+ * 从后往前也顺带让「正文排在首个标题之前」那一段能并进后面的真标题章，
+ * 不会孤零零留一个「第 1 节」。
+ *
+ * 合并时被并章的标题降级成正文首行，信息来源不丢；空章的标题只作标题，
+ * 不再重复写进正文。
+ */
 export async function docxToChapters(
   filePath: string,
 ): Promise<{ title: string; content: string }[]> {
@@ -527,12 +605,13 @@ export async function docxToChapters(
   };
 
   // slim 的 load 不包 body，用文档序选择器并跳过嵌套元素
-  $('h1, h2, p, li').each((_, el) => {
-    if ($(el).parents('h1, h2, p, li').length > 0) return;
+  $('h1, h2, h3, h4, p, li').each((_, el) => {
+    if ($(el).parents('h1, h2, h3, h4, p, li').length > 0) return;
     const tag = (el as any).tagName?.toLowerCase() ?? '';
     const text = $(el).text().trim();
     if (!text) return;
-    if (tag === 'h1' || tag === 'h2') {
+    const isRealHeading = tag === 'h1' || tag === 'h2' || tag === 'h3' || tag === 'h4';
+    if (isRealHeading || isPseudoTitle($, el, text)) {
       flush();
       current = { title: text.slice(0, 100), paras: [] };
     } else {
@@ -542,11 +621,41 @@ export async function docxToChapters(
   flush();
 
   if (chapters.length === 0) return [];
-  // 无标题文档：合成单章
+  // 无标题文档：合成单章（单章没有可合并对象，直接返回）
   if (chapters.length === 1 && !chapters[0].title) {
     return [{ title: SINGLE_CHAPTER_NAME, content: chapters[0].paras.join('\n') }];
   }
-  return chapters.map((c, i) => ({
+
+  // 倒序扫描用的栈元素：hasBody 标记「这一章是否已经有正文」，
+  // 后面前一章要据此决定能不能并进来（空标题章也能当合并对象）
+  const merged: { title: string; paras: string[]; hasBody: boolean }[] = [];
+  // 从后往前：seenBody 表示「后方已存在有正文的章」，空章只有在这种情况下才敢丢
+  let seenBody = false;
+  for (let i = chapters.length - 1; i >= 0; i--) {
+    const c = chapters[i];
+    if (c.paras.length === 0) {
+      if (!seenBody) merged.push({ title: c.title, paras: [], hasBody: false }); // 末尾空章保留，它是唯一的信息载体
+      continue;
+    }
+    seenBody = true;
+    const chars = c.paras.join('').length;
+    const next = merged[0]; // merged 是逆序栈，栈顶即原文档顺序里的「下一章」
+    // 短章并入后一章：保留后一章的真实标题，标题层级不至于塌掉。
+    // 判据要看「后一章是否已有正文」：连续短章要一路并到最后一个非空章上，
+    // 中间那些单纯标题只是被一起带过去，不另外落脚。
+    // 反过来若不加这个判断，20 个要点会全部堆进最后一章，「总纲」被跳过。
+    if (chars < DOCX_MIN_CHAPTER_CHARS && next?.hasBody) {
+      if (c.title && next.title) next.paras.unshift(c.title);
+      next.paras.unshift(...c.paras);
+      next.hasBody = true;
+      continue;
+    }
+    merged.unshift({ title: c.title, paras: [...c.paras], hasBody: true });
+  }
+
+  if (merged.length === 0) return [];
+
+  return merged.map((c, i) => ({
     title: c.title || untitledChapterName(i),
     content: c.paras.join('\n'),
   }));
