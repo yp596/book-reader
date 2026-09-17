@@ -246,7 +246,17 @@ export async function readComicPage(
   return { data: (await readEntryVia7z(archivePath, name)).toString('base64'), mime };
 }
 
-/** 清理缓存（关闭书籍时调用，及时释放内存） */
+/** 清空缓存。测试里当 beforeEach 用；线上的释放走 releaseComicCacheFor */
 export function clearComicCache() {
   cache = null;
+}
+
+/**
+ * 释放指定压缩包的缓存（关闭该书时调用，及时回收内存）。
+ *
+ * 按路径精确释放而不是无条件清空：同一时刻只缓存一本，但多窗口下另一本书
+ * 可能正靠这份缓存翻页，一刀切会把它也丢掉、逼它重新解压整包。
+ */
+export function releaseComicCacheFor(archivePath: string) {
+  if (cache && cache.path === archivePath) cache = null;
 }

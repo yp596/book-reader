@@ -50,6 +50,13 @@ export interface WordEntry {
   created_at: string;
 }
 
+/** 备份恢复时因本地找不到对应书籍而未能恢复的条目数 */
+export interface BackupDropped {
+  books: number;
+  bookmarks: number;
+  notes: number;
+}
+
 export interface ModelStatus {
   id: string;
   name: string;
@@ -60,6 +67,7 @@ export interface ModelStatus {
   running: boolean;
   binReady: boolean;
 }
+
 
 export interface ModelProgressInfo {
   id: string;
@@ -182,6 +190,8 @@ declare global {
       saveToc: (id: number, entries: TocEntry[]) => Promise<void>;
       getComicPages: (id: number) => Promise<string[]>;
       getComicPage: (id: number, name: string) => Promise<{ data: string; mime: string } | null>;
+      /** 关闭漫画后释放主进程的整包缓存（内存回收用，失败不影响阅读） */
+      releaseComicCache: (id: number) => Promise<boolean>;
       setContentProtection: (flag: boolean) => Promise<boolean>;
       runPdfOp: (payload: {
         op: 'merge' | 'extract' | 'deletePages' | 'rotate' | 'crop' | 'watermark' | 'pageNumbers';
@@ -339,10 +349,17 @@ declare global {
         skippedFiles: number;
         sizeBytes: number;
       } | null>;
-      importBackup: () => Promise<{ restored: number; createdAt: string; kind: string; books: number } | null>;
+      importBackup: () => Promise<{
+        restored: number;
+        /** 备份里挂不上书、未能恢复的条目数 */
+        dropped: BackupDropped;
+        createdAt: string;
+        kind: string;
+        books: number;
+      } | null>;
       createSnapshot: () => Promise<{ file: string; pruned: number }>;
       listSnapshots: () => Promise<{ file: string; name: string; createdAt: string; sizeKB: number }[]>;
-      restoreSnapshot: (file: string) => Promise<{ restored: number; createdAt: string }>;
+      restoreSnapshot: (file: string) => Promise<{ restored: number; dropped: BackupDropped; createdAt: string }>;
       getOcrAssets: () => Promise<{
         detBuffer: Uint8Array;
         recBuffer: Uint8Array;
@@ -366,12 +383,14 @@ declare global {
         },
       ) => string;
       getRagStatus: () => Promise<{ book_id: number; title: string; chunks: number; updated_at: string }[]>;
-      buildRagIndex: (bookId: number) => Promise<{ chunks: number }>;
+      buildRagIndex: (bookId: number, ownerId?: string) => Promise<{ chunks: number }>;
       clearRagIndex: (bookId: number) => Promise<void>;
+      ragAbort: (ownerId: string) => Promise<void>;
       semanticSearch: (
         query: string,
         topK: number,
         bookId?: number,
+        ownerId?: string,
       ) => Promise<
         {
           book_id: number;

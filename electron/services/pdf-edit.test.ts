@@ -1,4 +1,4 @@
-import { describe, it, expect, beforeEach, afterEach } from 'vitest';
+import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import fs from 'fs';
 import os from 'os';
 import path from 'path';
@@ -165,5 +165,58 @@ describe('加密文档', () => {
     const broken = path.join(tmpDir, 'broken.pdf');
     fs.writeFileSync(broken, Buffer.from('not a pdf'));
     await expect(extractPages(broken, '1', path.join(tmpDir, 'o.pdf'))).rejects.toThrow(/无法读取 PDF/);
+  });
+});
+
+describe('输出写入的原子性', () => {
+  // 用户可以在保存对话框里挑一个已存在的 PDF 覆盖掉。若写入是非原子的，
+  // 中途失败就会把原文件毁成半截内容——那是最不可接受的失败形态。
+  it('覆盖已有 PDF 时，成功路径不留下 .part 残骸', async () => {
+    const src = await makePdf('src.pdf', 3);
+    const out = path.join(tmpDir, 'exists.pdf');
+    fs.writeFileSync(out, Buffer.from('旧内容'));
+
+    await addPageNumbers(src, out);
+
+    expect(await pageCount(out)).toBe(3);
+    expect(fs.existsSync(`${out}.part`)).toBe(false);
+  });
+
+  it('写到一半失败时，原有的文件必须还是完整的旧内容', async () => {
+    const src = await makePdf('src.pdf', 3);
+    const out = path.join(tmpDir, 'precious.pdf');
+    const original = Buffer.from('这是用户原来的文件，不能被毁');
+    fs.writeFileSync(out, original);
+
+    // 在「新内容已经产生、还没替换上去」的这一刻炸掉——这正是断电/磁盘满的形态。
+    // 直接 writeFileSync 到目标的写法在这时已经把旧文件覆盖掉一半了。
+    const spy = vi.spyOn(fs, 'renameSync').mockImplementation(() => {
+      throw new Error('模拟中途失败');
+    });
+
+    await expect(addPageNumbers(src, out)).rejects.toThrow(/模拟中途失败/);
+    spy.mockRestore();
+
+    // 这就是原子性的意义：要么是完整的旧文件，要么是完整的新文件，不存在中间态
+    expect(fs.readFileSync(out).equals(original)).toBe(true);
+    // 失败后必须自己收拾干净，不能把 .part 留给用户
+    expect(fs.existsSync(`${out}.part`)).toBe(false);
+  });
+
+  it('写临时文件本身失败时，也不碰原有的文件', async () => {
+    const src = await makePdf('src.pdf', 3);
+    const out = path.join(tmpDir, 'precious2.pdf');
+    const original = Buffer.from('同样不能被毁');
+    fs.writeFileSync(out, original);
+
+    const spy = vi.spyOn(fs, 'writeFileSync').mockImplementation(() => {
+      throw new Error('模拟磁盘写满');
+    });
+
+    await expect(addPageNumbers(src, out)).rejects.toThrow(/模拟磁盘写满/);
+    spy.mockRestore();
+
+    expect(fs.readFileSync(out).equals(original)).toBe(true);
+    expect(fs.existsSync(`${out}.part`)).toBe(false);
   });
 });

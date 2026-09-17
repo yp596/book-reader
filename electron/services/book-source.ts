@@ -2,6 +2,12 @@
 // undici 7 的 sqlite 缓存会在 Electron 老 Node 上触发 node:sqlite 崩溃
 import * as cheerio from 'cheerio/slim';
 
+/**
+ * 单个章节最多翻几页。
+ * 这是防呆上限：规则写歪或站点返回异常时，不能让抓取无限跑下去。
+ */
+const MAX_CONTENT_PAGES = 20;
+
 export interface BookSourceConfig {
   name: string;
   url: string;
@@ -77,15 +83,59 @@ export class BookSourceCrawler {
     }
   }
 
+  /**
+   * 抓章节正文。配了 next 规则的书源会把正文分在多页，只抓第一页的话
+   * 用户读到的是残缺的正文、且毫无提示（看起来就像书本身那么短）。
+   *
+   * 两个守卫缺一不可：站点在末页常把「下一页」指回自己，坏规则也可能绕成环，
+   * 所以既按 URL 去重、又卡页数上限。
+   */
   async getContent(chapterUrl: string): Promise<string> {
     try {
-      const url = chapterUrl.startsWith('http') ? chapterUrl : `${this.config.url}${chapterUrl}`;
-      const html = await this.fetchHtml(url);
-      const $ = cheerio.load(html);
-      return $(this.config.content.content).text().trim();
+      const parts: string[] = [];
+      const seen = new Set<string>();
+      let url = chapterUrl.startsWith('http') ? chapterUrl : `${this.config.url}${chapterUrl}`;
+
+      for (let page = 0; page < MAX_CONTENT_PAGES; page++) {
+        if (seen.has(url)) break; // 绕回来了，说明已经抓过
+        seen.add(url);
+
+        const html = await this.fetchHtml(url);
+        const $ = cheerio.load(html);
+        parts.push($(this.config.content.content).text().trim());
+
+        const next = this.findNextUrl($, url);
+        if (!next) break;
+        url = next;
+      }
+
+      return parts.filter(Boolean).join('\n');
     } catch (error) {
       console.error('获取章节内容失败:', error);
       return '';
+    }
+  }
+
+  /** 按 next 规则找出下一页地址；规则没配、或页面上找不到，都返回 null 表示到此为止 */
+  private findNextUrl($: cheerio.CheerioAPI, currentUrl: string): string | null {
+    const rule = this.config.content.next;
+    if (!rule) return null;
+    let href: string | undefined;
+    try {
+      href = $(rule).first().attr('href');
+    } catch {
+      return null; // 非法选择器：当没配处理，不要因为一个坏规则让整章抓不到
+    }
+    if (!href) return null;
+
+    // 挡掉「像链接但不是正文下一页」的写法
+    const trimmed = href.trim();
+    if (!trimmed || trimmed === '#' || /^javascript:/i.test(trimmed)) return null;
+
+    try {
+      return new URL(trimmed, currentUrl).toString();
+    } catch {
+      return null;
     }
   }
 

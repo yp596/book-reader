@@ -1,4 +1,4 @@
-import { useState, useEffect } from 'react';
+import { useState, useEffect, useRef } from 'react';
 import { Book } from '../types';
 import { Icon } from './Icon';
 
@@ -31,6 +31,12 @@ export function SemanticSearch({ books, onOpenBook }: SemanticSearchProps) {
   const [status, setStatus] = useState<IndexStatus[]>([]);
   const [buildingId, setBuildingId] = useState<number | null>(null);
   const [allBooks, setAllBooks] = useState<Book[]>(books);
+  // 取消靠一个「当前这一次」的 ownerId：点停止时按它中断，返回后比对不上就当没发生过
+  const searchOwnerRef = useRef<string | null>(null);
+  const buildOwnerRef = useRef<string | null>(null);
+
+  const newOwnerId = (prefix: string) =>
+    `${prefix}-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
 
   useEffect(() => {
     loadStatus();
@@ -54,16 +60,32 @@ export function SemanticSearch({ books, onOpenBook }: SemanticSearchProps) {
   const handleBuild = async (bookId: number) => {
     const api = window.electronAPI;
     if (!api) return;
+    const ownerId = newOwnerId('build');
+    buildOwnerRef.current = ownerId;
     setBuildingId(bookId);
     try {
-      const r = await api.buildRagIndex(bookId);
+      const r = await api.buildRagIndex(bookId, ownerId);
       alert(`建立完成，这本书拆成 ${r.chunks} 段内容，可以开始提问了。`);
       loadStatus();
     } catch (err) {
-      alert(err instanceof Error ? err.message : '建索引失败');
+      // 用户自己按的停止：不弹错误，把话说清楚就行
+      if (buildOwnerRef.current !== ownerId) {
+        setSearchError('已停止建立索引。');
+      } else {
+        alert(err instanceof Error ? err.message : '建索引失败');
+      }
     } finally {
+      buildOwnerRef.current = null;
       setBuildingId(null);
     }
+  };
+
+  const handleStopBuild = () => {
+    const ownerId = buildOwnerRef.current;
+    if (!ownerId) return;
+    buildOwnerRef.current = null;
+    window.electronAPI?.ragAbort(ownerId).catch(() => {});
+    setBuildingId(null);
   };
 
   const handleClear = async (bookId: number) => {
@@ -80,16 +102,28 @@ export function SemanticSearch({ books, onOpenBook }: SemanticSearchProps) {
     if (!query.trim()) return;
     const api = window.electronAPI;
     if (!api) return;
+    const ownerId = newOwnerId('search');
+    searchOwnerRef.current = ownerId;
     setSearching(true);
     setSearchError('');
     setHits([]);
     try {
-      setHits(await api.semanticSearch(query.trim(), 8));
+      setHits(await api.semanticSearch(query.trim(), 8, undefined, ownerId));
     } catch (err) {
-      setSearchError(err instanceof Error ? err.message : '检索失败');
+      if (searchOwnerRef.current !== ownerId) setSearchError('已停止检索。');
+      else setSearchError(err instanceof Error ? err.message : '检索失败');
     } finally {
+      searchOwnerRef.current = null;
       setSearching(false);
     }
+  };
+
+  const handleStopSearch = () => {
+    const ownerId = searchOwnerRef.current;
+    if (!ownerId) return;
+    searchOwnerRef.current = null;
+    window.electronAPI?.ragAbort(ownerId).catch(() => {});
+    setSearching(false);
   };
 
   const openHit = async (hit: RagHit) => {
@@ -128,6 +162,9 @@ export function SemanticSearch({ books, onOpenBook }: SemanticSearchProps) {
           <button className="btn-primary" onClick={handleSearch} disabled={searching}>
             {searching ? '查找中…' : '搜'}
           </button>
+          {searching && (
+            <button className="btn-secondary" onClick={handleStopSearch}>停止</button>
+          )}
         </div>
         {searchError && <p className="search-error">{searchError}</p>}
         {hits.map((h, i) => (
@@ -155,9 +192,13 @@ export function SemanticSearch({ books, onOpenBook }: SemanticSearchProps) {
               <p className="source-url">已整理 {s.chunks} 段 · {s.updated_at ? new Date(s.updated_at).toLocaleString() : ''}</p>
             </div>
             <div className="source-actions" style={{ gap: 8, display: 'flex' }}>
-              <button className="btn-secondary small" onClick={() => handleBuild(s.book_id)} disabled={buildingId === s.book_id}>
-                {buildingId === s.book_id ? '建立中…' : '重新建立'}
-              </button>
+              {buildingId === s.book_id ? (
+                <button className="btn-secondary small" onClick={handleStopBuild}>停止</button>
+              ) : (
+                <button className="btn-secondary small" onClick={() => handleBuild(s.book_id)} disabled={buildingId !== null}>
+                  重新建立
+                </button>
+              )}
               <button className="btn-danger small" onClick={() => handleClear(s.book_id)}>删除</button>
             </div>
           </div>
@@ -169,9 +210,13 @@ export function SemanticSearch({ books, onOpenBook }: SemanticSearchProps) {
               <p className="source-url">尚未建立索引</p>
             </div>
             <div className="source-actions" style={{ gap: 8, display: 'flex' }}>
-              <button className="btn-secondary small" onClick={() => handleBuild(b.id)} disabled={buildingId === b.id}>
-                {buildingId === b.id ? '建立中…' : '建立索引'}
-              </button>
+              {buildingId === b.id ? (
+                <button className="btn-secondary small" onClick={handleStopBuild}>停止</button>
+              ) : (
+                <button className="btn-secondary small" onClick={() => handleBuild(b.id)} disabled={buildingId !== null}>
+                  建立索引
+                </button>
+              )}
             </div>
           </div>
         ))}

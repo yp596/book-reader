@@ -180,6 +180,8 @@ export function Reader({ book, onBack, initialTarget, initialPosition, onOpenBoo
   const [flowMode, setFlowMode] = useState<'paginated' | 'scrolled'>('paginated');
   /** 打开这本书时该用的版式：Markdown 导入的书默认连续滚动，其余按偏好 */
   const initialFlowRef = useRef<'paginated' | 'scrolled'>('paginated');
+  /** 同理：双栏偏好也要在 renderTo 之前就备好——setState 是异步的，读 state 会拿到旧值 */
+  const initialDualRef = useRef(false);
 
   // 检索
   const [keyword, setKeyword] = useState('');
@@ -620,6 +622,8 @@ export function Reader({ book, onBack, initialTarget, initialPosition, onOpenBoo
       const d = exitPosRef.current;
       if (d) api.addReadingPosition({ book_id: book.id, ...d, source: 'exit' });
       api.setSetting(`readingSession:${book.id}`, '');
+      // 释放主进程里的漫画整包缓存（非漫画书按路径匹配不上，是空操作）
+      api.releaseComicCache?.(book.id);
     };
   }, [book.id]);
 
@@ -699,7 +703,10 @@ export function Reader({ book, onBack, initialTarget, initialPosition, onOpenBoo
 
   const applyPos = (pos: SavedPosition) => {
     if (book.file_type === 'epub' && pos.cfi) renditionRef.current?.display(pos.cfi);
-    else if (pos.page != null) setPageIndex(pos.page);
+    // 历史栈里的页码可能来自规整前的旧版本，页数变少后直接跳会落到不存在的空白页
+    else if (pos.page != null) {
+      setPageIndex(totalPages > 0 ? clampPage(pos.page + 1, totalPages) - 1 : pos.page);
+    }
   };
 
   const goBack = () => {
@@ -853,6 +860,7 @@ export function Reader({ book, onBack, initialTarget, initialPosition, onOpenBoo
       setSettings(cfgRef.current);
       fontKeyRef.current = merged.fontFamily;
       setFontKey(merged.fontFamily);
+      initialDualRef.current = merged.dualColumn;
       setDualColumn(merged.dualColumn);
       // Markdown 导入的书默认用连续滚动阅读：一篇笔记从头读到尾才顺，也贴近
       // Typora / Obsidian 的习惯。用户自己切过分页/滚动之后，以他的选择为准。
@@ -945,7 +953,9 @@ export function Reader({ book, onBack, initialTarget, initialPosition, onOpenBoo
     const rendition = epubBook.renderTo(viewerRef.current, {
       width: '100%',
       height: '100%',
-      spread: 'none',
+      // 双栏偏好要在这里就应用：只恢复 state 的话按钮显示为已开启，
+      // 排版却还是单栏，用户得点两次才生效
+      spread: initialDualRef.current ? 'always' : 'none',
       flow: initialFlowRef.current,
     });
 
@@ -1815,6 +1825,12 @@ export function Reader({ book, onBack, initialTarget, initialPosition, onOpenBoo
       el.id = STYLE_NODE_ID;
     }
     el.textContent = css;
+    // 清掉历史遗留的同前缀节点：早期版本用 `预设名-章节` 这种带后缀的 id，
+    // 同一个 epub.js key 下多个样式表叠加时，后插入的未必读得到先前那些，
+    // 结果就是切样式擦不干净的「幽灵样式」。
+    for (const stale of Array.from(doc.querySelectorAll(`[id^="${STYLE_NODE_ID}-"]`))) {
+      if (stale !== el) stale.remove();
+    }
     // 每次都挪到 head 末尾：主题与排版样式同样带 !important，只能靠 DOM 顺序压过它们
     doc.head.appendChild(el);
   };
@@ -1870,25 +1886,26 @@ export function Reader({ book, onBack, initialTarget, initialPosition, onOpenBoo
     // 自定义颜色优先于主题预设；留空则跟随主题
     const bg = t.bgColor || themes[theme].bg;
     const fg = t.textColor || themes[theme].fg;
-    rendition.themes.default({
+    // 一次备齐再交给 epub.js。它内部是 registerRules('default', …) 后 update()，
+    // 而 update() 拿到的是同一个 StyleSheet 对象：先插入的规则会让后面的插入下标失效，
+    // 于是同一个键下的旧值既没被覆盖也没被删掉，改完字号旧规则还在、值不生效。
+    // 合并成一次调用就是整表替换，天然没有残留。
+    const rules: Record<string, any> = {
       'body':
         ` background: ${bg} !important; color: ${fg} !important;` +
         ` line-height: ${lineHeight} !important;` +
         (verticalRef.current ? ' writing-mode: vertical-rl;' : '') +
         (stack ? ` font-family: ${stack}${force ? ' !important' : ''};` : ''),
       'p, div, span': { 'font-size': `${fontSize}px !important` },
-    });
+    };
     if (t.paraSpacing > 0) {
-      rendition.themes.default({
-        'p': { 'margin-bottom': `${t.paraSpacing}em !important` },
-      });
+      rules['p'] = { 'margin-bottom': `${t.paraSpacing}em !important` };
     }
     // 强制统一：连元素级 font-family 一并压过，解决异体字/缺字乱码
     if (force && stack) {
-      rendition.themes.default({
-        '*, *::before, *::after': { 'font-family': `${stack} !important` },
-      });
+      rules['*, *::before, *::after'] = { 'font-family': `${stack} !important` };
     }
+    rendition.themes.default(rules);
   };
 
   const toggleFlow = () => {
@@ -1936,23 +1953,18 @@ export function Reader({ book, onBack, initialTarget, initialPosition, onOpenBoo
   body { font-family: "Noto Serif SC","Songti SC",serif; line-height: 1.8; margin: 0; padding: 24px; color: #222; }
   pre { white-space: pre-wrap; word-break: break-word; font: inherit; margin: 0; }
   img { max-width: 100%; height: auto; display: block; margin: 0 auto; }
-  .bar { position: sticky; top: 0; padding: 10px 16px; background: #f4f4f5; border-bottom: 1px solid #ddd;
-         display: flex; align-items: center; gap: 12px; font-size: 13px; }
-  .bar button { padding: 6px 16px; cursor: pointer; }
-  @media print { .bar { display: none; } body { padding: 0; } }
 </style></head><body>
-<div class="bar"><button onclick="window.print()">打印</button><span>${escapeHtml(book.title)}</span></div>
 ${body}</body></html>`;
   };
 
-  /** 打开打印预览窗口（预览页里的按钮再触发系统打印对话框） */
+  /** 打开预览窗口：把当前页内容单独拿出来看（也可在其中用系统快捷键打印） */
   const handlePrint = async () => {
     const api = window.electronAPI;
     if (!api) return;
     try {
       await api.printPreview(await buildPrintHtml(), book.title);
     } catch (err) {
-      alert(`打印失败：${err instanceof Error ? err.message : '未知错误'}`);
+      alert(`打开预览失败：${err instanceof Error ? err.message : '未知错误'}`);
     }
   };
 
@@ -2557,7 +2569,8 @@ ${body}</body></html>`;
     pushHistory();
     if (book.file_type === 'txt' && typeof hit.target === 'number') {
       setSearchMark(keyword.trim());
-      setPageIndex(hit.target);
+      // 检索用的是当前分页的页码，但跳转时阅读设置可能已经改过、页数也变了
+      setPageIndex(totalPages > 0 ? clampPage(hit.target + 1, totalPages) - 1 : hit.target);
     } else if (book.file_type === 'epub' && typeof hit.target === 'string') {
       const kw = keyword.trim();
       setSearchMark(kw);
@@ -2628,6 +2641,11 @@ ${body}</body></html>`;
     settings.theme === 'light' ? 'reader-light' : settings.theme === 'sepia' ? 'reader-sepia' : '';
   /** 支持文本类操作（朗读/检索/笔记/双栏/脑图）的格式；漫画与 PDF 不适用 */
   const supportsTextOps = book.file_type === 'epub' || book.file_type === 'txt';
+  /**
+   * PDF/漫画的检索、朗读等是整页渲染后取不到文字的，做不到就是做不到。
+   * 但按钮直接隐藏会让用户以为功能不存在，所以保留入口、置灰并说明原因。
+   */
+  const textOpsHint = '该格式按页渲染，无法提取文字，暂不支持此操作';
   /** 缩略图只对「一页就是一张图」的格式有意义；TXT/EPUB 用目录跳转更省 */
   const supportsThumbs = book.file_type === 'pdf' || book.file_type === 'cbz';
   const thumbCount = book.file_type === 'cbz' ? comicPages.length : totalPages;
@@ -2810,9 +2828,13 @@ ${body}</body></html>`;
             <Icon name="palette" size={15} />
           </button>
           <span className="tool-sep" />
-          {supportsTextOps && (
+          {supportsTextOps ? (
             <button onClick={handleHeaderSpeak} className={speaking ? 'active' : ''} title={speaking ? '停止朗读' : '朗读'}>
               <Icon name={speaking ? 'stop' : 'volume'} size={15} />
+            </button>
+          ) : (
+            <button disabled title={`朗读：${textOpsHint}`}>
+              <Icon name="volume" size={15} />
             </button>
           )}
           {book.file_type === 'epub' && (
@@ -2948,22 +2970,34 @@ ${body}</body></html>`;
             {positions.length > 0 ? positions.length : null}
           </button>
           <span className="tool-sep" />
-          {supportsTextOps && (
+          {supportsTextOps ? (
             <button onClick={() => togglePanel('search')} className={panel === 'search' ? 'active' : ''} title="书内检索">
               <Icon name="search" size={15} />
             </button>
+          ) : (
+            <button disabled title={`书内检索：${textOpsHint}`}>
+              <Icon name="search" size={15} />
+            </button>
           )}
-          {supportsTextOps && (
+          {supportsTextOps ? (
             <button onClick={() => togglePanel('ai')} className={panel === 'ai' ? 'active' : ''} title="AI 助手">
               <Icon name="sparkles" size={15} />
             </button>
+          ) : (
+            <button disabled title={`AI 助手：${textOpsHint}`}>
+              <Icon name="sparkles" size={15} />
+            </button>
           )}
-          {supportsTextOps && (
+          {supportsTextOps ? (
             <button
               onClick={toggleDualColumn}
               className={dualColumn ? 'active' : ''}
               title="双栏 / 单栏"
             >
+              <Icon name="side-by-side" size={15} />
+            </button>
+          ) : (
+            <button disabled title={`双栏 / 单栏：${textOpsHint}`}>
               <Icon name="side-by-side" size={15} />
             </button>
           )}
@@ -3405,8 +3439,13 @@ ${body}</body></html>`;
                 <Icon name="network" size={14} />
                 思维导图
               </button>
-              {supportsTextOps && (
+              {supportsTextOps ? (
                 <button className="btn-secondary small" onClick={handleBookMindmap} disabled={aiLoading}>
+                  <Icon name="library" size={14} />
+                  本书思维导图
+                </button>
+              ) : (
+                <button className="btn-secondary small" disabled title={textOpsHint}>
                   <Icon name="library" size={14} />
                   本书思维导图
                 </button>

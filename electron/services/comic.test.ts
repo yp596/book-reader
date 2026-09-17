@@ -1,9 +1,9 @@
-import { describe, it, expect, beforeEach, afterEach } from 'vitest';
+import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import fs from 'fs';
 import os from 'os';
 import path from 'path';
 import JSZip from 'jszip';
-import { naturalCompare, isComicPage, detectArchiveKind, readTarEntries, listComicPages, readComicPage, clearComicCache } from './comic';
+import { naturalCompare, isComicPage, detectArchiveKind, readTarEntries, listComicPages, readComicPage, clearComicCache, releaseComicCacheFor } from './comic';
 
 let tmpDir: string;
 
@@ -13,6 +13,7 @@ beforeEach(() => {
 
 afterEach(() => {
   clearComicCache();
+  vi.restoreAllMocks();
   fs.rmSync(tmpDir, { recursive: true, force: true });
 });
 
@@ -186,5 +187,44 @@ describe('漫画包解析', () => {
   it('条目不存在返回 null', async () => {
     const p = await makeCbz({ '1.jpg': Buffer.from([0xff]) });
     expect(await readComicPage(p, 'missing.jpg')).toBeNull();
+  });
+});
+
+describe('漫画包缓存释放', () => {
+  async function makeCbzAt(fileName: string, pages: string[]): Promise<string> {
+    const zip = new JSZip();
+    for (const name of pages) zip.file(name, Buffer.from([0xff, 0xd8, 0xff]));
+    const p = path.join(tmpDir, fileName);
+    fs.writeFileSync(p, await zip.generateAsync({ type: 'nodebuffer' }));
+    return p;
+  }
+
+  /**
+   * 缓存命中与未命中的返回结果完全一样，没法靠结果判断。
+   * 改看「有没有读盘」：命中缓存的路径在读盘之前就返回了，所以 readFileSync 不会被调用。
+   */
+  it('释放后整包重新读盘，未释放则一直命中缓存', async () => {
+    const p = await makeCbzAt('a.cbz', ['1.jpg']);
+    await listComicPages(p); // 首次必然读盘，把包放进缓存
+
+    const spy = vi.spyOn(fs, 'readFileSync');
+    await listComicPages(p);
+    expect(spy).not.toHaveBeenCalled(); // 命中缓存，不读盘
+
+    releaseComicCacheFor(p);
+    await listComicPages(p);
+    expect(spy).toHaveBeenCalled(); // 已释放，必须重新读
+  });
+
+  it('路径不匹配时不释放，避免误伤另一窗口正在读的书', async () => {
+    const a = await makeCbzAt('a.cbz', ['1.jpg']);
+    const b = await makeCbzAt('b.cbz', ['2.jpg']);
+    await listComicPages(a);
+
+    releaseComicCacheFor(b); // 释放的是另一个包，不该动 a 的缓存
+
+    const spy = vi.spyOn(fs, 'readFileSync');
+    await listComicPages(a);
+    expect(spy).not.toHaveBeenCalled(); // a 的缓存仍在
   });
 });

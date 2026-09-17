@@ -38,6 +38,27 @@ async function loadPdf(filePath: string): Promise<PDFDocument> {
   }
 }
 
+/**
+ * 原子写出 PDF。
+ *
+ * 直接 writeFileSync 到目标路径有两个坑：写到一半失败（磁盘满、进程被杀）会留下
+ * 一个截断的坏 PDF；而用户是可以在保存对话框里挑一个已存在的 PDF 覆盖的，
+ * 那原来的文件就永久没了。
+ * 先写同目录的 .part、再 rename：同分区 rename 是原子的，失败也只会留下 .part，
+ * 目标文件要么是旧的完整版、要么是新的完整版，不存在中间态。
+ */
+async function savePdfAtomic(doc: PDFDocument, outputPath: string): Promise<void> {
+  const buf = await doc.save();
+  const tmp = `${outputPath}.part`;
+  try {
+    fs.writeFileSync(tmp, buf);
+    fs.renameSync(tmp, outputPath);
+  } catch (err) {
+    try { fs.unlinkSync(tmp); } catch { /* 清理失败不掩盖原始错误 */ }
+    throw err;
+  }
+}
+
 /** 合并多个 PDF，返回合并后的总页数 */
 export async function mergePdfs(paths: string[], outputPath: string): Promise<number> {
   if (paths.length === 0) throw new Error('没有可合并的文件');
@@ -47,7 +68,7 @@ export async function mergePdfs(paths: string[], outputPath: string): Promise<nu
     const copied = await out.copyPages(src, src.getPageIndices());
     for (const page of copied) out.addPage(page);
   }
-  fs.writeFileSync(outputPath, await out.save());
+  await savePdfAtomic(out, outputPath);
   return out.getPageCount();
 }
 
@@ -63,7 +84,7 @@ export async function extractPages(
   const out = await PDFDocument.create();
   const copied = await out.copyPages(src, indices);
   for (const page of copied) out.addPage(page);
-  fs.writeFileSync(outputPath, await out.save());
+  await savePdfAtomic(out, outputPath);
   return out.getPageCount();
 }
 
@@ -80,7 +101,7 @@ export async function deletePages(
   if (removing.size >= total) throw new Error('不能删除全部页面');
   // 从后往前删，避免下标偏移
   for (const idx of [...removing].sort((a, b) => b - a)) src.removePage(idx);
-  fs.writeFileSync(outputPath, await src.save());
+  await savePdfAtomic(src, outputPath);
   return src.getPageCount();
 }
 
@@ -99,7 +120,7 @@ export async function rotatePages(
     const current = page.getRotation().angle ?? 0;
     page.setRotation(degrees(((current + angle) % 360 + 360) % 360));
   }
-  fs.writeFileSync(outputPath, await src.save());
+  await savePdfAtomic(src, outputPath);
   return src.getPageCount();
 }
 
@@ -120,7 +141,7 @@ export async function cropPages(
     const dy = height * ratio;
     page.setCropBox(dx, dy, Math.max(width - dx * 2, 1), Math.max(height - dy * 2, 1));
   }
-  fs.writeFileSync(outputPath, await src.save());
+  await savePdfAtomic(src, outputPath);
   return src.getPageCount();
 }
 
@@ -162,7 +183,7 @@ export async function addWatermark(
       rotate: degrees(45),
     });
   }
-  fs.writeFileSync(outputPath, await src.save());
+  await savePdfAtomic(src, outputPath);
   return pages.length;
 }
 
@@ -183,6 +204,6 @@ export async function addPageNumbers(filePath: string, outputPath: string): Prom
       color: rgb(0.35, 0.35, 0.35),
     });
   });
-  fs.writeFileSync(outputPath, await src.save());
+  await savePdfAtomic(src, outputPath);
   return pages.length;
 }

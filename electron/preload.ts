@@ -82,6 +82,8 @@ contextBridge.exposeInMainWorld('electronAPI', {
     ipcRenderer.invoke('books:comicPages', id),
   getComicPage: (id: number, name: string) =>
     ipcRenderer.invoke('books:comicPage', id, name),
+  releaseComicCache: (id: number) =>
+    ipcRenderer.invoke('books:releaseComicCache', id),
   setContentProtection: (flag: boolean) =>
     ipcRenderer.invoke('window:setContentProtection', flag),
   printPreview: (html: string, title: string) =>
@@ -253,10 +255,12 @@ contextBridge.exposeInMainWorld('electronAPI', {
 
   // RAG
   getRagStatus: () => ipcRenderer.invoke('rag:status'),
-  buildRagIndex: (bookId: number) => ipcRenderer.invoke('rag:build', bookId),
+  // ownerId 由调用方生成，用来标识「这一次」请求；不发或已结束时点「停止」是安全的空操作
+  buildRagIndex: (bookId: number, ownerId?: string) => ipcRenderer.invoke('rag:build', bookId, ownerId),
   clearRagIndex: (bookId: number) => ipcRenderer.invoke('rag:clear', bookId),
-  semanticSearch: (query: string, topK: number, bookId?: number) =>
-    ipcRenderer.invoke('rag:search', query, topK, bookId),
+  semanticSearch: (query: string, topK: number, bookId?: number, ownerId?: string) =>
+    ipcRenderer.invoke('rag:search', query, topK, bookId, ownerId),
+  ragAbort: (ownerId: string) => ipcRenderer.invoke('rag:abort', ownerId),
 
   // Events
   // 系统「打开方式」拉起的文件（冷启动时由渲染进程主动来取）

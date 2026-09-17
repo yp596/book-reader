@@ -179,8 +179,8 @@ describe('mergeBackup · 合并与去重', () => {
     const payload = wrap({
       bookmarks: [{ book_id: 1, book_title: '三体', position: 'cfi-1', text: 'x' }],
     });
-    expect(mergeBackup(db, payload)).toBe(1);
-    expect(mergeBackup(db, payload)).toBe(0); // 幂等
+    expect(mergeBackup(db, payload).changed).toBe(1);
+    expect(mergeBackup(db, payload).changed).toBe(0); // 幂等
     expect(state.bookmarks).toHaveLength(1);
   });
 
@@ -209,21 +209,24 @@ describe('mergeBackup · 合并与去重', () => {
   it('设置：不同值才计入变更数', () => {
     const { db, state } = makeFakeDb();
     const payload = wrap({ settings: [{ key: 'theme', value: 'light' }] });
-    expect(mergeBackup(db, payload)).toBe(1);
+    expect(mergeBackup(db, payload).changed).toBe(1);
     expect(state.settings.get('theme')).toBe('light');
-    expect(mergeBackup(db, payload)).toBe(0);
+    expect(mergeBackup(db, payload).changed).toBe(0);
   });
 
   it('找不到对应书籍的书签被跳过', () => {
     const { db, state } = makeFakeDb();
-    const n = mergeBackup(db, wrap({ bookmarks: [{ book_title: '不存在的书', position: 'x' }] }));
-    expect(n).toBe(0);
+    const r = mergeBackup(db, wrap({ bookmarks: [{ book_title: '不存在的书', position: 'x' }] }));
+    expect(r.changed).toBe(0);
+    expect(r.dropped.bookmarks).toBe(1);
     expect(state.bookmarks).toHaveLength(0);
   });
 
   it('空 payload 不报错', () => {
     const { db } = makeFakeDb();
-    expect(mergeBackup(db, wrap({}))).toBe(0);
+    const r = mergeBackup(db, wrap({}));
+    expect(r.changed).toBe(0);
+    expect(r.dropped).toEqual({ books: 0, bookmarks: 0, notes: 0 });
   });
 });
 

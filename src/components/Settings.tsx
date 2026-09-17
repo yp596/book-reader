@@ -178,6 +178,17 @@ export function Settings() {
     } catch { /* 读不到就保持空，不影响其它设置项 */ }
   };
 
+  /** 备份里挂不上书的条目会被丢弃，不说明白用户会以为数据全回来了 */
+  const describeDropped = (dropped?: { books: number; bookmarks: number; notes: number }) => {
+    if (!dropped) return '';
+    const parts: string[] = [];
+    if (dropped.books > 0) parts.push(`${dropped.books} 本书`);
+    if (dropped.bookmarks > 0) parts.push(`${dropped.bookmarks} 条书签`);
+    if (dropped.notes > 0) parts.push(`${dropped.notes} 条笔记`);
+    if (parts.length === 0) return '';
+    return `\n注意：有 ${parts.join('、')}在本地找不到对应书籍，未能恢复。`;
+  };
+
   const loadSettings = async () => {
     const api = window.electronAPI;
     if (!api) return;
@@ -221,6 +232,24 @@ export function Settings() {
     if (silent) return;
     setSaved(true);
     setTimeout(() => setSaved(false), 2000);
+  };
+
+  /**
+   * 单项即时落库。用于「改完立刻要生效」的设置（目前是联网开关）：
+   * 布尔统一落 '1'/'0'，与 handleSave 保持同一编码口径。
+   */
+  const persistSettings = async (patch: Partial<SettingsData>) => {
+    const api = window.electronAPI;
+    if (!api) return;
+    try {
+      for (const [key, value] of Object.entries(patch)) {
+        await api.setSetting(key, typeof value === 'boolean' ? (value ? '1' : '0') : String(value));
+      }
+    } catch (err) {
+      // 写失败必须回读，否则界面显示已开启、实际仍是关闭
+      alert(`设置未能保存：${err instanceof Error ? err.message : '写入失败'}\n已恢复为磁盘上的实际值。`);
+      await loadSettings();
+    }
   };
 
   const handleChange = (key: keyof SettingsData, value: any) => {
@@ -381,7 +410,8 @@ export function Settings() {
         alert(
           `恢复完成：合并 ${r.restored} 条数据` +
             (r.books > 0 ? `，重建 ${r.books} 本书` : '') +
-            `（备份时间：${new Date(r.createdAt).toLocaleString()}）。`,
+            `（备份时间：${new Date(r.createdAt).toLocaleString()}）。` +
+            describeDropped(r.dropped),
         );
       }
     } catch (err) {
@@ -440,7 +470,7 @@ export function Settings() {
     try {
       const r = await api.restoreSnapshot(file);
       await loadSettings();
-      alert(`回退完成，合并 ${r.restored} 条数据。`);
+      alert(`回退完成，合并 ${r.restored} 条数据。${describeDropped(r.dropped)}`);
     } catch (err) {
       alert(`回退失败：${err instanceof Error ? err.message : '存档文件可能已损坏'}`);
     } finally {
@@ -841,6 +871,9 @@ export function Settings() {
                   return;
                 }
                 handleChange('onlineFeaturesEnabled', next);
+                // 立即落盘：这个开关是「不建立任何出站连接」承诺的唯一闸门，
+                // 若还要用户再点一次保存，就会出现「界面已开、功能仍报未联网」的错位
+                void persistSettings({ onlineFeaturesEnabled: next });
               }}
             />
             <span>

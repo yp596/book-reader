@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { splitText, cosine } from './rag';
+import { splitText, cosine, embedTexts } from './rag';
 
 describe('splitText', () => {
   const sec = { label: '第一章', target: '{}', text: '' };
@@ -42,5 +42,29 @@ describe('cosine', () => {
 
   it('反向为 -1', () => {
     expect(cosine([1, 1], [-1, -1])).toBeCloseTo(-1);
+  });
+});
+
+describe('embedTexts 的中断信号', () => {
+  it('请求挂的是「调用方 signal + 超时」的合成信号，调用方一 abort 就跟着中断', async () => {
+    const origFetch = globalThis.fetch;
+    let captured: AbortSignal | undefined;
+    // 进程内推理在测试环境不可用（拿不到 electron 的 userData 目录），会自动回退到 HTTP
+    globalThis.fetch = (async (_url: string, init: any) => {
+      captured = init?.signal;
+      return { ok: true, json: async () => ({ data: [{ index: 0, embedding: [1, 2, 3] }] }) };
+    }) as any;
+    try {
+      const ctrl = new AbortController();
+      const vectors = await embedTexts(['文本'], 'http://127.0.0.1:9', () => {}, ctrl.signal);
+      expect(vectors).toEqual([[1, 2, 3]]);
+      expect(captured).toBeDefined();
+      expect(captured!.aborted).toBe(false);
+      // 从前这里只挂 AbortSignal.timeout，调用方无从中断；现在必须能传下去
+      ctrl.abort();
+      expect(captured!.aborted).toBe(true);
+    } finally {
+      globalThis.fetch = origFetch;
+    }
   });
 });

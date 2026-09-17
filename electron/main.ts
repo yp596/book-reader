@@ -123,6 +123,8 @@ function restoreWindowBounds(saved: { x?: number; y?: number; width: number; hei
 
 function createWindow() {
   const db = DatabaseService.getInstance();
+  // 无头验收模式：只建库与 IPC，不开窗口、不建托盘（见 docs 验收脚本说明）
+  if (process.env.BOOKREADER_HEADLESS_ACCEPTANCE === '1') return;
   const bounds = restoreWindowBounds(db.getWindowBounds());
 
   mainWindow = new BrowserWindow({
@@ -165,6 +167,7 @@ function createWindow() {
  * 就会把别的软件里的 Ctrl+O 抢过来，还会在隐藏窗口上弹出文件框。
  */
 function registerShortcuts() {
+  if (process.env.BOOKREADER_HEADLESS_ACCEPTANCE === '1') return;
   mainWindow?.webContents.on('before-input-event', (event, input) => {
     if (input.type !== 'keyDown') return;
     if (!(input.control || input.meta) || input.alt || input.shift) return;
@@ -177,6 +180,7 @@ function registerShortcuts() {
 /** 托盘：常驻入口，关窗口后仍能唤回 */
 function createTray() {
   if (tray) return;
+  if (process.env.BOOKREADER_HEADLESS_ACCEPTANCE === '1') return;
   const iconPath = path.join(__dirname, '../build/tray.png');
   const image = nativeImage.createFromPath(iconPath);
   tray = new Tray(image.isEmpty() ? nativeImage.createEmpty() : image);

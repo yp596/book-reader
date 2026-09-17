@@ -19,7 +19,7 @@ import {
   pruneSnapshots,
 } from '../services/local-backup';
 import { ModelService } from '../services/model-service';
-import { listComicPages, readComicPage } from '../services/comic';
+import { listComicPages, readComicPage, releaseComicCacheFor } from '../services/comic';
 import { extractCover } from '../services/cover';
 import { contentHash, classifySource, readSourceSnapshot, type SourceSnapshot } from '../services/file-hash';
 import { dirSize, clearSnapshots } from '../services/cache';
@@ -329,7 +329,9 @@ export function registerIpcHandlers() {
       properties: ['openFile', 'multiSelections'],
     });
 
-    if (result.canceled) return [];
+    // 取消要和「一个都没导进来」区分开：返回形状与尾部一致（{imported, failed}），
+    // 调用方才能只写一条解析路径，不用先判断拿到的是数组还是对象
+    if (result.canceled) return { imported: [], failed: [] };
 
     const imported = [];
     const failed: { name: string; reason: string }[] = [];
@@ -352,10 +354,18 @@ export function registerIpcHandlers() {
     const imported = [];
     const failed: { name: string; reason: string }[] = [];
     for (const filePath of filePaths) {
+      // 目录与不存在的路径不能静默跳过：调用方要靠 failed 列出「哪些没进来」，
+      // 悄悄吞掉会让用户拖完文件夹后看到「点了没反应」而毫无解释
+      if (!fs.existsSync(filePath)) {
+        failed.push({ name: path.basename(filePath), reason: '文件不存在，可能已被移动或删除' });
+        continue;
+      }
+      if (!fs.statSync(filePath).isFile()) {
+        failed.push({ name: path.basename(filePath), reason: '这是一个文件夹，请拖入电子书文件本身' });
+        continue;
+      }
       try {
-        if (fs.existsSync(filePath) && fs.statSync(filePath).isFile()) {
-          imported.push(await importOneFile(db, filePath));
-        }
+        imported.push(await importOneFile(db, filePath));
       } catch (err) {
         failed.push({
           name: path.basename(filePath),
@@ -868,6 +878,8 @@ export function registerIpcHandlers() {
   ipcMain.handle('books:toc', async (_event, id: number) => {
     const book = db.getBookById(id) as any;
     if (!book) throw new Error('书籍不存在');
+    // 只有「非空数组」才算有效缓存。空数组曾经也写进过库（导入时解析出 0 章），
+    // 若把它当有效缓存直接返回，之后目录就永远是空的，只能手动重新解析才能救回。
     if (book.toc) {
       try {
         const cached = JSON.parse(book.toc);
@@ -919,19 +931,37 @@ export function registerIpcHandlers() {
     if (db.isSettingOn('screenProtection')) win.setContentProtection(true);
   });
 
-  // 打印预览：把渲染进程生成的打印页开在独立窗口里，由该窗口的「打印」按钮调用系统打印
+  // 内容预览：把渲染进程生成的当页内容开在独立窗口里单独看。
+  // 这个窗口只负责「显示」：关掉 JS 与 sandbox 一起，
+  // 把「渲染进程传来的 HTML」的爆炸半径压到最小。
+  // 要打印的话走系统快捷键（Ctrl+P），不再由应用代劳——本机可能根本没接打印机。
+  let printWin: BrowserWindow | null = null;
+
+  /** 旧窗口必须先关，否则连点会把预览窗口堆满屏幕 */
+  const closePrintWin = () => {
+    if (printWin && !printWin.isDestroyed()) printWin.close();
+  };
+
   ipcMain.handle('books:printPreview', async (_event, html: string, title: string) => {
+    closePrintWin();
     // 走临时文件而非 data: URL——正文可能很大，data: URL 在部分导航场景会被截断
     const tmpFile = path.join(app.getPath('temp'), `book-reader-print-${Date.now()}.html`);
     fs.writeFileSync(tmpFile, html, 'utf-8');
     const win = new BrowserWindow({
       width: 900,
       height: 760,
-      title: title || '打印预览',
-      webPreferences: { contextIsolation: true, nodeIntegration: false },
+      title: title || '内容预览',
+      webPreferences: {
+        sandbox: true,
+        contextIsolation: true,
+        nodeIntegration: false,
+        javascript: false,
+      },
     });
+    printWin = win;
     win.on('closed', () => {
       try { fs.unlinkSync(tmpFile); } catch { /* 已删除则忽略 */ }
+      if (printWin === win) printWin = null;
     });
     await win.loadFile(tmpFile);
     return true;
@@ -970,6 +1000,13 @@ export function registerIpcHandlers() {
     const book = db.getBookById(id) as any;
     if (!book) throw new Error('书籍不存在');
     return readComicPage(book.file_path, name);
+  });
+
+  // 关闭漫画时释放整包缓存：漫画包常有上百 MB，读完还常驻内存没有必要
+  ipcMain.handle('books:releaseComicCache', async (_event, id: number) => {
+    const book = db.getBookById(id) as any;
+    if (book) releaseComicCacheFor(book.file_path);
+    return true;
   });
 
   // 全屏切换
@@ -1308,29 +1345,38 @@ export function registerIpcHandlers() {
   });
 
   // 为一本书建索引（全量重建）：抽文本 → 切分 → embedding → 入库
-  ipcMain.handle('rag:build', async (_event, bookId: number) => {
+  ipcMain.handle('rag:build', async (_event, bookId: number, ownerId?: string) => {
     const book = db.getBookById(bookId) as any;
     if (!book) throw new Error('书籍不存在');
-    const sections = await extractBookSections(book.file_path, '.' + book.file_type, book.toc);
-    const chunks = sections.flatMap(s => splitText({ label: s.label, target: s.target, text: s.text }));
-    if (chunks.length === 0) throw new Error('未能提取正文，无法建索引');
-    const vectors = await embedTexts(
-      chunks.map(c => c.text),
-      getEmbedBaseUrl(),
-      () => db.assertOnlineEnabled('语义检索', getEmbedBaseUrl()),
-    );
-    db.clearBookVectors(bookId);
-    db.saveVectors(
-      chunks.map((c, i) => ({
-        book_id: bookId,
-        chunk_idx: i,
-        chapter: c.label,
-        target: c.target,
-        text: c.text,
-        embedding: JSON.stringify(vectors[i]),
-      })),
-    );
-    return { chunks: chunks.length };
+    const controller = new AbortController();
+    if (ownerId) ragAbortControllers.set(ownerId, controller);
+    try {
+      const sections = await extractBookSections(book.file_path, '.' + book.file_type, book.toc);
+      const chunks = sections.flatMap(s => splitText({ label: s.label, target: s.target, text: s.text }));
+      if (chunks.length === 0) throw new Error('未能提取正文，无法建索引');
+      const vectors = await embedTexts(
+        chunks.map(c => c.text),
+        getEmbedBaseUrl(),
+        () => db.assertOnlineEnabled('语义检索', getEmbedBaseUrl()),
+        controller.signal,
+      );
+      db.clearBookVectors(bookId);
+      db.saveVectors(
+        chunks.map((c, i) => ({
+          book_id: bookId,
+          chunk_idx: i,
+          chapter: c.label,
+          target: c.target,
+          text: c.text,
+          embedding: JSON.stringify(vectors[i]),
+        })),
+      );
+      return { chunks: chunks.length };
+    } finally {
+      // 不留半本索引：中断也走清理，避免「建了一半」被当成完整索引
+      if (controller.signal.aborted) db.clearBookVectors(bookId);
+      if (ownerId) ragAbortControllers.delete(ownerId);
+    }
   });
 
   ipcMain.handle('rag:clear', (_event, bookId: number) => {
@@ -1338,33 +1384,47 @@ export function registerIpcHandlers() {
   });
 
   // 语义检索：问题向量化 → 余弦 TopK
-  ipcMain.handle('rag:search', async (_event, query: string, topK: number, bookId?: number) => {
+  ipcMain.handle('rag:search', async (_event, query: string, topK: number, bookId?: number, ownerId?: string) => {
     if (!query?.trim()) throw new Error('请输入问题');
     const all = db.getAllVectors() as any[];
     const rows = bookId ? all.filter(v => v.book_id === bookId) : all;
     if (rows.length === 0) throw new Error('还没有建立索引，先去语义检索页为书籍建索引');
-    const [qvec] = await embedTexts([query.trim().slice(0, 1000)], getEmbedBaseUrl(), () =>
-      db.assertOnlineEnabled('语义检索', getEmbedBaseUrl()),
-    );
-    const books = db.getAllBooks() as any[];
-    const titleOf = (id: number) => books.find(b => b.id === id)?.title ?? '';
-    return rows
-      .map(r => {
-        let embedding: number[] = [];
-        try {
-          embedding = JSON.parse(r.embedding);
-        } catch { /* 跳过坏向量 */ }
-        return {
-          book_id: r.book_id,
-          bookTitle: titleOf(r.book_id),
-          chapter: r.chapter,
-          target: r.target,
-          excerpt: r.text.slice(0, 300),
-          score: cosine(qvec, embedding),
-        };
-      })
-      .sort((a, b) => b.score - a.score)
-      .slice(0, Math.min(Math.max(topK || 8, 1), 20));
+    const controller = new AbortController();
+    if (ownerId) ragAbortControllers.set(ownerId, controller);
+    try {
+      const [qvec] = await embedTexts(
+        [query.trim().slice(0, 1000)],
+        getEmbedBaseUrl(),
+        () => db.assertOnlineEnabled('语义检索', getEmbedBaseUrl()),
+        controller.signal,
+      );
+      const books = db.getAllBooks() as any[];
+      const titleOf = (id: number) => books.find(b => b.id === id)?.title ?? '';
+      return rows
+        .map(r => {
+          let embedding: number[] = [];
+          try {
+            embedding = JSON.parse(r.embedding);
+          } catch { /* 跳过坏向量 */ }
+          return {
+            book_id: r.book_id,
+            bookTitle: titleOf(r.book_id),
+            chapter: r.chapter,
+            target: r.target,
+            excerpt: r.text.slice(0, 300),
+            score: cosine(qvec, embedding),
+          };
+        })
+        .sort((a, b) => b.score - a.score)
+        .slice(0, Math.min(Math.max(topK || 8, 1), 20));
+    } finally {
+      if (ownerId) ragAbortControllers.delete(ownerId);
+    }
+  });
+
+  // 渲染层发来的「停」：查表中断。查不到（已结束或从未登记）就当已经停了
+  ipcMain.handle('rag:abort', (_event, ownerId: string) => {
+    ragAbortControllers.get(ownerId)?.abort();
   });
 
   // ============ 本地模型管理 ============
@@ -1453,6 +1513,11 @@ export function registerIpcHandlers() {
   // 进程内走逐 token 回调；回退 HTTP 时整包到达（一次性 done，无中间 token）
 
   const aiAbortControllers = new Map<string, AbortController>();
+
+  // 语义检索的中断控制（两条通道：建索引与检索）。
+  // 渲染层只能发 fire-and-forget 的「停」指令，因此主进程必须自己登记：
+  // 请求处理函数在 finally 里注销，停指令查表 abort——重复发停指令是安全的。
+  const ragAbortControllers = new Map<string, AbortController>();
 
   type AiStreamKind = 'summarize' | 'explain' | 'translate' | 'mindmap';
   const AI_STREAM_SLICE: Record<AiStreamKind, number> = {
@@ -1778,6 +1843,11 @@ export function registerIpcHandlers() {
   };
 
   ipcMain.handle('watch:start', async (event, dir: string) => {
+    // 无头验收下不真的起文件监视：脚本会同时遍历书库目录，监视器会把
+    // 验收自造的文件也导进来，污染用例结果（与 createWindow/createTray 同一约定）
+    if (process.env.BOOKREADER_HEADLESS_ACCEPTANCE === '1') {
+      throw new Error('无头验收模式下不启动文件夹监视');
+    }
     const win = BrowserWindow.fromWebContents(event.sender) ?? undefined;
     watcher.start(dir);
     db.setSetting('watchDir', dir);
@@ -1926,9 +1996,10 @@ export function registerIpcHandlers() {
     if (canceled || filePaths.length === 0) return null;
     const payload = await readBackup(filePaths[0]);
     const restoredFiles = await extractBackupFiles(filePaths[0], booksDir());
-    const restored = mergeBackup(db, payload, restoredFiles);
+    const { changed: restored, dropped } = mergeBackup(db, payload, restoredFiles);
     return {
       restored,
+      dropped,
       createdAt: payload.createdAt,
       kind: payload.kind,
       books: restoredFiles.size,
@@ -1947,8 +2018,8 @@ export function registerIpcHandlers() {
   // 从快照回退（纯数据，不含书籍文件；要连书一起找回请用全量备份归档）
   ipcMain.handle('backup:restoreSnapshot', async (_event, file: string) => {
     const payload = await readBackup(file);
-    const restored = mergeBackup(db, payload);
-    return { restored, createdAt: payload.createdAt };
+    const { changed: restored, dropped } = mergeBackup(db, payload);
+    return { restored, dropped, createdAt: payload.createdAt };
   });
 
   // ============ Settings ============

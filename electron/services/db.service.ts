@@ -546,7 +546,9 @@ export class DatabaseService {
   /** 阅读状态：'' 表示按进度自动推断，其余为用户显式标记 */
   setBookStatus(id: number, status: string) {
     this.assertUnlocked(id, '修改阅读状态');
-    const allowed = ['', 'reading', 'finished', 'shelved'];
+    // 'unread' 是显式「未读」标记，与 '' 的「按进度推断」语义不同，必须放行，
+    // 否则它会被规整成空串，用户显式标的未读会被悄悄改成自动推断。
+    const allowed = ['', 'unread', 'reading', 'finished', 'shelved'];
     this.run('UPDATE books SET status = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?', [
       allowed.includes(status) ? status : '',
       id,

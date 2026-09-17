@@ -58,6 +58,7 @@ export async function embedTexts(
   texts: string[],
   baseUrl: string,
   onlineGuard: () => void = () => {},
+  signal?: AbortSignal,
 ): Promise<number[][]> {
   // 优先进程内推理
   try {
@@ -75,7 +76,9 @@ export async function embedTexts(
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ model: 'nomic-embed', input: batch }),
-      signal: AbortSignal.timeout(120000),
+      // 挂上调用方信号，与 ai-service 的 HTTP 回退保持一致：
+      // 缺了它，请求在调用方已经放弃之后仍会跑满超时。
+      signal: signal ? AbortSignal.any([signal, AbortSignal.timeout(120000)]) : AbortSignal.timeout(120000),
     });
     if (!response.ok) throw new Error(`向量服务返回 ${response.status}`);
     const data = await response.json();

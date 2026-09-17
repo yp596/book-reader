@@ -109,7 +109,10 @@
   transition: background var(--transition), color var(--transition);
 }
 
-.reader-actions button:hover { background: var(--bg-hover); color: var(--text-primary); }
+.reader-actions button:hover:not(:disabled) { background: var(--bg-hover); color: var(--text-primary); }
+
+/* 格式不支持的操作保留入口并置灰，悬停时用 title 说明原因 */
+.reader-actions button:disabled { opacity: 0.35; cursor: not-allowed; }
 
 /* 激活态用中性填充 + 底部指示，不用整块紫色 */
 .reader-actions button.active {

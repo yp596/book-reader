@@ -230,19 +230,33 @@ export async function extractBackupFiles(
 /**
  * 合并备份数据到当前库。
  * 幂等：按自然键去重，重复恢复不会产生重复条目。
- * 返回本次实际新增/更新的条数。
  *
  * restoredFiles 是归档里还原出来的书籍文件（备份中的书 id → 本地文件）。
  * 有了它，本地没有的书会被重建；没有它（增量备份或旧版 JSON 备份）则只合并
  * 已有书的批注与进度，不会凭空造出一条打不开的记录。
+ *
+ * dropped 记录因挂不上书而没被恢复的条目数。旧版备份只按 id 关联书，恢复时
+ * 书名对不上就只能丢，但丢多少必须让用户看见，不能悄悄吞掉。
  */
+export interface MergeResult {
+  /** 实际新增/更新的条数 */
+  changed: number;
+  /** 因挂不上书而丢弃的条数，按类别分 */
+  dropped: {
+    books: number;
+    bookmarks: number;
+    notes: number;
+  };
+}
+
 export function mergeBackup(
   db: DatabaseService,
   payload: BackupFile,
   restoredFiles?: Map<number, { filePath: string; coverPath?: string }>,
-): number {
+): MergeResult {
   const d = payload.data ?? {};
   let changed = 0;
+  const dropped = { books: 0, bookmarks: 0, notes: 0 };
 
   const books = db.getAllBooks() as any[];
   const findBook = (title: string) => books.find(b => b.title === title);
@@ -261,7 +275,7 @@ export function mergeBackup(
     const local = findBook(rb.title);
     if (!local) {
       const file = restoredFiles?.get(rb.id);
-      if (!file?.filePath) continue;
+      if (!file?.filePath) { dropped.books++; continue; }
       const newId = db.insertBook({
         title: rb.title,
         author: rb.author ?? undefined,
@@ -270,7 +284,7 @@ export function mergeBackup(
         file_type: rb.file_type,
         hash: rb.hash ?? '',
       }) as number | undefined;
-      if (!newId) continue;
+      if (!newId) { dropped.books++; continue; }
       // 书架上的元信息一并带回，否则恢复出来是一堆「未读、无分类、无评分」的书
       if (rb.progress) db.updateBookProgress(newId, rb.progress);
       if (rb.status) db.setBookStatus(newId, rb.status);
@@ -306,7 +320,7 @@ export function mergeBackup(
   // 3) 书签：按「书名 + 位置」去重
   for (const m of d.bookmarks ?? []) {
     const local = findBook(m.book_title ?? titleOf(m.book_id));
-    if (!local) continue;
+    if (!local) { dropped.bookmarks++; continue; }
     const exists = (db.getBookmarksByBookId(local.id) as any[]).some(x => x.position === m.position);
     if (!exists) {
       db.insertBookmark({ book_id: local.id, position: m.position, text: m.text, color: m.color });
@@ -317,7 +331,7 @@ export function mergeBackup(
   // 4) 笔记：按「书名 + 位置 + 正文」去重
   for (const n of d.notes ?? []) {
     const local = findBook(n.book_title ?? titleOf(n.book_id));
-    if (!local) continue;
+    if (!local) { dropped.notes++; continue; }
     const exists = (db.getNotesByBookId(local.id) as any[]).some(
       x => x.position === n.position && x.note === n.note,
     );
@@ -362,7 +376,7 @@ export function mergeBackup(
     changed++;
   }
 
-  return changed;
+  return { changed, dropped };
 }
 
 // ============ 本地快照 ============

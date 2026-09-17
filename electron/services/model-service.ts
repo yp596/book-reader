@@ -116,6 +116,14 @@ export class ModelService {
       }
       const tmp = dest + '.part';
       const file = fs.createWriteStream(tmp);
+      // 失败路径统一收口：关流、删临时文件、让 Promise 落定。
+      // 从前各分支各写一遍，漏了「响应流出错」这条——pipe 只搬运数据、不转发错误，
+      // 断流时 Promise 永不落定，downloading 集合也清不掉，之后一直报「下载进行中」。
+      const fail = (err: Error) => {
+        try { file.close(); } catch { /* 已关闭则忽略 */ }
+        fs.unlink(tmp, () => {});
+        reject(err);
+      };
       const req = https.get(
         url,
         { headers: { 'User-Agent': 'book-reader' } },
@@ -127,9 +135,7 @@ export class ModelService {
             return;
           }
           if (res.statusCode !== 200) {
-            file.close();
-            fs.unlink(tmp, () => {});
-            reject(new Error(`${label}下载失败：HTTP ${res.statusCode}`));
+            fail(new Error(`${label}下载失败：HTTP ${res.statusCode}`));
             return;
           }
           const total = Number(res.headers['content-length'] || 0);
@@ -145,6 +151,8 @@ export class ModelService {
               });
             }
           });
+          res.on('error', fail);
+          file.on('error', fail);
           res.pipe(file);
           file.on('finish', () => {
             file.close();
@@ -152,11 +160,7 @@ export class ModelService {
           });
         },
       );
-      req.on('error', err => {
-        file.close();
-        fs.unlink(tmp, () => {});
-        reject(err);
-      });
+      req.on('error', fail);
       req.setTimeout(30000, () => req.destroy(new Error('下载超时')));
     });
   }
