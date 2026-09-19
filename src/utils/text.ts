@@ -62,6 +62,24 @@ export const markKeywordHtml = (text: string, keyword: string, opts: KeywordOpti
 };
 
 /**
+ * 命中列表的步进下标，给「上一处 / 下一处」用。
+ *
+ * 三处刻意的取舍：
+ * - **往返而不是到头停住**：翻找的用法是循环浏览，卡在最后一处再按没反应，用户会以为按钮坏了。
+ * - **current < 0 表示「还没跳过」**，不是「第 0 处」——此时按上一个要落到最后一处，
+ *   所以负数要先折算成 0 再减，不能直接对 -1 取模。
+ * - **total 为 0 返回 -1**：没有可去的地方，调用方据此把按钮置灰，
+ *   而不是给一个会在列表里越界的下标。
+ *
+ * current 越界（重新检索后列表变短）不做特判：取模本身就把它拉回有效范围。
+ */
+export const stepHitIndex = (current: number, total: number, delta: number) => {
+  if (total <= 0) return -1;
+  const from = current < 0 ? (delta > 0 ? -1 : 0) : current;
+  return (((from + delta) % total) + total) % total;
+};
+
+/**
  * 取 epub.js 某一章的正文文本。
  *
  * epub.js 的 Section.load() resolve 出来的是 xml.documentElement（即 <html> 元素），
@@ -85,12 +103,38 @@ export const formatMinutes = (seconds: number) => {
   return `${Math.floor(m / 60)} 小时 ${m % 60} 分`;
 };
 
+/**
+ * 距今多久的粗略说法。只给「最近打开」这类关心新旧、不关心精确时刻的列表用；
+ * 需要确切时刻的地方仍走 toLocaleString。
+ */
+export const formatSince = (iso: string) => {
+  const t = new Date(iso).getTime();
+  if (!Number.isFinite(t)) return '';
+  const min = Math.floor((Date.now() - t) / 60000);
+  if (min < 1) return '刚刚';
+  if (min < 60) return `${min} 分钟前`;
+  if (min < 60 * 24) return `${Math.floor(min / 60)} 小时前`;
+  if (min < 60 * 24 * 30) return `${Math.floor(min / (60 * 24))} 天前`;
+  return new Date(iso).toLocaleDateString();
+};
+
 /** 字节数转可读大小 */
 export const formatFileSize = (bytes: number) => {
   if (bytes < 1024) return `${bytes} B`;
   if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`;
   if (bytes < 1024 * 1024 * 1024) return `${(bytes / 1024 / 1024).toFixed(1)} MB`;
   return `${(bytes / 1024 / 1024 / 1024).toFixed(2)} GB`;
+};
+
+/**
+ * PDF 文档权限的展示文案。
+ * 空数组＝无限制（文件里没有权限信息，或权限位全开）；null＝读不出来（非 PDF 也走这条）；
+ * 其余列出被禁止的项。三种情况必须分开说：读不出来时写「无限制」等于替用户担保了一件没验证的事。
+ */
+export const formatPdfPermissions = (denied: string[] | null) => {
+  if (denied === null) return '—';
+  if (denied.length === 0) return '无限制';
+  return `禁止${denied.join('、')}`;
 };
 
 /** 页码钳制到 [1, total] */

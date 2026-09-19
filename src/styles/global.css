@@ -442,6 +442,59 @@ svg { flex-shrink: 0; }
 .continue-go { color: var(--text-muted); display: inline-flex; }
 .continue-card:hover .continue-go { color: var(--text-primary); }
 
+/* ============ 最近打开 ============ */
+.recent-row {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  margin-bottom: 18px;
+  min-width: 0;
+}
+
+.recent-head {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  flex-shrink: 0;
+  font-size: 12px;
+  color: var(--text-muted);
+  white-space: nowrap;
+}
+
+/* 书多时横向滚，不占纵向空间——书架上本来就有整本书的网格，这里只做快捷入口 */
+.recent-items {
+  display: flex;
+  gap: 8px;
+  min-width: 0;
+  overflow-x: auto;
+  padding-bottom: 2px;
+}
+
+.recent-item {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  flex-shrink: 0;
+  max-width: 190px;
+  padding: 7px 12px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  background: var(--bg-card);
+  color: var(--text-primary);
+  text-align: left;
+  cursor: pointer;
+  transition: border-color var(--transition), background var(--transition);
+}
+.recent-item:hover { border-color: var(--border-light); background: var(--bg-hover); }
+
+.recent-title {
+  font-size: 13px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.recent-meta { font-size: 11px; color: var(--text-muted); white-space: nowrap; }
+
 /* ============ 筛选条 ============ */
 .filter-row {
   display: flex;

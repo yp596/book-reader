@@ -235,6 +235,10 @@ declare global {
         size: number;
         mtime: string;
         progress: number;
+        /** 总页数，只有 PDF 有：其余格式的「页」取决于字号或窗口宽度。读不出时为 null */
+        pageCount: number | null;
+        /** 被禁止的 PDF 权限项（如「打印」）；[]＝无限制，null＝没读出来或非 PDF */
+        deniedPermissions: string[] | null;
       }>;
       revealBookFile: (id: number) => Promise<void>;
       copyBookPath: (id: number) => Promise<string>;

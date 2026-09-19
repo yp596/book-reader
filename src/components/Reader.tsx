@@ -4,7 +4,7 @@ import * as pdfjsLib from 'pdfjs-dist';
 import PdfWorkerUrl from 'pdfjs-dist/build/pdf.worker.min.mjs?url';
 import { Book, Bookmark, Note, TocEntry, ReadingPosition } from '../types';
 import { Icon } from './Icon';
-import { escapeHtml, excerptAround, clampPage, lineToPageIndex, paginateText, parseSavedPosition, serializeSavedPosition, findKeyword, buildKeywordRegex, epubSectionText, markKeywordHtml, type SavedPosition, type KeywordOptions } from '../utils/text';
+import { escapeHtml, excerptAround, clampPage, lineToPageIndex, paginateText, parseSavedPosition, serializeSavedPosition, findKeyword, buildKeywordRegex, epubSectionText, markKeywordHtml, stepHitIndex, type SavedPosition, type KeywordOptions } from '../utils/text';
 import { fontStackOf, highlightColorOf, HIGHLIGHT_COLORS, type ThemeName } from '../utils/reader-options';
 import { resolveThemeByClock, type AutoThemeConfig } from '../utils/auto-theme';
 import {
@@ -354,6 +354,18 @@ export function Reader({ book, onBack, initialTarget, initialPosition, onOpenBoo
   const [keyword, setKeyword] = useState('');
   const [hits, setHits] = useState<SearchHit[]>([]);
   const [searching, setSearching] = useState(false);
+  /**
+   * 当前停在第几处命中，-1 表示本轮检索还没跳过。
+   * 与 hits 同生共死：每次重新检索都重置，否则新结果会带着旧下标、
+   * 「第 3 / 2 处」这种读数就出来了（越界由 stepHitIndex 兜住，但读数得自己管）。
+   */
+  const [hitIndex, setHitIndex] = useState(-1);
+  /**
+   * 当前命中项，用于把它滚进可视区。
+   * 命中动辄几十处、列表比面板长，「下一处」跳过去之后按钮在视野外，
+   * 面板里就看不到自己现在停在第几处。
+   */
+  const activeHitRef = useRef<HTMLDivElement | null>(null);
   /** 检索高级选项：区分大小写 / 全词匹配（中文没有词边界，全词对中文不生效） */
   const [searchCaseSensitive, setSearchCaseSensitive] = useState(false);
   const [searchWholeWord, setSearchWholeWord] = useState(false);
@@ -736,6 +748,8 @@ export function Reader({ book, onBack, initialTarget, initialPosition, onOpenBoo
   /** PDF 页面旋转角度（0/90/180/270） */
   const [pdfRotation, setPdfRotation] = useState(0);
   const pdfBaseWidthRef = useRef(0);
+  /** 页面自然高度（scale=1），适应高度 / 适应整页要用，与宽度同一时机取一次 */
+  const pdfBaseHeightRef = useRef(0);
   const pdfWrapRef = useRef<HTMLDivElement>(null);
   /** 高分屏用的设备像素比（上限 2），变化时重渲染当前页 */
   const [dpr, setDpr] = useState(() => Math.min(2, Math.max(1, window.devicePixelRatio || 1)));
@@ -2913,7 +2927,9 @@ ${body}</body></html>`;
     if (!canvasRef.current) return;
     const page = await pdfDoc.getPage(pageNum);
     if (!pdfBaseWidthRef.current) {
-      pdfBaseWidthRef.current = page.getViewport({ scale: 1 }).width;
+      const base = page.getViewport({ scale: 1 });
+      pdfBaseWidthRef.current = base.width;
+      pdfBaseHeightRef.current = base.height;
     }
     // 上一次渲染可能还在往这张 canvas 上画。页数、缩放、旋转快速变化时，
     // pdfjs 会直接抛「Cannot use the same canvas during multiple render() operations」，
@@ -3100,14 +3116,36 @@ ${body}</body></html>`;
     });
   };
 
-  /** PDF 适应宽度 */
-  const fitPdfWidth = () => {
-    if (!pdfBaseWidthRef.current || !pdfWrapRef.current) return;
-    const avail = pdfWrapRef.current.clientWidth - 48;
-    const next = Math.min(3, Math.max(0.5, Math.round((avail / pdfBaseWidthRef.current) * 10) / 10));
+  /**
+   * PDF 适应宽度 / 适应高度 / 适应整页。
+   * 基准是页面自然尺寸（scale=1）。放大缩小的档位是固定 ±0.25，适应类则是按容器算出来的倍数。
+   * 旋转 90°/270° 时 pdfjs 会把页面宽高对调，基准也要跟着对调——否则横版扫描件转过来后
+   * 「适应宽度」会拿原始宽度去除可用宽度，算出来的倍数只够半屏。
+   */
+  const fitPdf = (mode: 'width' | 'height' | 'page') => {
+    const wrap = pdfWrapRef.current;
+    if (!wrap || !pdfBaseWidthRef.current || !pdfBaseHeightRef.current) return;
+    const swapped = pdfRotation % 180 !== 0;
+    const baseW = swapped ? pdfBaseHeightRef.current : pdfBaseWidthRef.current;
+    const baseH = swapped ? pdfBaseWidthRef.current : pdfBaseHeightRef.current;
+    // 横向留白是样式里的 padding:24px；纵向还要再扣掉页面间距（JSX 里内联加的上下 padding）
+    const availW = wrap.clientWidth - 48;
+    const availH = wrap.clientHeight - 48 - typo.pageGap * 2;
+    if (availW <= 0 || availH <= 0) return;
+    const byWidth = availW / baseW;
+    const byHeight = availH / baseH;
+    const raw = mode === 'width' ? byWidth : mode === 'height' ? byHeight : Math.min(byWidth, byHeight);
+    // 向下取整到千分位，而不是四舍五入到 0.1：适应类的语义是「装得进」，取整进位会让画布
+    // 比可用区大一点点，宽度那侧有 max-width:100% 兜着看不出来，高度那侧就是实打实地溢出
+    // （页面比视口高几个像素，底下永远露一条边）。下限 0.5 / 上限 3 与放大缩小档位保持一致。
+    const next = Math.min(3, Math.max(0.5, Math.floor(raw * 1000) / 1000));
     setPdfScale(next);
     queueSaveBookPrefs({ pdfScale: next });
   };
+
+  const fitPdfWidth = () => fitPdf('width');
+  const fitPdfHeight = () => fitPdf('height');
+  const fitPdfPage = () => fitPdf('page');
 
   /** 跳到指定页（TXT / PDF） */
   const jumpToPage = (raw: string) => {
@@ -3439,6 +3477,8 @@ ${body}</body></html>`;
     if (!kw) return;
     setSearching(true);
     setHits([]);
+    // 上一轮的命中下标对新结果没有意义，一起清掉（面板上的「第 x / y 处」也不会留着旧读数）
+    setHitIndex(-1);
     const opts: KeywordOptions = { caseSensitive: searchCaseSensitive, wholeWord: searchWholeWord };
     try {
       if (book.file_type === 'txt') {
@@ -3536,7 +3576,15 @@ ${body}</body></html>`;
     }
   };
 
-  const jumpToHit = (hit: SearchHit) => {
+  /**
+   * 跳到某一处命中。
+   *
+   * keepPanel 是给「上一处 / 下一处」用的：点结果时跳完就该收面板（腾出地方看正文），
+   * 但连续翻找时面板一收、按钮就没了，只能每次重开面板重搜——所以步进走同一个函数、
+   * 只是不收面板。四种格式的坐标系（TXT 页号 / 文档块号 / EPUB href / PDF 页号或屏:块）
+   * 全在这一个函数里分派，步进复用它是为了避免另写一套跳转而慢慢和这套分叉。
+   */
+  const jumpToHit = (hit: SearchHit, keepPanel = false) => {
     pushHistory();
     if (book.file_type === 'txt' && typeof hit.target === 'number') {
       setSearchMark(keyword.trim());
@@ -3564,8 +3612,30 @@ ${body}</body></html>`;
       const [page, index] = hit.target.split(':').map(Number);
       jumpToReflowBlock(page, index);
     }
-    setPanel(null);
+    if (!keepPanel) setPanel(null);
   };
+
+  /**
+   * 上一处 / 下一处。下标越界由 stepHitIndex 往返兜住，
+   * 所以这里只要把新下标落到状态上、再走同一条跳转路径即可。
+   * 历史照记（与点结果完全同一条路径）：连点十处就留十条、退一步退一处，
+   * 与「点十次结果」的既有行为一致，不为步进另立一套规矩。
+   */
+  const stepHit = (delta: number) => {
+    const next = stepHitIndex(hitIndex, hits.length, delta);
+    if (next < 0) return;
+    setHitIndex(next);
+    jumpToHit(hits[next], true);
+  };
+
+  /**
+   * 把当前命中项滚进可视区。用 block:'nearest'——已经在视野里就什么都不做，
+   * 免得每步都让整个面板跳一下（命中项挤在首屏时那种抖动比不滚更烦）。
+   */
+  useEffect(() => {
+    if (hitIndex < 0) return;
+    activeHitRef.current?.scrollIntoView({ block: 'nearest' });
+  }, [hitIndex]);
 
   /** 清除 EPUB 章内检索标红 */
   const clearEpubSearchMarks = () => {
@@ -4043,6 +4113,12 @@ ${body}</body></html>`;
               </button>
               <button onClick={fitPdfWidth} title="适应宽度">
                 <Icon name="fit-width" size={15} />
+              </button>
+              <button onClick={fitPdfHeight} title="适应高度">
+                <Icon name="fit-height" size={15} />
+              </button>
+              <button onClick={fitPdfPage} title="适应整页">
+                <Icon name="fit-page" size={15} />
               </button>
               <button
                 onClick={rotatePdf}
@@ -4737,10 +4813,30 @@ ${body}</body></html>`;
               <p className="empty-text">没有找到相关内容</p>
             )}
             {hits.length > 0 && (
-              <p className="search-count">共找到 {hits.length} 处</p>
+              <div className="search-nav">
+                <span className="search-count">
+                  共找到 {hits.length} 处
+                  {hitIndex >= 0 && ` · 第 ${hitIndex + 1} / ${hits.length} 处`}
+                </span>
+                {/* 命中是「一处所在页/章」而不是每个词：步进就是换到下一个有该词的页/章，
+                    到了末尾再按回到第一处（stepHitIndex 往返），不做到头禁用 */}
+                <span className="search-nav-btns">
+                  <button onClick={() => stepHit(-1)} title="上一处（到头回到最后一处）">
+                    <Icon name="chevron-left" size={14} />上一处
+                  </button>
+                  <button onClick={() => stepHit(1)} title="下一处（到头回到第一处）">
+                    下一处<Icon name="chevron-right" size={14} />
+                  </button>
+                </span>
+              </div>
             )}
             {hits.map((h, i) => (
-              <div key={i} className="mark-item search-hit" onClick={() => jumpToHit(h)}>
+              <div
+                key={i}
+                className={`mark-item search-hit${i === hitIndex ? ' active' : ''}`}
+                ref={i === hitIndex ? activeHitRef : undefined}
+                onClick={() => { setHitIndex(i); jumpToHit(h); }}
+              >
                 <p className="mark-label">{h.label}</p>
                 <p className="mark-quote">...{h.excerpt}...</p>
               </div>

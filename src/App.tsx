@@ -14,6 +14,7 @@ import { Settings } from './components/Settings';
 import { Statistics } from './components/Statistics';
 import { Compare } from './components/Compare';
 import { PdfTools } from './components/PdfTools';
+import { Icon } from './components/Icon';
 
 type View = 'library' | 'detail' | 'reader' | 'rag' | 'vocab' | 'notes' | 'models' | 'settings' | 'stats' | 'help' | 'compare' | 'pdf';
 
@@ -186,6 +187,20 @@ function App() {
     }
   };
 
+  /**
+   * 拖进窗口的文件：库里已有就直接读，没有的先导入再读。
+   * 与系统「打开方式」、双击关联文件走的是同一条 `handleOpenPath`——
+   * 三条入口的取舍（已在库里就直接开、新文件先入库再开）必须一致，
+   * 否则同一个文件用不同方式打开会有两种结果。
+   */
+  const openDroppedPaths = async (paths: string[]) => {
+    for (const p of paths) {
+      try {
+        await handleOpenPath(p);
+      } catch { /* 单个文件失败不中断其余；失败原因由 handleOpenPath 自己提示 */ }
+    }
+  };
+
   const handleOpenFile = async () => {
     try {
       const r = await api.importBook();
@@ -271,6 +286,62 @@ function App() {
   useEffect(() => {
     void api.setWindowTitle(view === 'reader' && currentBook ? currentBook.title : '阅读书架');
   }, [view, currentBook]);
+
+  /**
+   * 窗口级拖拽：拖文件到窗口的任意位置都能直接打开阅读。
+   *
+   * 此前只有书架容器接了拖拽，语义是「导入书库」。两个后果：① 在阅读页、设置页拖文件
+   * 毫无反应；② 更糟的是**没拦默认行为——Chromium 会接管这次拖放，把整页导航到那个
+   * file:// 地址**，界面直接白掉。所以窗口级 dragover 一律拦下：这既是新功能的前置，
+   * 也顺手堵掉一处既有隐患。
+   *
+   * 与书架的分工：书架上拖 = 往书架里加书（既有语义，不动它）；其它地方拖 = 直接打开。
+   * React 的监听挂在根容器上、比 window 上的监听先跑，书架处理完会 preventDefault，
+   * 这里据此判断这次拖放已经有人管了，不重复处理。
+   */
+  const [dropActive, setDropActive] = useState(false);
+  useEffect(() => {
+    const isFileDrag = (e: DragEvent) =>
+      Array.from(e.dataTransfer?.types ?? []).includes('Files');
+
+    const onDragOver = (e: DragEvent) => {
+      // 先读「别人管过没有」，再拦默认行为——顺序反了这层就永远不亮：
+      // preventDefault() 会把 defaultPrevented 置成 true，后读读到的是自己的结果，
+      // 于是每一帧都判定成「书架已经接手了」，遮罩一次都不会出现（走查 D31 逮到的）。
+      const handled = e.defaultPrevented;
+      // 不拦的话落点由 Chromium 决定（拖到非书架页会把页面导航成 file://）
+      e.preventDefault();
+      // 书架自己会亮一层「松开导入」的遮罩，这里再亮一层就是两层罩子
+      setDropActive(isFileDrag(e) && !handled);
+    };
+    const onDragLeave = (e: DragEvent) => {
+      // 在子元素之间移动也会触发 dragleave，relatedTarget 为空才是真的出了窗口
+      if (!e.relatedTarget) setDropActive(false);
+    };
+    const onDrop = (e: DragEvent) => {
+      setDropActive(false);
+      if (e.defaultPrevented) return;
+      e.preventDefault();
+      const paths: string[] = [];
+      for (const f of Array.from(e.dataTransfer?.files ?? [])) {
+        try {
+          const p = window.electronAPI?.getPathForFile(f);
+          if (p) paths.push(p);
+        } catch { /* 单个文件取路径失败不影响其余 */ }
+      }
+      // 拖的不是文件（比如拖选中的文字）时 paths 为空，什么都不做
+      if (paths.length) void openDroppedPaths(paths);
+    };
+
+    window.addEventListener('dragover', onDragOver);
+    window.addEventListener('dragleave', onDragLeave);
+    window.addEventListener('drop', onDrop);
+    return () => {
+      window.removeEventListener('dragover', onDragOver);
+      window.removeEventListener('dragleave', onDragLeave);
+      window.removeEventListener('drop', onDrop);
+    };
+  }, []);
 
   /** 笔记 → 原文：打开对应书籍并定位到批注位置 */
   const handleOpenNote = async (bookId: number, position: string) => {
@@ -410,6 +481,14 @@ function App() {
         />
       )}
       {toast && <div className="toast">{toast}</div>}
+      {dropActive && (
+        <div className="drop-overlay">
+          <div className="drop-hint">
+            <Icon name="download" size={20} />
+            松开直接打开 EPUB / TXT / PDF / DOCX / 漫画
+          </div>
+        </div>
+      )}
     </div>
   );
 }

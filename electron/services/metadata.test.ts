@@ -3,6 +3,7 @@ import fs from 'fs';
 import os from 'os';
 import path from 'path';
 import JSZip from 'jszip';
+import { PDFDocument } from 'pdf-lib';
 import {
   extractMetadata,
   extractToc,
@@ -20,6 +21,8 @@ import {
   decodeTextAuto,
   isGenericChapterTitle,
   splitTxtChapters,
+  readPdfFileInfo,
+  deniedFromAllowed,
 } from './metadata';
 
 let tmpDir: string;
@@ -1128,5 +1131,31 @@ describe('splitTxtChapters（导出 EPUB 用的分章）', () => {
     const text = '== 第一节 ==\n' + gap + '\n== 第二节 ==\n' + gap;
     const chapters = splitTxtChapters(text, { mode: 'regex', regex: '^== .+ ==$' });
     expect(chapters.map(c => c.title)).toEqual(['== 第一节 ==', '== 第二节 ==']);
+  });
+});
+
+describe('PDF 文件信息（页数 / 文档权限）', () => {
+  const makePdf = async (pages: number) => {
+    const doc = await PDFDocument.create();
+    for (let i = 0; i < pages; i++) doc.addPage([595, 842]);
+    const p = path.join(tmpDir, 'info.pdf');
+    fs.writeFileSync(p, await doc.save());
+    return p;
+  };
+
+  it('页数取自 PDF 目录树；没有权限信息的文件给空数组，而不是 null', async () => {
+    const info = await readPdfFileInfo(await makePdf(3));
+    expect(info.pageCount).toBe(3);
+    // pdfjs 对「文件里没有权限信息」回的是 null。那等于未设限制，必须落成空数组；
+    // 若照抄成 null，界面会把「无限制」显示成「—」，等于没答用户的问题（D28 就是这么抓到的）。
+    expect(info.deniedPermissions).toEqual([]);
+  });
+
+  it('权限位取补集：pdfjs 只回「被允许」的项，这里要给出「被禁止」', () => {
+    const allAllowed = [0x04, 0x08, 0x10, 0x20, 0x100, 0x200, 0x400, 0x800];
+    expect(deniedFromAllowed(allAllowed)).toEqual([]);
+    expect(deniedFromAllowed([0x04, 0x10])).toEqual([
+      '修改内容', '添加批注', '填写表单', '辅助功能读取', '页面拼装', '高质量打印',
+    ]);
   });
 });

@@ -1,6 +1,6 @@
 import { useState, useEffect, type CSSProperties } from 'react';
 import { Book } from '../types';
-import { formatFileSize } from '../utils/text';
+import { formatFileSize, formatPdfPermissions, formatSince } from '../utils/text';
 import { coverHue } from '../utils/cover';
 import { Icon, StarRating } from './Icon';
 
@@ -160,6 +160,13 @@ export function BookList({ books, searchQuery, onSelectBook, onShowDetail, onRef
   const continueBook = books
     .filter(b => b.progress > 0 && b.progress < 0.95 && b.last_read_at)
     .sort((a, b) => (b.last_read_at || '').localeCompare(a.last_read_at || ''))[0];
+
+  // 最近打开：按最后打开时间倒序列最近几本。与上面的「继续阅读」是两件事——那个只挑
+  // 未读完的一本，这里是一串入口，已读完的照样在列（「刚看过哪几本」本身就是线索）。
+  const recentBooks = books
+    .filter(b => !!b.last_read_at)
+    .sort((a, b) => (b.last_read_at || '').localeCompare(a.last_read_at || ''))
+    .slice(0, 6);
 
   const handleContextMenu = (e: React.MouseEvent, book: Book) => {
     e.preventDefault();
@@ -441,7 +448,7 @@ ${r.filePath}`);
         const info = await window.electronAPI?.getBookFileInfo(contextMenu.book.id);
         if (info) {
           alert(
-            `书名：${info.title}\n作者：${info.author}\n文件名：${info.fileName}\n格式：${info.fileType.toUpperCase()}\n大小：${formatFileSize(info.size)}\n修改时间：${info.mtime}\n进度：${Math.round(info.progress * 100)}%`,
+            `书名：${info.title}\n作者：${info.author}\n文件名：${info.fileName}\n格式：${info.fileType.toUpperCase()}\n大小：${formatFileSize(info.size)}\n页数：${info.pageCount ? `${info.pageCount} 页` : '—'}\n权限：${formatPdfPermissions(info.deniedPermissions)}\n修改时间：${info.mtime}\n进度：${Math.round(info.progress * 100)}%`,
           );
         }
       } catch (err) {
@@ -857,6 +864,31 @@ ${r.filePath}`);
             </div>
           </div>
           <span className="continue-go"><Icon name="arrow-right" size={18} /></span>
+        </div>
+      )}
+
+      {recentBooks.length > 0 && (
+        <div className="recent-row">
+          <div className="recent-head">
+            <Icon name="clock" size={14} />
+            <span>最近打开</span>
+          </div>
+          <div className="recent-items">
+            {recentBooks.map(b => (
+              <button
+                key={b.id}
+                className="recent-item"
+                onClick={() => onSelectBook(b)}
+                title={`${b.title}｜${b.file_type.toUpperCase()}｜最后打开 ${b.last_read_at ? new Date(b.last_read_at).toLocaleString() : '未知'}`}
+              >
+                <span className="recent-title">{b.title}</span>
+                <span className="recent-meta">
+                  {b.progress >= 0.95 ? '已读完' : `${Math.round(b.progress * 100)}%`}
+                  {b.last_read_at ? ` · ${formatSince(b.last_read_at)}` : ''}
+                </span>
+              </button>
+            ))}
+          </div>
         </div>
       )}
 

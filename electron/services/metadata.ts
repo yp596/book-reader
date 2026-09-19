@@ -150,6 +150,59 @@ async function extractPdfMetadata(filePath: string): Promise<BookMetadata | null
   }
 }
 
+/** PDF 权限位的展示名。数字取自 pdfjs 内部的 PermissionFlag，含义是「该位为 1 即允许」 */
+const PDF_PERMISSION_LABELS: ReadonlyArray<readonly [number, string]> = [
+  [0x04, '打印'],
+  [0x08, '修改内容'],
+  [0x10, '复制内容'],
+  [0x20, '添加批注'],
+  [0x100, '填写表单'],
+  [0x200, '辅助功能读取'],
+  [0x400, '页面拼装'],
+  [0x800, '高质量打印'],
+];
+
+/** 权限位补集：pdfjs 只回「被允许」的项，用户更需要知道「被禁止」哪些 */
+export function deniedFromAllowed(allowed: number[]): string[] {
+  return PDF_PERMISSION_LABELS.filter(([bit]) => !allowed.includes(bit)).map(([, label]) => label);
+}
+
+export interface PdfFileInfo {
+  /** 总页数；需要密码等读不出的情况为 null */
+  pageCount: number | null;
+  /**
+   * 被禁止的权限项；空数组＝无限制，null＝读不出（非 PDF 也走这条路，界面显示「—」）。
+   * 注意别把 pdfjs 的两种 null 当一回事：它返回 null 表示「文件里没有权限信息」，
+   * 也就是未设限制，那是空数组该表示的意思。
+   */
+  deniedPermissions: string[] | null;
+}
+
+/**
+ * 读 PDF 的页数与文档权限，供「文件信息」展示。
+ * 权限位来自加密字典的 /P：pdfjs 只回「被允许」的项，这里取补集转成「被禁止」——
+ * 对用户来说「禁止打印」比「允许打印」更能说明问题。
+ */
+export async function readPdfFileInfo(filePath: string): Promise<PdfFileInfo> {
+  const buffer = fs.readFileSync(filePath);
+  const data = new Uint8Array(buffer).slice().buffer as ArrayBuffer;
+  const pdfDoc = await pdfjsLib.getDocument({ data }).promise;
+  try {
+    let deniedPermissions: string[] | null = null;
+    try {
+      const allowed = await pdfDoc.getPermissions();
+      // null = 全文没有权限信息（pdfjs 的文档口径，即未设限制）→ 空数组；只有抛异常才算读不出
+      deniedPermissions = allowed ? deniedFromAllowed(allowed) : [];
+    } catch {
+      // 权限是附属信息，读不出就留 null，不因为一项把页数一起拖没
+      deniedPermissions = null;
+    }
+    return { pageCount: pdfDoc.numPages, deniedPermissions };
+  } finally {
+    await pdfDoc.destroy();
+  }
+}
+
 /** 书名号 / 双尖括号 / 方头括号，左 ↔ 右 */
 const TITLE_BRACKETS: ReadonlyArray<readonly [string, string]> = [
   ['《', '》'],

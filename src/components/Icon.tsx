@@ -14,7 +14,7 @@ export type IconName =
   | 'copy' | 'printer' | 'image' | 'volume' | 'stop' | 'list' | 'grid' | 'menu' | 'filter'
   | 'alert' | 'info' | 'clock' | 'target' | 'tag' | 'sliders' | 'maximize' | 'rows' | 'columns'
   | 'undo' | 'redo' | 'phone' | 'scan' | 'wand' | 'moon' | 'sun' | 'palette' | 'zoom-in'
-  | 'zoom-out' | 'fit-width' | 'package' | 'moon-zzz' | 'lightning' | 'phone-signal'
+  | 'zoom-out' | 'fit-width' | 'fit-height' | 'fit-page' | 'package' | 'moon-zzz' | 'lightning' | 'phone-signal'
   | 'cloud-up' | 'cloud-down' | 'sort' | 'eraser' | 'side-by-side' | 'code' | 'external-link'
   | 'play' | 'pause' | 'rotate-cw' | 'type' | 'map-pin' | 'battery';
 
@@ -92,6 +92,8 @@ const PATHS: Record<IconName, ReactNode> = {
   'zoom-in': (<><circle cx="11" cy="11" r="7" /><path d="m20 20-3.9-3.9" /><path d="M11 8.5v5" /><path d="M8.5 11h5" /></>),
   'zoom-out': (<><circle cx="11" cy="11" r="7" /><path d="m20 20-3.9-3.9" /><path d="M8.5 11h5" /></>),
   'fit-width': (<><path d="M3.5 12h17" /><path d="m7 8.5-3.5 3.5L7 15.5" /><path d="m17 8.5 3.5 3.5L17 15.5" /></>),
+  'fit-height': (<><path d="M12 3.5v17" /><path d="m8.5 7 3.5-3.5L15.5 7" /><path d="m8.5 17 3.5 3.5L15.5 17" /></>),
+  'fit-page': (<><rect x="4" y="3.5" width="16" height="17" rx="2" /><rect x="8.5" y="8" width="7" height="8" rx="1" /></>),
   package: (<><path d="M12 2.5 20.5 7v10L12 21.5 3.5 17V7Z" /><path d="M3.5 7 12 11.5 20.5 7" /><path d="M12 11.5v10" /></>),
   lightning: (<><path d="M13.5 2 4.5 13.5H11l-.5 8.5 9-11.5H13Z" /></>),
   'phone-signal': (<><path d="M8.5 4.5h-3a1.5 1.5 0 0 0-1.5 1.5v12a1.5 1.5 0 0 0 1.5 1.5h11a1.5 1.5 0 0 0 1.5-1.5v-3" /><path d="M14 4h6v6" /><path d="m20 4-7 7" /></>),

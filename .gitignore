@@ -5,3 +5,19 @@ release/
 *.db
 .env
 .env.local
+
+# tsc / 走查的临时输出
+.tmp-tsc.txt
+
+# 一次性诊断脚本：用完即弃，文件仍在磁盘上，只是不进 git
+# （.tmp-verify/publish.orig.ts 那份旧测试备份已被上面的 .tmp-verify/* 覆盖）
+verify-probe.cjs
+
+# .tmp-verify/ 是走查工作目录，只留下两样：验收脚本与它的固件。
+# 其余一律忽略：截图、日志、一次性探针（probe* / analyze-* / inspect-* / check-* 等）、
+# 被 ui-walk.cjs 取代的旧验收脚本、从代码里抽出来的清单、导出样本。
+# 用白名单而非黑名单：这个目录里工具与垃圾是混着放的，黑名单漏一条就冒一条，
+# 白名单把「什么该留下」写死，以后新增产物自动被忽略、不用再回来补规则。
+.tmp-verify/*
+!.tmp-verify/ui-walk.cjs
+!.tmp-verify/fixtures/

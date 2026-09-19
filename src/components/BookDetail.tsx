@@ -1,6 +1,6 @@
 import { useState, useEffect, type CSSProperties } from 'react';
 import { Book, Bookmark, Note, TocEntry } from '../types';
-import { formatFileSize } from '../utils/text';
+import { formatFileSize, formatPdfPermissions } from '../utils/text';
 import { coverHue } from '../utils/cover';
 import { Icon, StarRating } from './Icon';
 
@@ -82,6 +82,8 @@ export function BookDetail({ book, onBack, onRead }: BookDetailProps) {
   const [notes, setNotes] = useState<Note[]>([]);
   const [marks, setMarks] = useState<Bookmark[]>([]);
   const [fileSize, setFileSize] = useState(0);
+  /** 页数与文档权限：只有 PDF 有固定含义，其余格式为 null，界面显示「—」 */
+  const [pdfInfo, setPdfInfo] = useState<{ pageCount: number | null; deniedPermissions: string[] | null } | null>(null);
   // TXT 目录解析：可选规则、本书指定规则、目录来源（auto/manual）
   const [ruleNames, setRuleNames] = useState<string[]>([]);
   const [tocRule, setTocRule] = useState('');
@@ -110,6 +112,7 @@ export function BookDetail({ book, onBack, onRead }: BookDetailProps) {
       setNotes(n as Note[]);
       setMarks(m as Bookmark[]);
       setFileSize(info.size);
+      setPdfInfo({ pageCount: info.pageCount, deniedPermissions: info.deniedPermissions });
       setRuleNames(rules.rules);
       setTocRule(rules.current);
       setTocSource(rules.source);
@@ -402,6 +405,14 @@ export function BookDetail({ book, onBack, onRead }: BookDetailProps) {
               <div className="info-row"><span>作者</span><span>{book.author || '未知'}</span></div>
               <div className="info-row"><span>格式</span><span>{book.file_type.toUpperCase()}</span></div>
               <div className="info-row"><span>大小</span><span>{formatFileSize(fileSize)}</span></div>
+              <div className="info-row">
+                <span>页数</span>
+                <span>{pdfInfo?.pageCount ? `${pdfInfo.pageCount} 页` : '—'}</span>
+              </div>
+              <div className="info-row">
+                <span>权限</span>
+                <span>{formatPdfPermissions(pdfInfo?.deniedPermissions ?? null)}</span>
+              </div>
               <div className="info-row"><span>分类</span><span>{book.category || '未分类'}</span></div>
               <div className="info-row">
                 <span>上次阅读</span>

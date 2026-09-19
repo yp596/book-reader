@@ -2,7 +2,7 @@ import { ipcMain, dialog, BrowserWindow, app, shell, clipboard } from 'electron'
 import fs from 'fs';
 import path from 'path';
 import { DatabaseService } from '../services/db.service';
-import { extractMetadata, extractToc, docxRender, mdRender, mdToChapters, applyMarkdownImageMap, collectMarkdownTags, collectMarkdownTasks, collectMarkdownLinks, extractBookSections, readPlainTextFile, splitTxtChapters, TXT_TOC_RULE_NAMES, type TxtTocOptions } from '../services/metadata';
+import { extractMetadata, extractToc, docxRender, mdRender, mdToChapters, applyMarkdownImageMap, collectMarkdownTags, collectMarkdownTasks, collectMarkdownLinks, extractBookSections, readPlainTextFile, splitTxtChapters, readPdfFileInfo, TXT_TOC_RULE_NAMES, type TxtTocOptions } from '../services/metadata';
 import { splitText, cosine, embedTexts } from '../services/rag';
 import { AiService } from '../services/ai-service';
 import {
@@ -630,11 +630,25 @@ export function registerIpcHandlers() {
     return db.getBookLinks(bookId, sourceNameOf);
   });
 
-  // 文件属性（名称/大小/修改时间/类型）
-  ipcMain.handle('books:fileInfo', (_event, id: number) => {
+  // 文件属性（名称/大小/修改时间/类型/页数/文档权限）
+  ipcMain.handle('books:fileInfo', async (_event, id: number) => {
     const book = db.getBookById(id) as any;
     if (!book) throw new Error('书籍不存在');
     const stat = fs.existsSync(book.file_path) ? fs.statSync(book.file_path) : null;
+    // 页数与权限只有 PDF 有固定含义：TXT / Markdown 的页数取决于字号与窗口宽度，
+    // EPUB 靠 CFI 动态分页，漫画的「页」是图片张数——都不是这个文件的固有属性，
+    // 与其填一个会变的数字，不如留空让界面显示「—」。
+    let pageCount: number | null = null;
+    let deniedPermissions: string[] | null = null;
+    if (stat && book.file_type === 'pdf') {
+      try {
+        const pdf = await readPdfFileInfo(book.file_path);
+        pageCount = pdf.pageCount;
+        deniedPermissions = pdf.deniedPermissions;
+      } catch {
+        // 文件损坏、需要密码等：两项都留空，界面显示「—」
+      }
+    }
     return {
       title: book.title,
       author: book.author || '未知作者',
@@ -643,6 +657,8 @@ export function registerIpcHandlers() {
       size: stat ? stat.size : 0,
       mtime: stat ? stat.mtime.toLocaleString() : '文件已丢失',
       progress: book.progress ?? 0,
+      pageCount,
+      deniedPermissions,
     };
   });
 

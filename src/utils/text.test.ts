@@ -4,6 +4,9 @@ import {
   excerptAround,
   formatMinutes,
   formatFileSize,
+  formatPdfPermissions,
+  formatSince,
+  stepHitIndex,
   clampPage,
   lineToPageIndex,
   serializeSavedPosition,
@@ -320,5 +323,55 @@ describe('markKeywordHtml 给纯文本打检索标记', () => {
 
   it('关键词为空不标，也避免正则匹配一切', () => {
     expect(markKeywordHtml('正文', '   ')).toBe('');
+  });
+});
+
+describe('检索命中的步进', () => {
+  it('还没跳过时：下一个去第一处，上一个去最后一处', () => {
+    expect(stepHitIndex(-1, 3, 1)).toBe(0);
+    expect(stepHitIndex(-1, 3, -1)).toBe(2);
+  });
+
+  it('中间步进就是加一减一', () => {
+    expect(stepHitIndex(0, 3, 1)).toBe(1);
+    expect(stepHitIndex(2, 3, -1)).toBe(1);
+  });
+
+  it('到头往回绕——翻找是循环的，末尾再按「下一处」该回到第一处', () => {
+    expect(stepHitIndex(2, 3, 1)).toBe(0);
+    expect(stepHitIndex(0, 3, -1)).toBe(2);
+  });
+
+  it('只有一处时原地不动，不该变成 0 号之外的地方', () => {
+    expect(stepHitIndex(0, 1, 1)).toBe(0);
+    expect(stepHitIndex(0, 1, -1)).toBe(0);
+  });
+
+  it('没有命中返回 -1，调用方据此把按钮置灰', () => {
+    expect(stepHitIndex(-1, 0, 1)).toBe(-1);
+    expect(stepHitIndex(2, 0, 1)).toBe(-1);
+  });
+
+  it('重新检索后列表变短、旧下标越界，落回有效范围', () => {
+    expect(stepHitIndex(4, 3, 1)).toBe(2);
+    expect(stepHitIndex(4, 3, -1)).toBe(0);
+  });
+});
+
+describe('文件信息文案', () => {
+  it('权限三态各说各的：无限制 / 列出禁止项 / 读不出', () => {
+    expect(formatPdfPermissions([])).toBe('无限制');
+    expect(formatPdfPermissions(['打印', '复制内容'])).toBe('禁止打印、复制内容');
+    // null 是「读不出来」（含非 PDF），不能顺手写成「无限制」——那是在替用户担保没验证过的事
+    expect(formatPdfPermissions(null)).toBe('—');
+  });
+
+  it('相对时间按档给说法，认不出的时间戳给空串', () => {
+    const ago = (ms: number) => new Date(Date.now() - ms).toISOString();
+    expect(formatSince(ago(30 * 1000))).toBe('刚刚');
+    expect(formatSince(ago(5 * 60000))).toBe('5 分钟前');
+    expect(formatSince(ago(3 * 3600000))).toBe('3 小时前');
+    expect(formatSince(ago(2 * 86400000))).toBe('2 天前');
+    expect(formatSince('不是时间')).toBe('');
   });
 });

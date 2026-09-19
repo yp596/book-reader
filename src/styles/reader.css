@@ -703,12 +703,50 @@
 
 .search-hit { cursor: pointer; transition: border-color var(--transition); }
 .search-hit:hover { border-color: var(--border-light); }
+/* 当前停在第几处：只描边不换底色，免得跟「已选中的摘录」那种实心态混淆 */
+.search-hit.active { border-color: var(--accent); }
 
 .search-count {
   padding: 0 4px 10px;
   font-size: 12px;
   color: var(--text-muted);
 }
+
+/* 命中计数与上一处/下一处同排：计数靠左、按钮靠右。
+   面板只有 330px 左右，计数带上「第 k / N 处」后两者放不下一行——不设 nowrap 的话
+   浏览器会去挤 flex 项，把「上一处」压成「上/一/处」竖排（实测就是这样）。
+   故：两边都不换行、按钮不收缩，宽度不够时整组按钮掉到下一行。 */
+.search-nav {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+.search-nav .search-count { padding-bottom: 10px; white-space: nowrap; }
+.search-nav-btns {
+  display: flex;
+  flex-shrink: 0;
+  gap: 6px;
+  padding-bottom: 10px;
+}
+.search-nav-btns button {
+  display: inline-flex;
+  align-items: center;
+  gap: 2px;
+  height: 26px;
+  padding: 0 8px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  background: var(--bg-card);
+  color: var(--text-secondary);
+  font-family: inherit;
+  font-size: 12px;
+  white-space: nowrap;
+  cursor: pointer;
+  transition: border-color var(--transition), background var(--transition);
+}
+.search-nav-btns button:hover { border-color: var(--border-light); background: var(--bg-hover); }
 
 /* ============ 弹窗 ============ */
 .modal-mask {
