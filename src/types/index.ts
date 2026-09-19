@@ -4,7 +4,8 @@ export interface Book {
   author?: string;
   cover_path?: string;
   file_path: string;
-  file_type: 'epub' | 'txt' | 'pdf' | 'cbz';
+  /** 漫画包四种容器都进库（zip/rar/tar/7z），阅读侧按「是不是漫画」统一判定 */
+  file_type: 'epub' | 'txt' | 'pdf' | 'md' | 'docx' | 'cbz' | 'cbr' | 'cbt' | 'cb7';
   progress: number;
   last_read_at?: string;
   created_at: string;
@@ -77,38 +78,6 @@ export interface ModelProgressInfo {
   total?: number;
 }
 
-export interface TextFilter {
-  id: number;
-  name: string;
-  pattern: string;
-  replacement: string;
-  enabled: number;
-  created_at: string;
-}
-
-export interface FollowedBook {
-  id: number;
-  source_id: number;
-  book_url: string;
-  title: string;
-  last_chapter: string;
-  last_count: number;
-  last_check?: string;
-  has_update: number;
-}
-
-export interface BookSource {
-  id: number;
-  name: string;
-  url: string;
-  search_url: string;
-  chapters_url: string;
-  content_url: string;
-  rules?: string;
-  enabled: number;
-  created_at: string;
-}
-
 export interface Bookmark {
   id: number;
   book_id: number;
@@ -137,23 +106,6 @@ export interface NoteWithBook extends Note {
   book_type?: string;
 }
 
-export interface Chapter {
-  title: string;
-  url: string;
-}
-
-export interface OnlineBook {
-  name: string;
-  author?: string;
-  cover?: string;
-  detail: string;
-}
-
-export interface OnlineChapter {
-  name: string;
-  url: string;
-}
-
 declare global {
   interface Window {
     electronAPI: {
@@ -173,6 +125,26 @@ declare global {
       importOneBook: () => Promise<{ bookId: number; title: string; restored: number; positions: number } | null>;
       saveBookAs: (id: number) => Promise<{ filePath: string } | null>;
       exportBookText: (id: number) => Promise<{ filePath: string; chars: number } | null>;
+      /** 导出为 EPUB：正文按章节重新打包，返回章节数与产出字节数 */
+      exportEpub: (id: number) => Promise<{ filePath: string; chapters: number; bytes: number } | null>;
+      /**
+       * 批量导出为 TXT / EPUB：只选一次目录，逐本写入。
+       * 单本失败只跳过并记下原因，不中断整批；返回的 skipped 交给上层归类展示。
+       */
+      exportBatch: (
+        ids: number[],
+        format: 'txt' | 'epub',
+      ) => Promise<{ dir: string; done: number; skipped: { title: string; reason: string }[] } | null>;
+      /**
+       * 批量提取内嵌图片：只选一次目录，每本书建一个子目录放它的图。
+       * 单本失败只跳过并记下原因，不中断整批；books / images 分别是成功本数与图片张数。
+       */
+      extractBookImages: (ids: number[]) => Promise<{
+        dir: string;
+        books: number;
+        images: number;
+        skipped: { title: string; reason: string }[];
+      } | null>;
       getReadingPositions: (bookId: number) => Promise<ReadingPosition[]>;
       addReadingPosition: (p: {
         book_id: number;
@@ -185,6 +157,11 @@ declare global {
       setCategory: (id: number, category: string) => Promise<void>;
       getCategories: () => Promise<string[]>;
       getBookToc: (id: number) => Promise<TocEntry[]>;
+      /**
+       * 文档型格式（Markdown / DOCX）的正文：整篇渲染好的 HTML + 标题目录。
+       * 不分章不分页——阅读侧按连续滚动显示，目录点到哪个标题就滚到哪里。
+       */
+      getDocHtml: (id: number) => Promise<{ html: string; toc: TocEntry[] }>;
       getTocRules: (id: number) => Promise<{ rules: string[]; current: string; source: string }>;
       reparseToc: (id: number, ruleName?: string) => Promise<TocEntry[]>;
       saveToc: (id: number, entries: TocEntry[]) => Promise<void>;
@@ -193,6 +170,12 @@ declare global {
       /** 关闭漫画后释放主进程的整包缓存（内存回收用，失败不影响阅读） */
       releaseComicCache: (id: number) => Promise<boolean>;
       setContentProtection: (flag: boolean) => Promise<boolean>;
+      setAutoLaunch: (flag: boolean) => Promise<boolean>;
+      getAutoLaunch: () => Promise<boolean>;
+      /** 全局热键（隐藏 / 显示窗口）：立即注册，返回值即是否真的注册上（被别的软件占用时为 false） */
+      setGlobalHotkey: (accel: string) => Promise<boolean>;
+      /** 窗口标题：任务栏悬停时显示的就是它 */
+      setWindowTitle: (title: string) => Promise<void>;
       runPdfOp: (payload: {
         op: 'merge' | 'extract' | 'deletePages' | 'rotate' | 'crop' | 'watermark' | 'pageNumbers';
         sourceIds: number[];
@@ -206,6 +189,11 @@ declare global {
         right: { title: string; lines: string[]; total: number; truncated: boolean };
       }>;
       printPreview: (html: string, title: string) => Promise<boolean>;
+      /** 与预览同源，但直接唤起系统打印对话框；cancelled=用户主动取消，reason 说明失败原因 */
+      printContent: (
+        html: string,
+        title: string,
+      ) => Promise<{ ok: boolean; cancelled?: boolean; reason?: string }>;
       exportPageImage: (
         rect: { x: number; y: number; width: number; height: number },
         title: string,
@@ -262,35 +250,6 @@ declare global {
       refreshBookFromSource: (
         id: number,
       ) => Promise<{ id: number; title: string; sourcePath: string; fileType: string }>;
-      getAllSources: () => Promise<BookSource[]>;
-      addSource: (source: Omit<BookSource, 'id' | 'enabled' | 'created_at'>) => Promise<any>;
-      deleteSource: (id: number) => Promise<void>;
-      searchBooks: (sourceId: number, keyword: string) => Promise<any[]>;
-      getChapters: (sourceId: number, url: string) => Promise<OnlineChapter[]>;
-      getChapterContent: (
-        sourceId: number,
-        book: { url: string; title: string },
-        chapter: { url: string; title: string; idx: number },
-      ) => Promise<string>;
-      exportBookTxt: (
-        sourceId: number,
-        book: { url: string; title: string },
-        chapters: OnlineChapter[],
-      ) => Promise<string | null>;
-      exportBookEpub: (
-        sourceId: number,
-        book: { url: string; title: string },
-        chapters: OnlineChapter[],
-      ) => Promise<string | null>;
-      getFilters: () => Promise<TextFilter[]>;
-      addFilter: (filter: { name: string; pattern: string; replacement: string }) => Promise<any>;
-      toggleFilter: (id: number, enabled: number) => Promise<void>;
-      deleteFilter: (id: number) => Promise<void>;
-      getFollows: () => Promise<FollowedBook[]>;
-      followBook: (follow: { source_id: number; book_url: string; title: string }) => Promise<void>;
-      unfollowBook: (id: number) => Promise<void>;
-      clearFollowUpdate: (id: number) => Promise<void>;
-      checkUpdates: (ids?: number[]) => Promise<{ id: number; title: string; newCount: number }[]>;
       getBookmarks: (bookId: number) => Promise<Bookmark[]>;
       addBookmark: (bookmark: Omit<Bookmark, 'id' | 'created_at'>) => Promise<any>;
       deleteBookmark: (id: number) => Promise<void>;
@@ -310,8 +269,6 @@ declare global {
       getAllWords: () => Promise<WordEntry[]>;
       addWord: (word: { book_id?: number | null; word: string; definition: string; context?: string }) => Promise<any>;
       deleteWord: (id: number) => Promise<void>;
-      syncBackup: () => Promise<boolean>;
-      syncRestore: () => Promise<number>;
       openExternal: (url: string) => Promise<void>;
       startWatch: (dir: string) => Promise<{ dir: string; ok: boolean }>;
       stopWatch: () => Promise<boolean>;
@@ -319,11 +276,10 @@ declare global {
       pickWatchDir: () => Promise<string | null>;
       onWatchImported: (cb: (name: string) => void) => () => void;
       getCacheStats: () => Promise<{
-        chapterCount: number;
         snapshotBytes: number;
         booksBytes: number;
       }>;
-      clearCache: (opts: { snapshots?: boolean; chapterCache?: boolean }) => Promise<Record<string, number>>;
+      clearCache: (opts: { snapshots?: boolean }) => Promise<Record<string, number>>;
       getAppInfo: () => Promise<{
         version: string;
         electron: string;
@@ -332,10 +288,10 @@ declare global {
         platform: string;
         dataDir: string;
         booksDir: string;
+        isPortable: boolean;
       }>;
       clearPrivacy: (opts: {
         positions?: boolean;
-        chapterCache?: boolean;
         timestamps?: boolean;
         clipboard?: boolean;
       }) => Promise<Record<string, number | boolean>>;
@@ -407,6 +363,7 @@ declare global {
       stopModel: (id: string) => Promise<void>;
       onModelProgress: (callback: (info: ModelProgressInfo) => void) => () => void;
       onOpenFile: (callback: (path?: string) => void) => () => void;
+      onCloseTab: (callback: () => void) => () => void;
       takeOpenFile: () => Promise<string | null>;
       takeCrashedSession: () => Promise<{ bookId: number; title: string } | null>;
     };

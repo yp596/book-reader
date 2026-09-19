@@ -8,15 +8,18 @@ import {
   extractToc,
   parseTxtChapters,
   docxToChapters,
+  docxRender,
+  extractBookSections,
   mdToChapters,
-  mdToDocument,
-  imageMediaType,
+  mdRender,
+  applyMarkdownImageMap,
   collectMarkdownTags,
   collectMarkdownTasks,
   collectMarkdownLinks,
   parseFrontmatter,
   decodeTextAuto,
   isGenericChapterTitle,
+  splitTxtChapters,
 } from './metadata';
 
 let tmpDir: string;
@@ -44,6 +47,46 @@ describe('TXT 元数据', () => {
     });
   });
 
+  /**
+   * 原先的实现是「首字符是左书名号就删、末字符是右书名号就删」，两边各判各的、不配对。
+   * 书名号只包住句子一部分时，左书名号被削掉、右书名号留着，书名就成了残句——
+   * 括号残缺比压根不剥更糟，用户看不出原文长什么样。
+   */
+  it('书名号只包住句子一部分时不动它，不能削成半截', async () => {
+    const a = path.join(tmpDir, 'partial-a.txt');
+    fs.writeFileSync(a, '《书名》后接正文\n', 'utf-8');
+    expect((await extractMetadata(a, '.txt'))?.title).toBe('《书名》后接正文');
+
+    const b = path.join(tmpDir, 'partial-b.txt');
+    fs.writeFileSync(b, '【2024】年度报告\n', 'utf-8');
+    expect((await extractMetadata(b, '.txt'))?.title).toBe('【2024】年度报告');
+  });
+
+  it('只有单边括号（首行被截断）时，把那一边剥掉', async () => {
+    const open = path.join(tmpDir, 'open-only.txt');
+    fs.writeFileSync(open, '《孤本\n', 'utf-8');
+    expect((await extractMetadata(open, '.txt'))?.title).toBe('孤本');
+
+    const close = path.join(tmpDir, 'close-only.txt');
+    fs.writeFileSync(close, '书名》\n', 'utf-8');
+    expect((await extractMetadata(close, '.txt'))?.title).toBe('书名');
+  });
+
+  it('带 BOM 的 TXT 仍能剥掉书名号', async () => {
+    const p = path.join(tmpDir, 'bom.txt');
+    // WriteFileSync 的 'utf-8' 不写 BOM，这里显式拼进去。
+    // 能过是因为取书名前每行都过了 trim()，而 trim 的空白集合涵盖 U+FEFF；
+    // 这条用例的作用是把这个依赖钉住——谁把 trim 换掉，这里立刻变红。
+    fs.writeFileSync(p, '﻿《三体》\n', 'utf-8');
+    expect((await extractMetadata(p, '.txt'))?.title).toBe('三体');
+  });
+
+  it('空的书名号原样留着，不剥成空串', async () => {
+    const p = path.join(tmpDir, 'empty-brackets.txt');
+    fs.writeFileSync(p, '《》\n', 'utf-8');
+    expect((await extractMetadata(p, '.txt'))?.title).toBe('《》');
+  });
+
   it('GBK 编码回退解码', async () => {
     const p = path.join(tmpDir, 'gbk.txt');
     // "测试\n" 的 GBK 字节（非法 UTF-8，触发回退）
@@ -55,6 +98,59 @@ describe('TXT 元数据', () => {
     const p = path.join(tmpDir, 'empty.txt');
     fs.writeFileSync(p, '');
     expect(await extractMetadata(p, '.txt')).toBeNull();
+  });
+});
+
+describe('PDF 元数据', () => {
+  /**
+   * 这条用例的价值不在「能不能读出标题」，而在**逼着 pdfjs 真的把 worker 加载起来**。
+   * pdfjs 在 Node 下必然走 fake worker，内部是 `await import(workerSrc)`：
+   * 只要 workerSrc 是裸 Windows 路径（D:\...），ESM loader 就会把 "D:" 当协议名拒绝，
+   * 于是这条链路整体失效——而它失效时不会崩，只是静默返回空，
+   * 表现为「PDF 导入后书名变成文件名、目录恒为空」，极难从现象反推。
+   */
+  it('读出 PDF 内嵌的标题与作者', async () => {
+    const { PDFDocument } = await import('pdf-lib');
+    const doc = await PDFDocument.create();
+    doc.setTitle('测试用 PDF 书名');
+    doc.setAuthor('测试作者');
+    doc.addPage([595, 842]);
+    const p = path.join(tmpDir, 'book.pdf');
+    fs.writeFileSync(p, await doc.save());
+
+    expect(await extractMetadata(p, '.pdf')).toEqual({ title: '测试用 PDF 书名', author: '测试作者' });
+  });
+
+  it('提取 PDF 目录不抛错', async () => {
+    const { PDFDocument } = await import('pdf-lib');
+    const doc = await PDFDocument.create();
+    doc.addPage([595, 842]);
+    const p = path.join(tmpDir, 'toc.pdf');
+    fs.writeFileSync(p, await doc.save());
+
+    // 这份 PDF 没有大纲，断言只到「能走通」为止：worker 起不来时 getDocument 会先抛错
+    await expect(extractToc(p, '.pdf')).resolves.toBeInstanceOf(Array);
+  });
+
+  /**
+   * 「书内检索」和「导出正文」都架在文本层上：页里抽不出 text item，
+   * 检索就恒 0 命中，而且不报错——现象和「这本书里确实没这个词」一模一样。
+   * 所以这条用例的价值是把「文本层真能抽出来」钉死。
+   */
+  it('抽出 PDF 页面的文字层', async () => {
+    const { PDFDocument, StandardFonts } = await import('pdf-lib');
+    const doc = await PDFDocument.create();
+    const font = await doc.embedFont(StandardFonts.Helvetica);
+    const page = doc.addPage([595, 842]);
+    page.drawText('needle in the haystack', { x: 60, y: 700, size: 14, font });
+    const p = path.join(tmpDir, 'text.pdf');
+    fs.writeFileSync(p, await doc.save());
+
+    const sections = await extractBookSections(p, '.pdf');
+    expect(sections.map(s => s.label)).toEqual(['第 1 页']);
+    expect(sections[0].text).toContain('needle in the haystack');
+    // 跳转目标必须是 PDF 原始页序，检索结果点进去才能落到正确的页
+    expect(JSON.parse(sections[0].target)).toEqual({ page: 1 });
   });
 });
 
@@ -610,21 +706,23 @@ describe('Markdown 标签与待办的收集', () => {
   });
 });
 
-describe('Markdown 图片随 EPUB 打包', () => {
+describe('Markdown 图片收进书库', () => {
   const tmpMd = () => fs.mkdtempSync(path.join(os.tmpdir(), 'br-mdimg-'));
 
-  it('相对路径的图片被收进包，并把引用改写成包内路径', async () => {
+  it('相对路径的图片被认出来，引用换成 resolveImage 给的地址', async () => {
     const dir = tmpMd();
     fs.mkdirSync(path.join(dir, 'images'));
     fs.writeFileSync(path.join(dir, 'images', 'pic.png'), Buffer.from([0x89, 0x50]));
     const md = path.join(dir, 'note.md');
     fs.writeFileSync(md, '# 章\n\n![示意图](./images/pic.png)\n\n正文\n', 'utf-8');
 
-    const doc = await mdToDocument(md);
+    const doc = await mdRender(md, () => 'bookfile://local/AAA');
     expect(doc.images).toHaveLength(1);
-    expect(doc.images[0].archiveName).toBe('Images/pic.png');
-    expect(doc.chapters[0].html).toContain('src="../Images/pic.png"');
-    expect(doc.chapters[0].html).not.toContain('./images/pic.png');
+    // 引用原文要原样留着：阅读侧正是按它查表换地址的
+    expect(doc.images[0].src).toBe('./images/pic.png');
+    expect(doc.images[0].absPath).toBe(path.join(dir, 'images', 'pic.png'));
+    expect(doc.html).toContain('src="bookfile://local/AAA"');
+    expect(doc.html).not.toContain('./images/pic.png');
     expect(doc.missingImages).toBe(0);
   });
 
@@ -637,25 +735,25 @@ describe('Markdown 图片随 EPUB 打包', () => {
       'utf-8',
     );
 
-    const doc = await mdToDocument(md);
+    const doc = await mdRender(md, () => 'bookfile://local/AAA');
     expect(doc.images).toHaveLength(0);
     expect(doc.missingImages).toBe(1);
-    expect(doc.chapters[0].html).toContain('https://x.com/a.png');
-    expect(doc.chapters[0].html).toContain('data:image/png;base64,AAA');
-    expect(doc.chapters[0].html).toContain('./nope.png');
+    expect(doc.html).toContain('https://x.com/a.png');
+    expect(doc.html).toContain('data:image/png;base64,AAA');
+    expect(doc.html).toContain('./nope.png');
   });
 
-  it('非图片后缀不会被塞进包里', async () => {
+  it('非图片后缀不会被当成本地图片', async () => {
     const dir = tmpMd();
     fs.writeFileSync(path.join(dir, 'note.txt'), '不是图片');
     const md = path.join(dir, 'n.md');
     fs.writeFileSync(md, '# 章\n\n[附件](./note.txt)\n\n![伪装](./note.txt)\n', 'utf-8');
 
-    const doc = await mdToDocument(md);
+    const doc = await mdRender(md, () => 'bookfile://local/AAA');
     expect(doc.images).toHaveLength(0);
   });
 
-  it('不同目录下的同名图片不互相覆盖', async () => {
+  it('不同目录下的同名图片各算一条，导入侧据此分开落盘', async () => {
     const dir = tmpMd();
     fs.mkdirSync(path.join(dir, 'a'));
     fs.mkdirSync(path.join(dir, 'b'));
@@ -664,15 +762,15 @@ describe('Markdown 图片随 EPUB 打包', () => {
     const md = path.join(dir, 'n.md');
     fs.writeFileSync(md, '# 章\n\n![一](a/pic.png)\n\n![二](b/pic.png)\n', 'utf-8');
 
-    const doc = await mdToDocument(md);
+    const doc = await mdRender(md);
     expect(doc.images).toHaveLength(2);
-    expect(new Set(doc.images.map(i => i.archiveName)).size).toBe(2);
+    expect(new Set(doc.images.map(i => i.absPath)).size).toBe(2);
+    expect(new Set(doc.images.map(i => i.src)).size).toBe(2);
   });
 });
 
-describe('Markdown 图片：端到端（Markdown → EPUB → 取回）', () => {
-  it('导入后图片确实在包里，且能被按字节取回', async () => {
-    const { buildEpub } = await import('./epub-export');
+describe('Markdown 图片：端到端（导入落盘 → 阅读时换回地址）', () => {
+  it('图片被复制进书库，读的时候按引用原文换回书库地址', async () => {
     const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'br-md-e2e-'));
     fs.mkdirSync(path.join(dir, 'images'));
     const pngBytes = Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 0x01, 0x02]);
@@ -680,24 +778,92 @@ describe('Markdown 图片：端到端（Markdown → EPUB → 取回）', () => 
     const md = path.join(dir, '笔记.md');
     fs.writeFileSync(md, '# 我的笔记\n\n看这张图：\n\n![截图](./images/shot.png)\n', 'utf-8');
 
-    // 与导入链路相同的两步：解析 → 组装 EPUB
-    const doc = await mdToDocument(md);
-    const buf = await buildEpub(
-      '我的笔记',
-      doc.chapters,
-      doc.images.map(i => ({ ...i, mediaType: imageMediaType(i.sourcePath) })),
+    // 与导入链路相同的两步：渲染时登记要搬的图 → 按序号落盘并留下映射
+    const assetsDir = fs.mkdtempSync(path.join(os.tmpdir(), 'br-md-assets-'));
+    const copied: { src: string; absPath: string; name: string; url: string }[] = [];
+    await mdRender(md, (abs, src) => {
+      const name = `img-${copied.length + 1}${path.extname(abs).toLowerCase()}`;
+      const url = `bookfile://local/${name}`;
+      copied.push({ src, absPath: abs, name, url });
+      return url;
+    });
+    const map: Record<string, string> = {};
+    for (const img of copied) {
+      fs.copyFileSync(img.absPath, path.join(assetsDir, img.name));
+      map[img.src] = img.url;
+    }
+
+    expect(fs.readFileSync(path.join(assetsDir, 'img-1.png'))).toEqual(pngBytes);
+
+    // 阅读侧的处境：书库里的 .md 与收进来的图不在同一棵目录树下，
+    // 相对路径在那个位置必然找不到，只能按映射换
+    const storedDir = fs.mkdtempSync(path.join(os.tmpdir(), 'br-md-store-'));
+    const stored = path.join(storedDir, '1712345678-笔记.md');
+    fs.copyFileSync(md, stored);
+    const read = await mdRender(stored);
+    expect(read.missingImages).toBe(1);
+
+    const html = applyMarkdownImageMap(read.html, map);
+    expect(html).toContain('src="bookfile://local/img-1.png"');
+    expect(html).not.toContain('./images/shot.png');
+  });
+
+  it('映射为空时正文原样返回，不会把外链也改掉', () => {
+    const html = '<p><img src="./a.png" alt="a"><img src="https://x.com/b.png" alt="b"></p>';
+    expect(applyMarkdownImageMap(html, {})).toBe(html);
+    expect(applyMarkdownImageMap(html, { './a.png': 'bookfile://local/1.png' })).toContain(
+      'src="bookfile://local/1.png"',
     );
+    expect(applyMarkdownImageMap(html, { './a.png': 'bookfile://local/1.png' })).toContain(
+      'https://x.com/b.png',
+    );
+  });
+});
 
-    const zip = await JSZip.loadAsync(buf);
-    const entry = zip.file('OEBPS/Images/shot.png');
-    expect(entry).toBeTruthy();
-    expect(await entry!.async('nodebuffer')).toEqual(pngBytes);
+describe('Markdown 标题锚点与目录', () => {
+  const tmpMd = () => fs.mkdtempSync(path.join(os.tmpdir(), 'br-mdtoc-'));
 
-    const chapter = await zip.file('OEBPS/Text/ch1.xhtml')!.async('string');
-    expect(chapter).toContain('../Images/shot.png');
+  it('标题按出现顺序编号，目录指到对应锚点', async () => {
+    const dir = tmpMd();
+    const md = path.join(dir, 'n.md');
+    fs.writeFileSync(md, '# 一\n\n正文\n\n## 二\n\n### 三\n\n## 四\n', 'utf-8');
 
-    const opf = await zip.file('OEBPS/content.opf')!.async('string');
-    expect(opf).toContain('href="Images/shot.png"');
+    const doc = await mdRender(md);
+    expect(doc.toc.map(t => t.label)).toEqual(['一', '二', '三', '四']);
+    expect(doc.toc.map(t => t.href)).toEqual(['#dh-0', '#dh-1', '#dh-2', '#dh-3']);
+    expect(doc.html).toContain('<h1 id="dh-0">');
+    expect(doc.html).toContain('<h3 id="dh-2">');
+  });
+
+  it('引用块里的标题也参与编号，正文锚点不会与目录错位', async () => {
+    const dir = tmpMd();
+    const md = path.join(dir, 'n.md');
+    fs.writeFileSync(md, '# 一\n\n> ## 引文里的标题\n\n## 二\n', 'utf-8');
+
+    const doc = await mdRender(md);
+    expect(doc.toc.map(t => t.label)).toEqual(['一', '引文里的标题', '二']);
+    // 关键：id 是渲染完成后按 DOM 顺序给的，不是按 token 数——否则这里会错位
+    expect(doc.html).toContain('<h2 id="dh-1">引文里的标题</h2>');
+    expect(doc.html).toContain('<h2 id="dh-2">二</h2>');
+  });
+
+  it('标题里的行内格式被剥掉，目录只留纯文本', async () => {
+    const dir = tmpMd();
+    const md = path.join(dir, 'n.md');
+    fs.writeFileSync(md, '# 第一章 **重点** 与 `代码`\n\n正文\n', 'utf-8');
+
+    const doc = await mdRender(md);
+    expect(doc.toc[0].label).toBe('第一章 重点 与 代码');
+  });
+
+  it('没有标题时目录为空，正文照常渲染', async () => {
+    const dir = tmpMd();
+    const md = path.join(dir, 'n.md');
+    fs.writeFileSync(md, '只有一段正文，没有标题。\n', 'utf-8');
+
+    const doc = await mdRender(md);
+    expect(doc.toc).toEqual([]);
+    expect(doc.html).toContain('只有一段正文');
   });
 });
 
@@ -745,14 +911,14 @@ describe('frontmatter 属性解析', () => {
     expect(parseFrontmatter(text)).toEqual({ link: ['https://example.com'] });
   });
 
-  it('mdToDocument 会把属性一并带出来', async () => {
+  it('mdRender 会把属性一并带出来', async () => {
     const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'br-fm-'));
     const md = path.join(dir, 'n.md');
     fs.writeFileSync(md, '---\nstatus: 已完成\nrating: 5\n---\n\n# 章\n正文\n', 'utf-8');
-    const doc = await mdToDocument(md);
+    const doc = await mdRender(md);
     expect(doc.props).toEqual({ status: ['已完成'], rating: ['5'] });
     // 正文里的信息块仍在（原文完整保留）
-    expect(doc.chapters[0].html).toContain('frontmatter');
+    expect(doc.html).toContain('frontmatter');
   });
 });
 
@@ -765,7 +931,7 @@ describe('Markdown 公式与代码高亮', () => {
 
   it('行内与块级公式都渲染成 MathML', async () => {
     const p = write('math.md', '# 章\n\n质能方程 $E = mc^2$ 的含义。\n\n$$\n\int_0^1 x\,dx\n$$\n');
-    const html = (await mdToDocument(p)).chapters[0].html;
+    const html = (await mdRender(p)).html;
 
     expect(html).toContain('<math xmlns="http://www.w3.org/1998/Math/MathML"');
     expect(html).not.toContain('$E = mc^2$');
@@ -774,7 +940,7 @@ describe('Markdown 公式与代码高亮', () => {
 
   it('价格里的美元符号不会被误判成公式', async () => {
     const p = write('price.md', '# 章\n\n这本书 $5 到 $10，符号 $ 单独出现也不算。\n');
-    const html = (await mdToDocument(p)).chapters[0].html;
+    const html = (await mdRender(p)).html;
 
     expect(html).not.toContain('<math');
     expect(html).toContain('$5');
@@ -783,7 +949,7 @@ describe('Markdown 公式与代码高亮', () => {
 
   it('代码块里的 $ 不渲染成公式', async () => {
     const p = write('code-dollar.md', '# 章\n\n```sh\necho $x$ 只是 shell 变量\n```\n');
-    const html = (await mdToDocument(p)).chapters[0].html;
+    const html = (await mdRender(p)).html;
 
     expect(html).not.toContain('<math');
     expect(html).toContain('$x$');
@@ -791,7 +957,7 @@ describe('Markdown 公式与代码高亮', () => {
 
   it('写了语言的代码块会高亮', async () => {
     const p = write('hl.md', '# 章\n\n```js\nconst a = 1;\n```\n');
-    const html = (await mdToDocument(p)).chapters[0].html;
+    const html = (await mdRender(p)).html;
 
     expect(html).toContain('hljs-keyword');
     expect(html).toContain('const');
@@ -799,7 +965,7 @@ describe('Markdown 公式与代码高亮', () => {
 
   it('不认识的语言不高亮也不报错，代码原样留着', async () => {
     const p = write('hl-bad.md', '# 章\n\n```nosuchlang\nfoo bar\n```\n');
-    const html = (await mdToDocument(p)).chapters[0].html;
+    const html = (await mdRender(p)).html;
 
     expect(html).toContain('foo bar');
     expect(html).not.toContain('hljs-keyword');
@@ -807,8 +973,160 @@ describe('Markdown 公式与代码高亮', () => {
 
   it('非法公式不抛错，退化成可见的错误提示而不是吃掉正文', async () => {
     const p = write('bad-math.md', '# 章\n\n$\bad{$ 之后还有正文。\n');
-    const doc = await mdToDocument(p);
-    expect(doc.chapters[0].html).toContain('katex-error');
-    expect(doc.chapters[0].html).toContain('之后还有正文');
+    const doc = await mdRender(p);
+    expect(doc.html).toContain('katex-error');
+    expect(doc.html).toContain('之后还有正文');
+  });
+});
+
+describe('DOCX 原生渲染', () => {
+  const CONTENT_TYPES =
+    '<?xml version="1.0"?><Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"><Default Extension="xml" ContentType="application/xml"/><Override PartName="/word/document.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.document.main+xml"/></Types>';
+
+  /** 造一份最小可解析的 .docx：正文由调用方拼 w:p 片段 */
+  async function makeDocx(body: string): Promise<string> {
+    const zip = new JSZip();
+    zip.file('[Content_Types].xml', CONTENT_TYPES);
+    zip.file(
+      'word/document.xml',
+      `<?xml version="1.0"?><w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:body>${body}</w:body></w:document>`,
+    );
+    const p = path.join(tmpDir, 'render.docx');
+    fs.writeFileSync(p, await zip.generateAsync({ type: 'nodebuffer' }));
+    return p;
+  }
+
+  const head = (level: number, text: string) =>
+    `<w:p><w:pPr><w:pStyle w:val="Heading${level}"/></w:pPr><w:r><w:t>${text}</w:t></w:r></w:p>`;
+  const para = (text: string) => `<w:p><w:r><w:t>${text}</w:t></w:r></w:p>`;
+
+  it('整篇渲染成 HTML，标题带锚点且目录指到对应标题', async () => {
+    const p = await makeDocx(head(1, '第一章') + para('正文一') + head(2, '第一节') + para('正文二'));
+
+    const doc = await docxRender(p);
+    expect(doc.toc.map(t => t.label)).toEqual(['第一章', '第一节']);
+    // 与 Markdown 共用同一套锚点前缀，两边的目录跳转走的是同一条路
+    expect(doc.toc.map(t => t.href)).toEqual(['#dh-0', '#dh-1']);
+    expect(doc.html).toContain('<h1 id="dh-0">第一章</h1>');
+    expect(doc.html).toContain('<h2 id="dh-1">第一节</h2>');
+    // 正文留在 HTML 里，不是被拆成纯文本
+    expect(doc.html).toContain('<p>正文一</p>');
+  });
+
+  it('没有标题时目录为空，正文照常渲染', async () => {
+    const p = await makeDocx(para('只有一段正文，没有标题。'));
+
+    const doc = await docxRender(p);
+    expect(doc.toc).toEqual([]);
+    expect(doc.html).toContain('只有一段正文');
+  });
+
+  it('extractToc 对 .docx 走原生渲染，取到的锚点与阅读侧一致', async () => {
+    const p = await makeDocx(head(1, '上篇') + para('正文'));
+
+    const toc = await extractToc(p, '.docx');
+    expect(toc.map(t => t.label)).toEqual(['上篇']);
+    // 关键：目录里的 href 必须与 docxRender 给出的完全一致，否则点目录会落空
+    expect(toc[0].href).toBe((await docxRender(p)).toc[0].href);
+  });
+
+  it('正文能抽成检索段落，切点落在标题上', async () => {
+    const p = await makeDocx(head(1, '第一章') + para('甲段') + head(2, '第二节') + para('乙段'));
+
+    const sections = await extractBookSections(p, '.docx');
+    expect(sections.map(s => s.label)).toEqual(['第一章', '第二节']);
+    expect(sections[0].text).toContain('甲段');
+    expect(sections[1].text).toContain('乙段');
+    expect(JSON.parse(sections[0].target)).toEqual({ href: '#dh-0' });
+  });
+
+  it('图片内联成 data: 地址，正文自带内容（所以不必像 Markdown 那样搬图建映射）', async () => {
+    // 1x1 的 PNG，够验证「图有没有跟着 HTML 走」这件事
+    const png = Buffer.from(
+      'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==',
+      'base64',
+    );
+    const zip = new JSZip();
+    zip.file('[Content_Types].xml', CONTENT_TYPES.replace('</Types>', '<Default Extension="png" ContentType="image/png"/></Types>'));
+    zip.file(
+      'word/document.xml',
+      '<?xml version="1.0"?><w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships" xmlns:wp="http://schemas.openxmlformats.org/drawingml/2006/wordprocessingDrawing" xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main" xmlns:pic="http://schemas.openxmlformats.org/drawingml/2006/picture"><w:body>' +
+        head(1, '第一章') +
+        '<w:p><w:r><w:drawing><wp:inline><a:graphic><a:graphicData uri="http://schemas.openxmlformats.org/drawingml/2006/picture"><pic:pic><pic:blipFill><a:blip r:embed="rId5"/></pic:blipFill><pic:spPr/></pic:pic></a:graphicData></a:graphic></wp:inline></w:drawing></w:r></w:p>' +
+        '</w:body></w:document>',
+    );
+    zip.file(
+      'word/_rels/document.xml.rels',
+      '<?xml version="1.0"?><Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId5" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/image" Target="media/image1.png"/></Relationships>',
+    );
+    zip.file('word/media/image1.png', png);
+    const p = path.join(tmpDir, 'img.docx');
+    fs.writeFileSync(p, await zip.generateAsync({ type: 'nodebuffer' }));
+
+    const doc = await docxRender(p);
+    // 一旦 mammoth 不再默认内联，这里会变成指向 word/media 的相对路径——
+    // 那意味着 docx 也得像 Markdown 一样把图搬进书库，构建时就得知道
+    expect(doc.html).toContain('src="data:image/png;base64,');
+  });
+});
+
+describe('Markdown 抽检索段落', () => {
+  it('按标题切段，跳转目标就是标题锚点', async () => {
+    const p = path.join(tmpDir, 'sections.md');
+    fs.writeFileSync(p, '# 一\n\n甲段\n\n## 二\n\n乙段\n', 'utf-8');
+
+    const sections = await extractBookSections(p, '.md');
+    expect(sections.map(s => s.label)).toEqual(['一', '二']);
+    expect(sections[0].text).toContain('甲段');
+    expect(JSON.parse(sections[1].target)).toEqual({ href: '#dh-1' });
+  });
+
+  it('没有标题时整篇作为一段，不会一段都抽不出来', async () => {
+    const p = path.join(tmpDir, 'flat.md');
+    fs.writeFileSync(p, '只有正文，没有标题。\n', 'utf-8');
+
+    const sections = await extractBookSections(p, '.md');
+    expect(sections).toHaveLength(1);
+    expect(sections[0].text).toContain('只有正文');
+  });
+});
+
+describe('splitTxtChapters（导出 EPUB 用的分章）', () => {
+  /** 章节之间的正文，长度要超过 parseTxtChapters 的命中间距阈值（1000 字符） */
+  const gap = '正文内容'.repeat(300);
+
+  it('按目录项的名字切分，标题行即章节名', () => {
+    const text = '第一章 科学边界\n' + gap + '\n第二章 台球\n' + gap;
+    const chapters = splitTxtChapters(text);
+    expect(chapters.map(c => c.title)).toEqual(['第一章 科学边界', '第二章 台球']);
+    expect(chapters[0].text).toContain('正文内容');
+    expect(chapters[1].text).toContain('正文内容');
+  });
+
+  it('标题行本身不重复出现在正文里', () => {
+    const text = '第一章 起\n' + gap;
+    expect(splitTxtChapters(text)[0].text.includes('第一章 起')).toBe(false);
+  });
+
+  it('前置目录页不会造出一批只有标题的空章节', () => {
+    const tocPage = '目录\n第一章 开始\n第二章 继续\n';
+    const body = '第一章 开始\n' + gap + '\n第二章 继续\n' + gap;
+    const titled = splitTxtChapters(tocPage + body).filter(c => c.title);
+    expect(titled.map(c => c.title)).toEqual(['第一章 开始', '第二章 继续']);
+    // 空壳章节是目录页带来的典型伪影：每条有标题的章节都必须真有正文
+    expect(titled.every(c => c.text.trim().length > 0)).toBe(true);
+  });
+
+  it('一条目录项都没命中时整篇作为一章，标题留空交给调用方兜底', () => {
+    const chapters = splitTxtChapters('只有正文，没有任何章节标题。\n第二行。\n');
+    expect(chapters).toHaveLength(1);
+    expect(chapters[0].title).toBe('');
+    expect(chapters[0].text).toContain('只有正文');
+  });
+
+  it('尊重传入的目录规则，导出的分章与阅读页目录一致', () => {
+    const text = '== 第一节 ==\n' + gap + '\n== 第二节 ==\n' + gap;
+    const chapters = splitTxtChapters(text, { mode: 'regex', regex: '^== .+ ==$' });
+    expect(chapters.map(c => c.title)).toEqual(['== 第一节 ==', '== 第二节 ==']);
   });
 });

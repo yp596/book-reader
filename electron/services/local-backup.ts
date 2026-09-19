@@ -15,7 +15,6 @@ export interface BackupData {
   bookmarks?: any[];
   notes?: any[];
   words?: any[];
-  sources?: any[];
   settings?: { key: string; value: string }[];
 }
 
@@ -38,7 +37,7 @@ const BACKUP_SETTINGS = [
   'shortcutPreset', 'shortcutCustom', 'readingStylePreset', 'customReadingCss',
 ];
 
-const TABLES = ['books', 'bookmarks', 'notes', 'words', 'book_sources'] as const;
+const TABLES = ['books', 'bookmarks', 'notes', 'words'] as const;
 
 /** 采集待备份数据；since 为 null 时全量，否则只取该时刻后变更的行 */
 export function collectBackup(db: DatabaseService, since: string | null): BackupData {
@@ -56,8 +55,7 @@ export function collectBackup(db: DatabaseService, since: string | null): Backup
   for (const t of TABLES) {
     const rows = db.exportRowsSince(t, since);
     if (rows.length === 0) continue;
-    if (t === 'book_sources') data.sources = rows;
-    else if (t === 'books') data.books = rows;
+    if (t === 'books') data.books = rows;
     else if (t === 'bookmarks') data.bookmarks = withBookTitle(rows);
     else if (t === 'notes') data.notes = withBookTitle(rows);
     else data.words = rows;
@@ -356,22 +354,6 @@ export function mergeBackup(
       word: w.word,
       definition: w.definition ?? '',
       context: w.context ?? '',
-    });
-    changed++;
-  }
-
-  // 6) 书源：按「名称 + 地址」去重
-  const sources = db.getAllSources() as any[];
-  for (const s of d.sources ?? []) {
-    if (!s.name) continue;
-    if (sources.some(x => x.name === s.name && x.url === s.url)) continue;
-    db.insertSource({
-      name: s.name,
-      url: s.url ?? '',
-      search_url: s.search_url ?? '',
-      chapters_url: s.chapters_url ?? '',
-      content_url: s.content_url ?? '',
-      rules: s.rules ?? '',
     });
     changed++;
   }

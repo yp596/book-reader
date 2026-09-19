@@ -512,7 +512,7 @@ describe('联网附加能力总开关', () => {
     // 默认配置里的向量服务与 AI 服务都指向本机，不该被联网开关拦住
     expect(() => db.assertOnlineEnabled('语义检索', 'http://localhost:8081')).not.toThrow();
     expect(() => db.assertOnlineEnabled('AI 阅读助手', 'http://127.0.0.1:11434')).not.toThrow();
-    expect(() => db.assertOnlineEnabled('WebDAV 同步', 'http://[::1]:5005')).not.toThrow();
+    expect(() => db.assertOnlineEnabled('语义检索', 'http://[::1]:8081')).not.toThrow();
     // 外部地址照旧拦截
     expect(() => db.assertOnlineEnabled('语义检索', 'http://api.example.com')).toThrow(/需要联网/);
     // 局域网确实发生了网络请求，仍归开关管辖
@@ -522,7 +522,7 @@ describe('联网附加能力总开关', () => {
   it('回环地址识别边界', async () => {
     const { isLoopbackUrl } = await import('./db.service');
     expect(isLoopbackUrl('http://localhost:8081')).toBe(true);
-    expect(isLoopbackUrl('https://127.0.0.1/webdav')).toBe(true);
+    expect(isLoopbackUrl('https://127.0.0.1:8081/v1')).toBe(true);
     expect(isLoopbackUrl('http://[::1]:8080')).toBe(true);
     expect(isLoopbackUrl('http://example.com')).toBe(false);
     // 形似而非本机，不能被当成回环放行
@@ -537,19 +537,6 @@ describe('联网附加能力总开关', () => {
     expect(db.getSetting('onlineFeaturesEnabled')).toBe('0');
   });
 
-  it('已有书源的老库初始化视为已开启，不让既有配置变哑巴', () => {
-    clearSwitch();
-    db.insertSource({
-      name: '测试源',
-      url: 'https://example.com',
-      search_url: 'https://example.com/s?q={{keyword}}',
-      chapters_url: '',
-      content_url: '',
-    });
-    db.initOnlineSwitch();
-    expect(db.getSetting('onlineFeaturesEnabled')).toBe('1');
-  });
-
   it('初始化不覆盖用户已做的选择', () => {
     db.setSetting('onlineFeaturesEnabled', '0');
     db.initOnlineSwitch();
@@ -558,17 +545,14 @@ describe('联网附加能力总开关', () => {
 });
 
 describe('增量备份的时间戳筛选', () => {
-  it('书源表也能按时间筛选：曾经缺 updated_at 列，第二次导出必然抛 no such column', () => {
-    db.insertSource({
-      name: '增量备份测试源',
-      url: 'https://example.com',
-      search_url: '',
-      chapters_url: '',
-      content_url: '',
-      rules: '',
+  it('数据表都能按时间筛选：增量导出不该抛 no such column', () => {
+    db.insertBook({
+      title: '增量备份测试书',
+      file_path: '/tmp/incremental.epub',
+      file_type: 'epub',
     });
-    expect(() => db.exportRowsSince('book_sources', '2020-01-01 00:00:00')).not.toThrow();
-    expect(db.exportRowsSince('book_sources', '2020-01-01 00:00:00').length).toBeGreaterThan(0);
+    expect(() => db.exportRowsSince('books', '2020-01-01 00:00:00')).not.toThrow();
+    expect(db.exportRowsSince('books', '2020-01-01 00:00:00').length).toBeGreaterThan(0);
   });
 
   it('ISO 基线（设置里存的就是这种）能覆盖当天新产生的记录', () => {

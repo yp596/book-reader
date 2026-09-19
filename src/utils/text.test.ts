@@ -10,6 +10,8 @@ import {
   parseSavedPosition,
   findKeyword,
   paginateText,
+  epubSectionText,
+  markKeywordHtml,
 } from './text';
 
 describe('escapeHtml', () => {
@@ -120,6 +122,31 @@ describe('阅读位置序列化', () => {
     expect(parseSavedPosition(serializeSavedPosition(pos))).toEqual(pos);
   });
 
+  it('PDF 重排屏号与页码并存，往返一致', () => {
+    const pos = { page: 3, reflow: 30 };
+    expect(parseSavedPosition(serializeSavedPosition(pos))).toEqual(pos);
+  });
+
+  it('只有重排屏号也算有效位置', () => {
+    expect(parseSavedPosition(JSON.stringify({ reflow: 5 }))).toEqual({ reflow: 5 });
+  });
+
+  it('文档型格式的块序号往返一致，且能与别的坐标并存', () => {
+    expect(parseSavedPosition(serializeSavedPosition({ docBlock: 12 }))).toEqual({ docBlock: 12 });
+    expect(parseSavedPosition(serializeSavedPosition({ page: 1, docBlock: 0 }))).toEqual({
+      page: 1,
+      docBlock: 0,
+    });
+  });
+
+  it('早先存下的 mdBlock 仍读得出来（换名前后的进度不能丢）', () => {
+    expect(parseSavedPosition(JSON.stringify({ mdBlock: 7 }))).toEqual({ docBlock: 7 });
+    expect(parseSavedPosition(JSON.stringify({ page: 2, mdBlock: 7 }))).toEqual({
+      page: 2,
+      docBlock: 7,
+    });
+  });
+
   it('空值与坏数据返回 null', () => {
     expect(parseSavedPosition(null)).toBeNull();
     expect(parseSavedPosition('')).toBeNull();
@@ -130,6 +157,11 @@ describe('阅读位置序列化', () => {
   it('丢弃非法字段', () => {
     expect(parseSavedPosition(JSON.stringify({ cfi: '', page: -3 }))).toBeNull();
     expect(parseSavedPosition(JSON.stringify({ cfi: 123, page: 1.5 }))).toBeNull();
+    expect(parseSavedPosition(JSON.stringify({ reflow: -1, cfi: '' }))).toBeNull();
+    expect(parseSavedPosition(JSON.stringify({ reflow: 2.5, page: -3 }))).toBeNull();
+    expect(parseSavedPosition(JSON.stringify({ docBlock: -1 }))).toBeNull();
+    expect(parseSavedPosition(JSON.stringify({ docBlock: 1.5 }))).toBeNull();
+    expect(parseSavedPosition(JSON.stringify({ mdBlock: -1 }))).toBeNull();
     expect(parseSavedPosition(JSON.stringify({ cfi: 'epubcfi(/6/4!)', page: -1 }))).toEqual({
       cfi: 'epubcfi(/6/4!)',
     });
@@ -226,5 +258,67 @@ describe('paginateText 章节边界', () => {
     const text = '甲\n\n乙\n\n丙';
     const { pages } = paginateText(text, ['', '   ']);
     expect(pages).toHaveLength(1);
+  });
+});
+
+describe('epubSectionText 取章节正文', () => {
+  const parse = (html: string) => new DOMParser().parseFromString(html, 'text/html');
+
+  /**
+   * 回归护栏：epub.js 的 Section.load() 交出的是 documentElement（<html> 元素），
+   * 不是 Document。谁把实现改回读 `.body`，这条就会掉成空串——
+   * 而线上表现是「检索不报错、永远 0 命中」，从现象完全看不出是这一行。
+   */
+  it('传 <html> 元素（epub.js 的实际形状）能取到正文', () => {
+    const doc = parse('<html><head><title>书名</title></head><body><p>第一章的正文内容</p></body></html>');
+    expect(epubSectionText(doc.documentElement)).toContain('第一章的正文内容');
+  });
+
+  it('不把 <head> 里的标题与样式搜进去', () => {
+    const doc = parse('<html><head><title>书名甲</title><style>p{color:red}</style></head><body>正文乙</body></html>');
+    const text = epubSectionText(doc.documentElement);
+    expect(text).toContain('正文乙');
+    expect(text).not.toContain('书名甲');
+    expect(text).not.toContain('color');
+  });
+
+  it('传 Document 本身也取得到（章节缓存路径的余量）', () => {
+    const doc = parse('<html><body>正文丙</body></html>');
+    expect(epubSectionText(doc)).toContain('正文丙');
+  });
+
+  it('空值不抛错，返回空串', () => {
+    expect(epubSectionText(null)).toBe('');
+    expect(epubSectionText(undefined)).toBe('');
+  });
+});
+
+describe('markKeywordHtml 给纯文本打检索标记', () => {
+  it('命中词包成 mark', () => {
+    expect(markKeywordHtml('前有正文后有', '正文')).toBe('前有<mark class="search-mark">正文</mark>后有');
+  });
+
+  it('多处命中都标上', () => {
+    const mark = '<mark class="search-mark">甲</mark>';
+    expect(markKeywordHtml('甲甲', '甲')).toBe(mark + mark);
+  });
+
+  it('原文里的尖括号被转义，不会变成标签', () => {
+    // 这条是安全性所在：拼出来的 HTML 会直接进 dangerouslySetInnerHTML
+    const html = markKeywordHtml('<b>正文</b>', '正文');
+    expect(html).toContain('&lt;b&gt;');
+    expect(html).not.toContain('<b>');
+  });
+
+  it('关键词里带尖括号也能命中（两边都转义过，位置对得上）', () => {
+    expect(markKeywordHtml('看 <b> 这个', '<b>')).toBe('看 <mark class="search-mark">&lt;b&gt;</mark> 这个');
+  });
+
+  it('没命中返回空串，调用方据此走纯文本路径', () => {
+    expect(markKeywordHtml('正文', '天书')).toBe('');
+  });
+
+  it('关键词为空不标，也避免正则匹配一切', () => {
+    expect(markKeywordHtml('正文', '   ')).toBe('');
   });
 });

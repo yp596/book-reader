@@ -1,11 +1,9 @@
-import { ipcMain, dialog, BrowserWindow, app, shell, Notification, clipboard } from 'electron';
+import { ipcMain, dialog, BrowserWindow, app, shell, clipboard } from 'electron';
 import fs from 'fs';
 import path from 'path';
 import { DatabaseService } from '../services/db.service';
-import { extractMetadata, extractToc, docxToChapters, mdToDocument, collectMarkdownTags, collectMarkdownTasks, collectMarkdownLinks, imageMediaType, extractBookSections, readPlainTextFile, TXT_TOC_RULE_NAMES, type TxtTocOptions } from '../services/metadata';
-import { buildCrawlerFromRow, applyTextFilters } from '../services/book-source';
+import { extractMetadata, extractToc, docxRender, mdRender, mdToChapters, applyMarkdownImageMap, collectMarkdownTags, collectMarkdownTasks, collectMarkdownLinks, extractBookSections, readPlainTextFile, splitTxtChapters, TXT_TOC_RULE_NAMES, type TxtTocOptions } from '../services/metadata';
 import { splitText, cosine, embedTexts } from '../services/rag';
-import { buildEpub } from '../services/epub-export';
 import { AiService } from '../services/ai-service';
 import {
   buildBackupFile,
@@ -20,7 +18,7 @@ import {
 } from '../services/local-backup';
 import { ModelService } from '../services/model-service';
 import { listComicPages, readComicPage, releaseComicCacheFor } from '../services/comic';
-import { extractCover } from '../services/cover';
+import { extractCover, openBookImages } from '../services/cover';
 import { contentHash, classifySource, readSourceSnapshot, type SourceSnapshot } from '../services/file-hash';
 import { dirSize, clearSnapshots } from '../services/cache';
 import { folderWatcher } from '../services/watch-folder';
@@ -35,7 +33,9 @@ import {
   addWatermark,
   addPageNumbers,
 } from '../services/pdf-edit';
-import { buildBookListMarkdown, buildBookBackup, buildPlainText, parseBookBackup, backupFileName, localDateStamp } from '../services/book-export';
+import { buildBookListMarkdown, buildBookBackup, buildPlainText, parseBookBackup, backupFileName, localDateStamp, uniqueExportName } from '../services/book-export';
+import { buildEpub } from '../services/epub-export';
+import { applyAutoLaunch, isAutoLaunchEnabled } from '../services/auto-launch';
 
 /**
  * 补全缺失的封面：封面提取是后加的，此前入库的书都没有封面。
@@ -92,85 +92,95 @@ function listLocalFonts(): { name: string; family: string; url: string }[] {
     }));
 }
 
-/** 章节内容统一入口：缓存 → 抓取 → 净化 → 回写缓存 */
-async function fetchChapterContent(
-  db: DatabaseService,
-  sourceId: number,
-  book: { url: string; title: string },
-  chapter: { url: string; title: string; idx: number },
-): Promise<string> {
-  const cached = db.getCachedChapter(chapter.url) as { content: string } | undefined;
-  // 缓存也过一遍当前规则（后加的规则对旧缓存生效）
-  if (cached?.content) return applyTextFilters(cached.content, db.getEnabledFilters());
-
-  // 有缓存就不联网，所以闸门放在缓存命中之后
-  db.assertOnlineEnabled('在线阅读');
-
-  const source = db.getSourceById(sourceId) as any;
-  if (!source) throw new Error('书源不存在');
-  const crawler = buildCrawlerFromRow(source);
-  if (!crawler) throw new Error('该书源缺少抓取规则，请编辑补充选择器');
-  let content = await crawler.getContent(chapter.url);
-  if (content) {
-    // 全局净化规则
-    content = applyTextFilters(content, db.getEnabledFilters());
-    db.saveCachedChapter({
-      source_id: sourceId,
-      book_url: book.url,
-      chapter_url: chapter.url,
-      title: chapter.title,
-      content,
-      idx: chapter.idx,
-    });
-  }
-  return content;
-}
-
 /** 导入冲突处理策略：skip=跳过 / keep=各留一本 / replace=覆盖已有记录 */
 type ImportConflictPolicy = 'skip' | 'keep' | 'replace';
 
 /**
- * 把导入来源落成一份书库内的文件。
- * DOCX / Markdown 先转 EPUB（后续全按 EPUB 走，阅读/目录/检索零改动），其余原样复制。
- * 导入与「从原文件更新」共用这一条，免得转换逻辑写两份。
+ * 把导入来源落成一份书库内的文件——**一律原样入库，不做格式转换**。
+ *
+ * 转换过一次（DOCX→EPUB）是为了复用 epubjs，但代价是原文结构被改写：标题降级成章、
+ * 锚点全丢、代码块与表格走样。用户看到的就不再是自己写的那份文档。现在 Markdown 与
+ * DOCX 都由阅读器直接渲染，各自保留各自的排版。
+ *
+ * 只有 Markdown 需要额外动作：把正文引用的本地图片一起搬进书库（见下）。
+ * 导入与「从原文件更新」共用这一条，免得逻辑写两份。
  */
-async function materializeIntoLibrary(filePath: string, ext: string, title: string) {
+async function materializeIntoLibrary(filePath: string, ext: string, hash: string) {
   const booksDir = path.join(app.getPath('userData'), 'books');
   if (!fs.existsSync(booksDir)) fs.mkdirSync(booksDir, { recursive: true });
   const fileName = path.basename(filePath, path.extname(filePath));
 
-  if (ext === '.docx' || ext === '.md') {
-    const label = ext === '.docx' ? 'DOCX' : 'Markdown';
-    // Markdown 走 mdToDocument：它额外把正文里引用的本地图片收进 EPUB
-    // （相对路径的图片不打包的话，读的时候只会看到破图）
-    const doc =
-      ext === '.md'
-        ? await mdToDocument(filePath)
-        : { chapters: await docxToChapters(filePath), images: [], missingImages: 0, props: {} };
-    const chapters = doc.chapters;
-    if (chapters.length === 0) throw new Error(`${label} 内容为空或解析失败`);
-    const { buildEpub } = await import('../services/epub-export');
-    const buf = await buildEpub(
-      title,
-      chapters,
-      doc.images.map(img => ({ ...img, mediaType: imageMediaType(img.sourcePath) })),
-    );
-    const storePath = path.join(booksDir, `${Date.now()}-${fileName}.epub`);
-    fs.writeFileSync(storePath, buf);
+  if (ext === '.md') {
+    // 正文里引用的本地图片必须一起搬进书库：只搬 .md 的话相对路径仍指向用户
+    // 原来那个目录，源目录一改名或换机就全是破图，离线阅读也就无从谈起。
+    // 落盘名统一成 img-<序号>，不同目录下的同名图片不会互相覆盖。
+    const assetsDir = path.join(booksDir, 'md-assets', hash);
+    const copied: { absPath: string; name: string; src: string; url: string }[] = [];
+    const doc = await mdRender(filePath, (abs, src) => {
+      const name = `img-${copied.length + 1}${path.extname(abs).toLowerCase()}`;
+      const url = localFileUrl(path.join(assetsDir, name));
+      copied.push({ absPath: abs, name, src, url });
+      return url;
+    });
+
+    // 先清掉上一次留下的图片目录：同一份内容重新导入时，已删掉的图不该还留在库里
+    fs.rmSync(assetsDir, { recursive: true, force: true });
+    if (copied.length > 0) {
+      fs.mkdirSync(assetsDir, { recursive: true });
+      for (const img of copied) {
+        try {
+          fs.copyFileSync(img.absPath, path.join(assetsDir, img.name));
+        } catch { /* 个别图拷不动就留破图，不因此把整次导入打回去 */ }
+      }
+    }
+
+    // 阅读时按「引用原文 → 搬好之后的地址」查表替换，不再依赖路径解析
+    const imageMap: Record<string, string> = {};
+    for (const img of copied) imageMap[img.src] = img.url;
+
+    const storePath = path.join(booksDir, `${Date.now()}-${fileName}.md`);
+    fs.copyFileSync(filePath, storePath);
+
+    // 章节目录只用于汇总元数据：待办、标签、引用关系都按章组织
+    const chapters = await mdToChapters(filePath);
+    // 任务跳转要落到带上它的那个标题上。标题锚点是渲染时才编的号，
+    // 这里按标题文本回查；对不上（标题被截断等）就留空，卡片退化成只打开这本书。
+    const anchorOf = (t: string) => doc.toc.find(entry => entry.label === t)?.href ?? '';
     return {
       storePath,
-      storeExt: '.epub',
-      convertedToc: chapters.map((c, i) => ({ label: c.title, href: `Text/ch${i + 1}.xhtml` })),
+      storeExt: '.md',
+      convertedToc: doc.toc,
       // 顺手收下正文里的 #标签 与未完成任务，书架/统计页据此做筛选与汇总
-      tags: ext === '.md' ? collectMarkdownTags(chapters) : undefined,
-      tasks:
-        ext === '.md'
-          ? collectMarkdownTasks(chapters, i => `Text/ch${i + 1}.xhtml`)
-          : undefined,
+      tags: collectMarkdownTags(chapters),
+      tasks: collectMarkdownTasks(chapters, i => anchorOf(chapters[i]?.title ?? '')),
       // wiki 链接目标：用来算「谁引用了谁」
-      links: ext === '.md' ? collectMarkdownLinks(chapters) : undefined,
+      links: collectMarkdownLinks(chapters),
       // frontmatter 属性：书架据此按属性筛书
-      props: ext === '.md' ? doc.props : undefined,
+      props: doc.props,
+      images: imageMap,
+    };
+  }
+
+  if (ext === '.docx') {
+    // 与 Markdown 一样原样入库、由阅读器直接渲染，不再转 EPUB。
+    // 转 EPUB 是为了复用 epubjs，代价是标题降级成章、锚点全丢（epubjs 的
+    // display 会截掉 `#` 之后的部分），目录只能跳到章首。原样入库后目录能精确到标题，
+    // 划词、位置记录也与 Markdown 走同一套。
+    //
+    // 图片不必另做搬运：mammoth 默认把图内联成 data: 地址，HTML 自带内容，
+    // 库文件拷到哪都完整（阅读页没有配 CSP，data: 图能直接显示）。
+    const doc = await docxRender(filePath);
+    if (!doc.html.trim()) throw new Error('DOCX 内容为空或解析失败');
+    const storePath = path.join(booksDir, `${Date.now()}-${fileName}.docx`);
+    fs.copyFileSync(filePath, storePath);
+    return {
+      storePath,
+      storeExt: '.docx',
+      convertedToc: doc.toc,
+      tags: undefined,
+      tasks: undefined,
+      links: undefined,
+      props: undefined,
     };
   }
 
@@ -215,8 +225,8 @@ async function importOneFile(db: DatabaseService, filePath: string, policyOverri
     throw new Error(`《${conflict.title ?? title}》已锁定，无法替换。请先在书架右键解锁。`);
   }
 
-  // DOCX / Markdown 会在这一步转成 EPUB 落盘，其余原样复制
-  const { storePath, storeExt, convertedToc, tags, tasks, links, props } = await materializeIntoLibrary(filePath, ext, title);
+  // 原样复制进书库；Markdown 额外把正文引用的图片一起搬过去
+  const { storePath, storeExt, convertedToc, tags, tasks, links, props, images } = await materializeIntoLibrary(filePath, ext, hash);
 
   // 封面提取失败不阻塞导入，书架会退回格式占位块
   let coverUrl: string | null = null;
@@ -257,6 +267,7 @@ async function importOneFile(db: DatabaseService, filePath: string, policyOverri
       db.setSetting(`mdTasks:${conflict.id}`, JSON.stringify(tasks ?? []));
       db.setSetting(`mdLinks:${conflict.id}`, JSON.stringify(links ?? []));
       db.setSetting(`mdProps:${conflict.id}`, JSON.stringify(props ?? {}));
+      db.setSetting(`mdImages:${conflict.id}`, JSON.stringify(images ?? {}));
     }
     return { id: conflict.id, path: storePath };
   }
@@ -270,6 +281,7 @@ async function importOneFile(db: DatabaseService, filePath: string, policyOverri
     db.setSetting(`mdTasks:${Number(id)}`, JSON.stringify(tasks ?? []));
     db.setSetting(`mdLinks:${Number(id)}`, JSON.stringify(links ?? []));
     db.setSetting(`mdProps:${Number(id)}`, JSON.stringify(props ?? {}));
+    db.setSetting(`mdImages:${Number(id)}`, JSON.stringify(images ?? {}));
   }
   writeSourceInfo(db, Number(id), filePath);
   return { id: Number(id), path: storePath };
@@ -285,7 +297,8 @@ async function bookTextLines(book: any): Promise<string[] | null> {
     if (ext === '.txt') {
       return readPlainTextFile(book.file_path).split('\n');
     }
-    if (ext === '.epub') {
+    // EPUB / Markdown / DOCX 都走同一套按段抽文，段落之间用换行分行
+    if (ext === '.epub' || ext === '.md' || ext === '.docx') {
       const sections = await extractBookSections(book.file_path, ext, book.toc ?? '');
       return sections.map((s: any) => s.text).join('\n').split('\n');
     }
@@ -296,7 +309,7 @@ async function bookTextLines(book: any): Promise<string[] | null> {
 export function registerIpcHandlers() {
   const db = DatabaseService.getInstance();
 
-  // 联网总开关的初值：新装默认关闭；已有书源或 WebDAV 配置的老库视为已开启
+  // 联网总开关的初值：新装默认关闭
   db.initOnlineSwitch();
 
   /**
@@ -422,7 +435,11 @@ export function registerIpcHandlers() {
 
     const ext = path.extname(recorded.path).toLowerCase();
     const hash = contentHash(recorded.path);
-    const { storePath, storeExt } = await materializeIntoLibrary(recorded.path, ext, book.title);
+    const { storePath, storeExt, tags, tasks, links, props, images } = await materializeIntoLibrary(
+      recorded.path,
+      ext,
+      hash,
+    );
 
     // 封面失败就留用旧的，不因为封面把整次更新打回去
     let coverPath = book.cover_path ?? undefined;
@@ -442,6 +459,16 @@ export function registerIpcHandlers() {
       const toc = await extractToc(storePath, storeExt);
       if (toc.length > 0) db.setBookToc(id, JSON.stringify(toc));
     } catch { /* 目录失败不阻塞更新 */ }
+
+    // Markdown 的标签 / 待办 / 引用 / 属性都是从正文里现算的，源文件改了它们也会变，
+    // 不跟着刷新的话统计页会一直显示改之前的旧内容
+    if (ext === '.md') {
+      if (tags) db.setSetting(`bookTags:${id}`, JSON.stringify(tags));
+      db.setSetting(`mdTasks:${id}`, JSON.stringify(tasks ?? []));
+      db.setSetting(`mdLinks:${id}`, JSON.stringify(links ?? []));
+      db.setSetting(`mdProps:${id}`, JSON.stringify(props ?? {}));
+      db.setSetting(`mdImages:${id}`, JSON.stringify(images ?? {}));
+    }
 
     const booksDirPath = path.join(app.getPath('userData'), 'books');
     if (book.file_path && book.file_path !== storePath && String(book.file_path).startsWith(booksDirPath)) {
@@ -468,7 +495,7 @@ export function registerIpcHandlers() {
   // 会出现「文件已被删掉、记录却还在」的不可逆损坏。
   ipcMain.handle('books:delete', (_event, id: number) => {
     const book = db.getBookById(id) as
-      | { id: number; file_path?: string; cover_path?: string; locked?: number }
+      | { id: number; file_path?: string; cover_path?: string; locked?: number; hash?: string }
       | undefined;
     if (!book) return;
     if (book.locked) {
@@ -484,6 +511,19 @@ export function registerIpcHandlers() {
         if ((err as NodeJS.ErrnoException).code !== 'ENOENT') {
           throw new Error('无法删除书库文件，请先关闭正在使用该文件的程序再重试。');
         }
+      }
+    }
+    // Markdown 的图片收在 md-assets/<hash> 下。同一份内容可能被存成好几本
+    // （导入冲突策略选「各留一本」时），还有别的书在用就不能跟着删。
+    const hash = book.hash;
+    if (hash) {
+      const shared = (db.getAllBooks() as { id: number; hash?: string }[]).some(
+        b => b.id !== id && b.hash === hash,
+      );
+      if (!shared) {
+        try {
+          fs.rmSync(path.join(booksDir(), 'md-assets', hash), { recursive: true, force: true });
+        } catch { /* 图片目录删不掉，不至于把「书已删掉」这件事也回滚 */ }
       }
     }
     db.deleteBook(id);
@@ -614,10 +654,21 @@ export function registerIpcHandlers() {
     shell.showItemInFolder(book.file_path);
   });
 
+  /**
+   * 本进程的启动时刻。会话标记的 value 就是写入时刻，两个一比就能分清
+   * 「这条标记是本进程里某个窗口刚写下的」与「上一个进程崩溃留下的」。
+   * 模块加载即进程启动，所以在这里取一次即可。
+   */
+  const APP_STARTED_AT = Date.now();
+
   // 崩溃恢复：把上次异常退出时正在读的书捞回来（取走即清标记，只提示一次）
   ipcMain.handle('app:takeCrashedSession', () => {
     const session = db.findDanglingReadingSession();
     if (!session) return null;
+    // 标记比本进程还新 ⇒ 是本进程里某个还活着的窗口写下的，不是崩溃残留，**碰都别碰**。
+    // 多窗口下「标记存在」并不等于「上次异常退出」：少了这一判，新开一扇窗、或重载页面，
+    // 都会把隔壁窗口正在读的那本书当成崩溃现场，弹一个假的恢复提示。
+    if (session.at >= APP_STARTED_AT) return null;
     const book = db.getBookById(session.bookId) as { id: number; title?: string } | undefined;
     // 书已经被删掉：顺手清掉标记，免得每次启动都白查一遍
     db.setSetting(`readingSession:${session.bookId}`, '');
@@ -702,12 +753,14 @@ export function registerIpcHandlers() {
     return { filePath };
   });
 
-  // 导出正文为 TXT：把书里的文字取出来另存，便于引用、校对或喂给别的工具
-  ipcMain.handle('books:exportText', async (event, id: number) => {
-    const book = db.getBookById(id) as any;
-    if (!book) throw new Error('书籍不存在');
+  /**
+   * 取出这本书可导出的纯文本；取不出来就抛错说明原因。
+   *
+   * 抽成函数是为了让单本导出与批量导出走同一条判定——否则同一本书被批量跳过时给出的
+   * 理由会和单本不一致（一边说「格式不支持」、另一边说「可能是扫描版」）。
+   */
+  const exportableText = async (book: any): Promise<string> => {
     if (!fs.existsSync(book.file_path)) throw new Error('书库文件已丢失，请重新导入');
-
     let text = '';
     if (book.file_type === 'txt') {
       // 直接读整份原文：TXT 自带章节标题，再插一层反而重复。
@@ -717,10 +770,49 @@ export function registerIpcHandlers() {
       text = buildPlainText(await extractBookSections(book.file_path, '.epub', book.toc ?? ''), true);
     } else if (book.file_type === 'pdf') {
       text = buildPlainText(await extractBookSections(book.file_path, '.pdf', book.toc ?? ''), false);
+    } else if (book.file_type === 'md' || book.file_type === 'docx') {
+      // 文档型格式的段名就是正文里的标题，插回去正是原文的层次
+      text = buildPlainText(
+        await extractBookSections(book.file_path, '.' + book.file_type, book.toc ?? ''),
+        true,
+      );
     } else {
       throw new Error('这种格式没有可导出的文字，漫画请用「另存为副本」');
     }
     if (!text.trim()) throw new Error('没有提取到文字，可能是扫描版，可先用阅读页的「识别」取字');
+    return text;
+  };
+
+  /** 把书按章节切出来供打包 EPUB；切不出正文就抛错。判定与「导出正文为 TXT」同源。 */
+  const exportableChapters = async (book: any): Promise<{ title: string; text: string }[]> => {
+    if (!fs.existsSync(book.file_path)) throw new Error('书库文件已丢失，请重新导入');
+    const type = book.file_type as string;
+    let chapters: { title: string; text: string }[];
+    if (type === 'txt') {
+      // 必须全量读取：extractTxtSections 为做目录只读前 8MB，拿它导出会把后半本静默丢掉。
+      // 目录规则沿用用户为本书/全局配的那套，导出的分章与阅读页看到的目录一致。
+      chapters = splitTxtChapters(readPlainTextFile(book.file_path), txtTocOptionsFor(book.id));
+    } else if (type === 'pdf' || type === 'md' || type === 'docx') {
+      chapters = (await extractBookSections(book.file_path, '.' + type, book.toc ?? '')).map(s => ({
+        title: s.label,
+        text: s.text,
+      }));
+    } else if (type === 'epub') {
+      throw new Error('这本书本身就是 EPUB，无需再导出为 EPUB');
+    } else {
+      throw new Error('这种格式导不出 EPUB，漫画请用「另存为副本」');
+    }
+    if (!chapters.some(c => c.text.trim())) {
+      throw new Error('没有提取到文字，可能是扫描版，可先用阅读页的「识别」取字');
+    }
+    return chapters;
+  };
+
+  // 导出正文为 TXT：把书里的文字取出来另存，便于引用、校对或喂给别的工具
+  ipcMain.handle('books:exportText', async (event, id: number) => {
+    const book = db.getBookById(id) as any;
+    if (!book) throw new Error('书籍不存在');
+    const text = await exportableText(book);
 
     const win = BrowserWindow.fromWebContents(event.sender) ?? undefined;
     const { canceled, filePath } = await dialog.showSaveDialog(win!, {
@@ -731,6 +823,154 @@ export function registerIpcHandlers() {
     if (canceled || !filePath) return null;
     fs.writeFileSync(filePath, text, 'utf-8');
     return { filePath, chars: text.length };
+  });
+
+  // 导出为 EPUB：把正文按章节重新打包成一本干净的书。
+  // 定位是「清理 / 转换」而不是备份，所以有三类要挡在前面说清楚，而不是导出一个空壳：
+  // 原书本就是 EPUB（没有意义）、漫画（没有文字章节）、抽不出文字的扫描版。
+  ipcMain.handle('books:exportEpub', async (event, id: number) => {
+    const book = db.getBookById(id) as any;
+    if (!book) throw new Error('书籍不存在');
+    const chapters = await exportableChapters(book);
+
+    const win = BrowserWindow.fromWebContents(event.sender) ?? undefined;
+    const { canceled, filePath } = await dialog.showSaveDialog(win!, {
+      title: '导出为 EPUB',
+      defaultPath: `${sanitizeFileName(book.title)}.epub`,
+      filters: [{ name: 'EPUB 电子书', extensions: ['epub'] }],
+    });
+    if (canceled || !filePath) return null;
+    // 无章节名的（整篇一章或前言散段）用书名兜底，免得生成一个没有标题的空 <h2>
+    const buffer = await buildEpub(
+      book.title,
+      chapters.map(c => ({ title: c.title || book.title, content: c.text })),
+    );
+    fs.writeFileSync(filePath, buffer);
+    return { filePath, chapters: chapters.length, bytes: buffer.length };
+  });
+
+  // 批量导出为 TXT / EPUB：只让用户选一次目录，然后逐本写进去。
+  // 之所以单独开一个 handler 而不是让前端循环调上面两个——那两个每次都会弹一次保存框，
+  // 批量就会弹 N 次，等于不可用。
+  // 三处刻意的取舍：
+  // ① 单本失败只跳过并记下原因，不中断整批——一本扫描版不该毁掉另外几十本已经能导的；
+  // ② 不排除锁定书：锁定的语义是「不能被删除或批量修改」（见书架 batchTargets 注释），
+  //    导出是纯读操作，锁它没有意义；
+  // ③ 重名只按开头那一次目录快照来排，不逐本 existsSync——同批里先写出的名字即时入集合，
+  //    批内重名同样避开，判重逻辑见 uniqueExportName。
+  ipcMain.handle('books:exportBatch', async (event, ids: number[], format: 'txt' | 'epub') => {
+    const win = BrowserWindow.fromWebContents(event.sender) ?? undefined;
+    const { canceled, filePaths } = await dialog.showOpenDialog(win!, {
+      title: format === 'epub' ? '选择 EPUB 的导出目录' : '选择 TXT 的导出目录',
+      properties: ['openDirectory', 'createDirectory'],
+    });
+    if (canceled || !filePaths?.[0]) return null;
+    const dir = filePaths[0];
+    // Windows 文件系统不区分大小写，集合统一存小写（uniqueExportName 按小写查）
+    const used = new Set(fs.readdirSync(dir).map(n => n.toLowerCase()));
+
+    let done = 0;
+    const skipped: { title: string; reason: string }[] = [];
+    for (const id of ids) {
+      const book = db.getBookById(id) as any;
+      if (!book) {
+        skipped.push({ title: `#${id}`, reason: '书籍不存在' });
+        continue;
+      }
+      try {
+        const name = uniqueExportName(
+          used,
+          sanitizeFileName(book.title),
+          format === 'epub' ? '.epub' : '.txt',
+          id,
+        );
+        if (format === 'epub') {
+          const chapters = await exportableChapters(book);
+          // 无章节名的（整篇一章或前言散段）用书名兜底，免得生成一个没有标题的空 <h2>
+          const buffer = await buildEpub(
+            book.title,
+            chapters.map(c => ({ title: c.title || book.title, content: c.text })),
+          );
+          fs.writeFileSync(path.join(dir, name), buffer);
+        } else {
+          fs.writeFileSync(path.join(dir, name), await exportableText(book), 'utf-8');
+        }
+        used.add(name.toLowerCase());
+        done++;
+      } catch (e) {
+        skipped.push({ title: book.title, reason: e instanceof Error ? e.message : String(e) });
+      }
+    }
+    return { dir, done, skipped };
+  });
+
+  // 批量提取内嵌图片：选一次目录，每本书在里面建一个子目录放它的图。
+  // 取舍与上面的批量导出同源：单本失败只跳过并记原因、不中断整批；不排除锁定书（纯读操作）。
+  // 另外两处是抽图特有的：
+  // ① **每本书一个子目录**——几十本书的图混在一个目录里既分不清来源，同名图还会互相覆盖；
+  // ② **每本处理完就释放漫画归档缓存**——comic.ts 的缓存原本只在关书时释放，批量抽图会
+  //    连着把几十个包全留在内存里（§ 42 记过「关书后整包缓存常驻」这条）。
+  ipcMain.handle('books:extractImages', async (event, ids: number[]) => {
+    const win = BrowserWindow.fromWebContents(event.sender) ?? undefined;
+    const { canceled, filePaths } = await dialog.showOpenDialog(win!, {
+      title: '选择图片的存放目录',
+      properties: ['openDirectory', 'createDirectory'],
+    });
+    if (canceled || !filePaths?.[0]) return null;
+    const dir = filePaths[0];
+    const usedDirs = new Set(fs.readdirSync(dir).map(n => n.toLowerCase()));
+
+    let books = 0;
+    let images = 0;
+    const skipped: { title: string; reason: string }[] = [];
+    for (const id of ids) {
+      const book = db.getBookById(id) as any;
+      if (!book) {
+        skipped.push({ title: `#${id}`, reason: '书籍不存在' });
+        continue;
+      }
+      try {
+        if (!fs.existsSync(book.file_path)) throw new Error('书库文件已丢失，请重新导入');
+        // 先分「格式不支持」与「这本书里没图」——openBookImages 两种情况都返回 null，
+        // 混成一句话就会对着一本 EPUB 说「只有 EPUB 与漫画有图」，读起来是错的
+        const type = String(book.file_type ?? '').toLowerCase().replace(/^\./, '');
+        if (!['epub', 'cbz', 'cbr', 'cbt', 'cb7'].includes(type)) {
+          throw new Error('这种格式没有内嵌图片（只有 EPUB 与漫画有）');
+        }
+        const handle = await openBookImages(book.file_path, type);
+        if (!handle) throw new Error('这本书里没有内嵌图片');
+
+        const sub = uniqueExportName(usedDirs, sanitizeFileName(book.title), '', id);
+        usedDirs.add(sub.toLowerCase());
+        const subDir = path.join(dir, sub);
+        fs.mkdirSync(subDir, { recursive: true });
+
+        // 子目录内部各自判重：包里不同目录下的同名图（a/1.jpg 与 b/1.jpg）都要留下
+        const usedFiles = new Set<string>();
+        let got = 0;
+        for (const [i, name] of handle.names.entries()) {
+          const data = await handle.read(name);
+          if (!data) continue;
+          const base = path.basename(name, path.extname(name));
+          const file = uniqueExportName(usedFiles, base, path.extname(name), i + 1);
+          fs.writeFileSync(path.join(subDir, file), data);
+          usedFiles.add(file.toLowerCase());
+          got++;
+        }
+        if (got === 0) {
+          fs.rmdirSync(subDir); // 一张都没写出来，别在用户那儿留个空壳
+          throw new Error('包里没有读出任何图片');
+        }
+        books++;
+        images += got;
+      } catch (e) {
+        skipped.push({ title: book.title, reason: e instanceof Error ? e.message : String(e) });
+      } finally {
+        // 无论成败都放掉这个包的缓存，否则连着抽几十本会把内存吃满
+        releaseComicCacheFor(book.file_path);
+      }
+    }
+    return { dir, books, images, skipped };
   });
 
   // 单本书备份：带走阅读痕迹（不含书籍文件）
@@ -891,6 +1131,31 @@ export function registerIpcHandlers() {
     return toc;
   });
 
+  // 文档型格式（Markdown / DOCX）正文渲染：整篇一个 HTML。
+  // 两者在阅读侧是同一套——连续滚动、不分章不分页，靠标题锚点跳转，所以共用一条通道。
+  // Markdown 的图片按导入时记下的映射换成书库内的地址，读的时候不再做路径解析。
+  ipcMain.handle('books:docHtml', async (_event, id: number) => {
+    const book = db.getBookById(id) as any;
+    if (!book) throw new Error('书籍不存在');
+
+    if (book.file_type === 'docx') {
+      // DOCX 的图由 mammoth 内联成 data: 地址，正文自带内容，没有映射要套
+      const doc = await docxRender(book.file_path);
+      return { html: doc.html, toc: doc.toc };
+    }
+
+    // 渲染时不做图片解析：书库里的 .md 与收进来的图不在同一棵目录树下，
+    // 相对路径在那个位置必然找不到，硬解析只会把每张图都算成缺图
+    const doc = await mdRender(book.file_path);
+    let map: Record<string, string> = {};
+    try {
+      const raw = db.getSetting(`mdImages:${id}`);
+      const parsed = raw ? JSON.parse(raw) : null;
+      if (parsed && typeof parsed === 'object') map = parsed as Record<string, string>;
+    } catch { /* 映射坏了就退回不改写，正文照常显示 */ }
+    return { html: applyMarkdownImageMap(doc.html, map), toc: doc.toc };
+  });
+
   // 可选的目录规则名 + 本书当前指定（空串为自动择优）+ 当前目录来源
   ipcMain.handle('books:tocRules', (_event, id: number) => ({
     rules: TXT_TOC_RULE_NAMES,
@@ -915,11 +1180,15 @@ export function registerIpcHandlers() {
 
   // 在新窗口打开书籍（多文档并行阅读）
   ipcMain.handle('window:openReader', (_event, bookId: number) => {
+    const book = db.getBookById(bookId) as any;
     const win = new BrowserWindow({
       width: 1100,
       height: 820,
       minWidth: 800,
       minHeight: 600,
+      // 先按书名起标题：多开几本书时，任务栏悬停靠这行字分辨谁是谁，
+      // 不能等渲染进程加载完才显示（那段空窗期正是用户去点任务栏的时候）
+      title: book?.title || '阅读书架',
       backgroundColor: '#1a1a2e',
       webPreferences: {
         preload: path.join(__dirname, 'preload.js'),
@@ -929,12 +1198,20 @@ export function registerIpcHandlers() {
     });
     loadRenderer(win, bookId);
     if (db.isSettingOn('screenProtection')) win.setContentProtection(true);
+    // 独立阅读窗只能靠 × 关闭，而点 × 时渲染进程被直接销毁——React 的卸载清理**根本不会跑**
+    // （渲染层全搜没有任何窗口级清理钩子），于是 `readingSession:<bookId>` 这个「正在读这本书」
+    // 的标记会永远留在库里，下次开窗被当成异常退出、弹出假的「上次没有正常退出，继续阅读《X》？」。
+    // 标记的本意就是「有窗口正读着这本书」，那这扇窗关了就由主进程替它销账。
+    // 已知残留：主窗口在「关闭到托盘」模式下关闭、而其书仍在别的窗口里读着时，标记要等
+    // will-quit 才清；那种组合下再开窗仍可能误报一次（末端由 will-quit 的 clearReadingSessions 兜底）。
+    win.on('closed', () => {
+      try { db.setSetting(`readingSession:${bookId}`, ''); } catch { /* 忽略 */ }
+    });
   });
 
-  // 内容预览：把渲染进程生成的当页内容开在独立窗口里单独看。
+  // 内容预览与打印：把渲染进程生成的当页内容开在独立窗口里。
   // 这个窗口只负责「显示」：关掉 JS 与 sandbox 一起，
   // 把「渲染进程传来的 HTML」的爆炸半径压到最小。
-  // 要打印的话走系统快捷键（Ctrl+P），不再由应用代劳——本机可能根本没接打印机。
   let printWin: BrowserWindow | null = null;
 
   /** 旧窗口必须先关，否则连点会把预览窗口堆满屏幕 */
@@ -942,7 +1219,12 @@ export function registerIpcHandlers() {
     if (printWin && !printWin.isDestroyed()) printWin.close();
   };
 
-  ipcMain.handle('books:printPreview', async (_event, html: string, title: string) => {
+  /**
+   * 开一扇只用来显示 / 打印的窗口。
+   * 因为页面里关了 JS，打印入口做不进页面内，只能由主进程代按——
+   * 这也是「应用内发起打印」必须走主进程的原因。
+   */
+  const openPrintWindow = async (html: string, title: string): Promise<BrowserWindow> => {
     closePrintWin();
     // 走临时文件而非 data: URL——正文可能很大，data: URL 在部分导航场景会被截断
     const tmpFile = path.join(app.getPath('temp'), `book-reader-print-${Date.now()}.html`);
@@ -964,8 +1246,36 @@ export function registerIpcHandlers() {
       if (printWin === win) printWin = null;
     });
     await win.loadFile(tmpFile);
+    return win;
+  };
+
+  ipcMain.handle('books:printPreview', async (_event, html: string, title: string) => {
+    await openPrintWindow(html, title);
     return true;
   });
+
+  /**
+   * 应用内发起打印：开同一扇窗，再直接唤起系统打印对话框（silent: false）。
+   *
+   * 这一条早先是刻意不做的——原注释写「本机可能根本没接打印机，不再由应用代劳」。
+   * 现在补上，但要老实处理失败：没有打印机、驱动报错、用户点取消，都会从回调里
+   * 拿到 failureReason，一律原样交给界面提示。点了没反应比做不了更糟。
+   * 用户主动取消不算失败，单独标出来，免得为一次取消弹个警告。
+   */
+  ipcMain.handle(
+    'books:printContent',
+    async (_event, html: string, title: string): Promise<{ ok: boolean; cancelled?: boolean; reason?: string }> => {
+      const win = await openPrintWindow(html, title);
+      return new Promise(resolve => {
+        win.webContents.print({ silent: false, printBackground: true }, (ok, reason) => {
+          if (ok) return resolve({ ok: true });
+          const text = reason || '';
+          if (/cancel/i.test(text)) return resolve({ ok: false, cancelled: true });
+          resolve({ ok: false, reason: text || '系统没有说明原因' });
+        });
+      });
+    },
+  );
 
   // 阅读截图：直接截窗口可见区域，TXT / EPUB / PDF / 漫画一套逻辑通用。
   // 高分屏下 capturePage 按显示器缩放率出图，导出的 PNG 是原始像素而非拉大的。
@@ -1035,6 +1345,15 @@ export function registerIpcHandlers() {
     return !!flag;
   });
 
+  // 窗口标题：任务栏悬停时显示的就是这行字（缩略图下方那行）。
+  // 页面自带的 <title> 会在每次载入时把它盖回去，所以 loadRenderer 那边同时
+  // 拦掉了 page-title-updated——标题只有这一个出口，不会两处打架。
+  ipcMain.handle('window:setTitle', (event, title: string) => {
+    const win = BrowserWindow.fromWebContents(event.sender);
+    if (!win) return;
+    win.setTitle(String(title ?? ''));
+  });
+
   // EPUB 位置索引缓存
   ipcMain.handle('books:setLocations', (_event, id: number, locationsJson: string) => {
     db.setBookLocations(id, locationsJson);
@@ -1047,178 +1366,6 @@ export function registerIpcHandlers() {
     if (!fs.existsSync(book.file_path)) throw new Error('书籍文件已丢失：' + book.file_path);
     const buffer = fs.readFileSync(book.file_path);
     return buffer.toString('base64');
-  });
-
-  // ============ Sources ============
-
-  ipcMain.handle('sources:getAll', () => {
-    return db.getAllSources();
-  });
-
-  ipcMain.handle('sources:add', (_event, source: any) => {
-    return db.insertSource(source);
-  });
-
-  ipcMain.handle('sources:delete', (_event, id: number) => {
-    db.deleteSource(id);
-  });
-
-  ipcMain.handle('sources:search', async (_event, sourceId: number, keyword: string) => {
-    db.assertOnlineEnabled('在线书源搜索');
-    const source = db.getSourceById(sourceId) as any;
-    if (!source) throw new Error('书源不存在');
-    const crawler = buildCrawlerFromRow(source);
-    if (!crawler) throw new Error('该书源缺少抓取规则，请编辑补充选择器');
-    return crawler.search(keyword);
-  });
-
-  ipcMain.handle('sources:chapters', async (_event, sourceId: number, detailUrl: string) => {
-    db.assertOnlineEnabled('在线书源目录');
-    const source = db.getSourceById(sourceId) as any;
-    if (!source) throw new Error('书源不存在');
-    const crawler = buildCrawlerFromRow(source);
-    if (!crawler) throw new Error('该书源缺少抓取规则，请编辑补充选择器');
-    return crawler.getChapters(detailUrl);
-  });
-
-  ipcMain.handle(
-    'sources:content',
-    async (
-      _event,
-      sourceId: number,
-      book: { url: string; title: string },
-      chapter: { url: string; title: string; idx: number },
-    ) => {
-      return fetchChapterContent(db, sourceId, book, chapter);
-    },
-  );
-
-  // 整本缓存并导出 TXT
-  ipcMain.handle(
-    'sources:exportTxt',
-    async (event, sourceId: number, book: { url: string; title: string }, chapters: { name: string; url: string }[]) => {
-      const win = BrowserWindow.fromWebContents(event.sender) ?? undefined;
-      const { canceled, filePath } = await dialog.showSaveDialog(win!, {
-        title: '导出 TXT',
-        defaultPath: `${sanitizeFileName(book.title)}.txt`,
-        filters: [{ name: '文本文件', extensions: ['txt'] }],
-      });
-      if (canceled || !filePath) return null;
-
-      const parts: string[] = [book.title, ''];
-      for (let i = 0; i < chapters.length; i++) {
-        const ch = chapters[i];
-        const content = await fetchChapterContent(db, sourceId, book, {
-          url: ch.url,
-          title: ch.name,
-          idx: i,
-        });
-        parts.push(`\n${ch.name}\n\n${content || '（本章获取失败）'}\n`);
-      }
-      fs.writeFileSync(filePath, parts.join('\n'), 'utf-8');
-      return filePath;
-    },
-  );
-
-  // 整本缓存并导出 EPUB
-  ipcMain.handle(
-    'sources:exportEpub',
-    async (event, sourceId: number, book: { url: string; title: string }, chapters: { name: string; url: string }[]) => {
-      const win = BrowserWindow.fromWebContents(event.sender) ?? undefined;
-      const { canceled, filePath } = await dialog.showSaveDialog(win!, {
-        title: '导出 EPUB',
-        defaultPath: `${sanitizeFileName(book.title)}.epub`,
-        filters: [{ name: 'EPUB 电子书', extensions: ['epub'] }],
-      });
-      if (canceled || !filePath) return null;
-
-      const contents: { title: string; content: string }[] = [];
-      for (let i = 0; i < chapters.length; i++) {
-        const ch = chapters[i];
-        const content = await fetchChapterContent(db, sourceId, book, {
-          url: ch.url,
-          title: ch.name,
-          idx: i,
-        });
-        contents.push({ title: ch.name, content: content || '（本章获取失败）' });
-      }
-      const buf = await buildEpub(book.title, contents);
-      fs.writeFileSync(filePath, buf);
-      return filePath;
-    },
-  );
-
-  // ============ 文本净化规则 ============
-
-  ipcMain.handle('filters:list', () => {
-    return db.getAllFilters();
-  });
-
-  ipcMain.handle('filters:add', (_event, filter: any) => {
-    try {
-      return db.insertFilter(filter);
-    } catch {
-      throw new Error('正则表达式非法，请检查');
-    }
-  });
-
-  ipcMain.handle('filters:toggle', (_event, id: number, enabled: number) => {
-    db.toggleFilter(id, enabled);
-  });
-
-  ipcMain.handle('filters:delete', (_event, id: number) => {
-    db.deleteFilter(id);
-  });
-
-  // ============ 追更订阅 ============
-
-  ipcMain.handle('follows:list', () => {
-    return db.getFollowedBooks();
-  });
-
-  ipcMain.handle('follows:add', (_event, follow: any) => {
-    db.followBook(follow);
-  });
-
-  ipcMain.handle('follows:remove', (_event, id: number) => {
-    db.unfollowBook(id);
-  });
-
-  ipcMain.handle('follows:clearUpdate', (_event, id: number) => {
-    db.clearFollowUpdate(id);
-  });
-
-  // 检查指定/全部订阅更新，有新章节弹系统通知
-  ipcMain.handle('follows:check', async (_event, ids?: number[]) => {
-    // 纯抓取操作，没有离线路径，直接在入口拦
-    db.assertOnlineEnabled('追更检查');
-    const all = db.getFollowedBooks() as any[];
-    const targets = ids?.length ? all.filter(f => ids.includes(f.id)) : all;
-    const updated: { id: string | number; title: string; newCount: number }[] = [];
-    for (const f of targets) {
-      try {
-        const source = db.getSourceById(f.source_id) as any;
-        if (!source) continue;
-        const crawler = buildCrawlerFromRow(source);
-        if (!crawler) continue;
-        const chapters = await crawler.getChapters(f.book_url);
-        if (chapters.length === 0) continue;
-        const lastName = chapters[chapters.length - 1].name;
-        const isNew =
-          chapters.length > (f.last_count ?? 0) || (lastName && lastName !== (f.last_chapter ?? ''));
-        db.updateFollowResult(f.id, lastName, chapters.length, !!isNew);
-        if (isNew) updated.push({ id: f.id, title: f.title, newCount: chapters.length });
-      } catch (err) {
-        console.error(`检查更新失败 [${f.title}]:`, err);
-      }
-    }
-    if (updated.length > 0 && Notification.isSupported()) {
-      new Notification({
-        title: '追更提醒',
-        body: updated.map(u => `《${u.title}》有更新（共 ${u.newCount} 章）`).join('\n'),
-      }).show();
-    }
-    return updated;
   });
 
   // ============ Bookmarks ============
@@ -1575,126 +1722,6 @@ export function registerIpcHandlers() {
     aiAbortControllers.get(reqId)?.abort();
   });
 
-  // ============ WebDAV 同步 ============
-  // 同步内容：进度、书签、笔记、书源、设置（不含书籍文件，跨设备需各自导入同名书籍）
-
-  function getSyncClient() {
-    const url = db.getSetting('webdavUrl');
-    const user = db.getSetting('webdavUser');
-    const pass = db.getSetting('webdavPass');
-    if (!url) throw new Error('请先在设置页配置 WebDAV 服务器地址');
-    // webdav 包为 ESM，用动态导入兼容 CJS 主进程
-    return { url, user: user || '', pass: pass || '' };
-  }
-
-  ipcMain.handle('sync:backup', async () => {
-    db.assertOnlineEnabled('WebDAV 同步');
-    const { url, user, pass } = getSyncClient();
-    const { createClient } = await import('webdav');
-    const client = createClient(url, { username: user, password: pass });
-
-    const books = db.getAllBooks() as any[];
-    const payload = {
-      version: 1,
-      exportedAt: new Date().toISOString(),
-      books: books.map(b => ({
-        title: b.title,
-        author: b.author,
-        file_type: b.file_type,
-        progress: b.progress,
-        last_read_at: b.last_read_at,
-      })),
-      bookmarks: books.flatMap(b =>
-        (db.getBookmarksByBookId(b.id) as any[]).map(m => ({ book: b.title, position: m.position, text: m.text })),
-      ),
-      notes: books.flatMap(b =>
-        (db.getNotesByBookId(b.id) as any[]).map(n => ({
-          book: b.title,
-          position: n.position,
-          selected_text: n.selected_text,
-          note: n.note,
-        })),
-      ),
-      sources: db.getAllSources(),
-      settings: ['fontSize', 'lineHeight', 'theme', 'fontFamily', 'ttsRate', 'aiProvider', 'aiBaseUrl', 'aiModel', 'aiEmbedUrl'].map(k => ({
-        key: k,
-        value: db.getSetting(k),
-      })),
-    };
-    await client.putFileContents('/book-reader-backup.json', JSON.stringify(payload, null, 2), {
-      overwrite: true,
-    });
-    db.setSetting('lastSyncAt', new Date().toLocaleString());
-    return true;
-  });
-
-  ipcMain.handle('sync:restore', async () => {
-    db.assertOnlineEnabled('WebDAV 同步');
-    const { url, user, pass } = getSyncClient();
-    const { createClient } = await import('webdav');
-    const client = createClient(url, { username: user, password: pass });
-
-    const raw = (await client.getFileContents('/book-reader-backup.json', { format: 'text' })) as string;
-    const data = JSON.parse(raw as string);
-    if (!data || data.version !== 1) throw new Error('备份文件格式不正确');
-
-    const localBooks = db.getAllBooks() as any[];
-    const findLocal = (title: string) => localBooks.find(b => b.title === title);
-    let restored = 0;
-
-    // 进度：远端更新则覆盖
-    for (const rb of data.books || []) {
-      const local = findLocal(rb.title);
-      if (!local) continue;
-      if ((rb.last_read_at || '') > (local.last_read_at || '')) {
-        db.updateBookProgress(local.id, rb.progress ?? 0);
-        restored++;
-      }
-    }
-    // 书签笔记：按书名匹配、position 去重插入
-    for (const m of data.bookmarks || []) {
-      const local = findLocal(m.book);
-      if (!local) continue;
-      const exists = (db.getBookmarksByBookId(local.id) as any[]).some(x => x.position === m.position);
-      if (!exists) {
-        db.insertBookmark({ book_id: local.id, position: m.position, text: m.text });
-        restored++;
-      }
-    }
-    for (const n of data.notes || []) {
-      const local = findLocal(n.book);
-      if (!local) continue;
-      const exists = (db.getNotesByBookId(local.id) as any[]).some(
-        x => x.position === n.position && x.note === n.note,
-      );
-      if (!exists) {
-        db.insertNote({ book_id: local.id, position: n.position, selected_text: n.selected_text, note: n.note });
-        restored++;
-      }
-    }
-    // 书源：按 name+url 去重
-    const localSources = db.getAllSources() as any[];
-    for (const s of data.sources || []) {
-      if (!localSources.some(x => x.name === s.name && x.url === s.url)) {
-        db.insertSource({
-          name: s.name,
-          url: s.url,
-          search_url: s.search_url || '',
-          chapters_url: s.chapters_url || '',
-          content_url: s.content_url || '',
-          rules: s.rules || '',
-        });
-        restored++;
-      }
-    }
-    // 阅读偏好设置
-    for (const s of data.settings || []) {
-      if (s.value != null) db.setSetting(s.key, String(s.value));
-    }
-    db.setSetting('lastSyncAt', new Date().toLocaleString());
-    return restored;
-  });
-
   // 外部链接：交给系统浏览器打开（仅放行 http/https）
   ipcMain.handle('app:openExternal', async (_event, url: string) => {
     if (!/^https?:\/\//i.test(url)) throw new Error('只允许打开 http/https 链接');
@@ -1802,7 +1829,7 @@ export function registerIpcHandlers() {
     const b = db.getBookById(idB) as any;
     if (!a || !b) throw new Error('书籍不存在');
     const [left, right] = await Promise.all([bookTextLines(a), bookTextLines(b)]);
-    if (!left || !right) throw new Error('该格式暂不支持比较（目前支持 TXT / EPUB）');
+    if (!left || !right) throw new Error('该格式暂不支持比较（目前支持 TXT、EPUB、Markdown 与 Word 文档）');
     const clip = (lines: string[]) => ({
       lines: lines.slice(0, COMPARE_MAX_LINES),
       total: lines.length,
@@ -1823,7 +1850,20 @@ export function registerIpcHandlers() {
       platform: process.platform,
       dataDir: app.getPath('userData'),
       booksDir: path.join(app.getPath('userData'), 'books'),
+      // 便携版：渲染进程拿不到 process.env，经这里透出去给设置页判断是否置灰
+      isPortable: !!process.env.PORTABLE_EXECUTABLE_DIR,
     };
+  });
+
+  // 开机自启：开关要立即生效，所以不走 settings 通道，单独即时写注册表
+  ipcMain.handle('app:setAutoLaunch', (_event, flag: boolean) => {
+    applyAutoLaunch(!!flag);
+    return !!flag;
+  });
+
+  // 读取注册表里的真实状态：用户可能手动关掉过，回读比只信设置库更准
+  ipcMain.handle('app:getAutoLaunch', () => {
+    return isAutoLaunchEnabled();
   });
 
   // ============ 文件夹监视（自动入库） ============
@@ -1886,19 +1926,15 @@ export function registerIpcHandlers() {
     const snapDir = path.join(app.getPath('userData'), 'snapshots');
     const booksDir = path.join(app.getPath('userData'), 'books');
     return {
-      chapterCount: db.countCachedChapters(),
       snapshotBytes: dirSize(snapDir),
       booksBytes: dirSize(booksDir),
     };
   });
 
-  ipcMain.handle('cache:clear', (_event, opts: { snapshots?: boolean; chapterCache?: boolean }) => {
+  ipcMain.handle('cache:clear', (_event, opts: { snapshots?: boolean }) => {
     const result: Record<string, number> = {};
     if (opts?.snapshots) {
       result.snapshots = clearSnapshots(path.join(app.getPath('userData'), 'snapshots'));
-    }
-    if (opts?.chapterCache) {
-      result.chapterCache = db.clearChapterCache();
     }
     return result;
   });
@@ -1909,11 +1945,10 @@ export function registerIpcHandlers() {
     'privacy:clear',
     (
       _event,
-      opts: { positions?: boolean; chapterCache?: boolean; timestamps?: boolean; clipboard?: boolean },
+      opts: { positions?: boolean; timestamps?: boolean; clipboard?: boolean },
     ) => {
       const result: Record<string, number | boolean> = {};
       if (opts?.positions) result.positions = db.clearAutoPositions();
-      if (opts?.chapterCache) result.chapterCache = db.clearChapterCache();
       if (opts?.timestamps) result.timestamps = db.clearReadingTimestamps();
       if (opts?.clipboard) {
         clipboard.clear();
@@ -1972,8 +2007,7 @@ export function registerIpcHandlers() {
       (payload.data.books?.length ?? 0) +
       (payload.data.bookmarks?.length ?? 0) +
       (payload.data.notes?.length ?? 0) +
-      (payload.data.words?.length ?? 0) +
-      (payload.data.sources?.length ?? 0);
+      (payload.data.words?.length ?? 0);
     const bookFiles = files.filter(f => f.archiveName.startsWith('books/')).length;
     return {
       filePath,

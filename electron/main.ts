@@ -1,4 +1,4 @@
-import { app, BrowserWindow, clipboard, protocol, net, ipcMain, Tray, Menu, nativeImage, screen } from 'electron';
+import { app, BrowserWindow, clipboard, globalShortcut, protocol, net, ipcMain, Tray, Menu, nativeImage, screen } from 'electron';
 import fs from 'fs';
 import path from 'path';
 import { pathToFileURL } from 'url';
@@ -7,6 +7,7 @@ import { ModelService } from './services/model-service';
 import { disposeEngine } from './services/llama-engine';
 import { registerIpcHandlers } from './ipc';
 import { folderWatcher } from './services/watch-folder';
+import { applyAutoLaunch } from './services/auto-launch';
 import { loadRenderer } from './renderer-window';
 import { LOCAL_FILE_SCHEME, filePathFromUrl, isInsideAllowedDir } from './services/local-file';
 
@@ -81,6 +82,54 @@ function openBookFile(filePath: string) {
   mainWindow.webContents.send('menu:open-file', filePath);
 }
 
+/**
+ * 隐藏 / 显示主窗口：窗口正显示着就收起，否则唤回前台。
+ * 一个键承担「叫出来 / 收起来」两件事——「隐藏窗口」之后本来就得靠同一个键找回来，
+ * 分成两个键反而会出现「收起来了但没有键能叫回」。
+ */
+function toggleMainWindow() {
+  if (!mainWindow) return;
+  if (mainWindow.isVisible() && !mainWindow.isMinimized()) {
+    mainWindow.hide();
+  } else {
+    showMainWindow();
+  }
+}
+
+/** 当前生效的全局热键（Electron accelerator 写法），空串表示未设 */
+let globalHotkey = '';
+
+/**
+ * 注册 / 改绑 / 注销全局热键，返回是否真的生效。
+ *
+ * 与 Ctrl+O 那类应用内快捷键**故意不同**：那一类不做成全局的，因为做成全局就会
+ * 把别的软件里的 Ctrl+O 抢过来（见 registerShortcuts 的注释）。这里反过来——
+ * 「失焦时也能一键把阅读器叫到面前」本来就只有全局热键能做，是它的正经用法；
+ * 键位由用户自己录，默认不设，所以不存在替谁做主的问题。
+ *
+ * `globalShortcut.register` 遇到已被别的软件占用的键**只返回 false，不抛错**，
+ * 所以这里必须把返回值一路透到界面：只有真的注册成功才算数，不让用户拿到一个
+ * 按不出来的「已设置」。
+ */
+function applyGlobalHotkey(accel: string): boolean {
+  const next = (accel || '').trim();
+  // 改绑前先摘掉旧的：同一个键重复注册会直接失败，不先注销就会卡在「换不动」的状态
+  if (globalHotkey) {
+    try { globalShortcut.unregister(globalHotkey); } catch { /* 已注销则忽略 */ }
+    globalHotkey = '';
+  }
+  if (!next) return true;
+  // 无头验收模式不开窗口，注册一个抢不到窗口的全局键只会去抢真实桌面的按键
+  if (process.env.BOOKREADER_HEADLESS_ACCEPTANCE === '1') return false;
+  try {
+    if (globalShortcut.register(next, toggleMainWindow)) {
+      globalHotkey = next;
+      return true;
+    }
+  } catch { /* 键位串不合法时按注册失败处理 */ }
+  return false;
+}
+
 app.on('second-instance', (_event, argv) => {
   const filePath = bookPathFromArgv(argv);
   if (filePath) {
@@ -140,6 +189,9 @@ function createWindow() {
       nodeIntegration: false,
     },
     titleBarStyle: 'hiddenInset',
+    // 任务栏悬停看到的就是这个标题；页面自带 <title> 已被 loadRenderer 拦掉，
+    // 之后由渲染进程按当前书覆盖（见 window:setTitle）
+    title: '阅读书架',
     backgroundColor: '#1a1a2e',
   });
 
@@ -162,18 +214,29 @@ function createWindow() {
 }
 
 /**
- * Ctrl+O 打开文件：只在本应用窗口内响应。
+ * Ctrl+O 打开文件、Ctrl+W 关闭当前文档：都只在本应用窗口内响应。
  * 早先用 globalShortcut 注册成系统级热键，只要本应用在运行（含托盘驻留、窗口失焦）
  * 就会把别的软件里的 Ctrl+O 抢过来，还会在隐藏窗口上弹出文件框。
+ *
+ * Ctrl+W 必须在这里拦、不能交给渲染层的 window 监听：EPUB 正文渲染在 iframe 里，
+ * 焦点落在正文上时按键事件只在那个文档内冒泡，外层 window 根本收不到。
  */
 function registerShortcuts() {
   if (process.env.BOOKREADER_HEADLESS_ACCEPTANCE === '1') return;
   mainWindow?.webContents.on('before-input-event', (event, input) => {
     if (input.type !== 'keyDown') return;
     if (!(input.control || input.meta) || input.alt || input.shift) return;
-    if (input.key.toLowerCase() !== 'o') return;
-    event.preventDefault();
-    mainWindow?.webContents.send('menu:open-file');
+    const key = input.key.toLowerCase();
+    if (key === 'o') {
+      event.preventDefault();
+      mainWindow?.webContents.send('menu:open-file');
+      return;
+    }
+    if (key === 'w') {
+      // 关哪个标签由渲染层定（主进程不知道标签状态），这里只负责把键拦下来
+      event.preventDefault();
+      mainWindow?.webContents.send('menu:close-tab');
+    }
   });
 }
 
@@ -214,6 +277,11 @@ app.whenReady().then(async () => {
     pendingOpenPath = null;
     return filePath;
   });
+  // 全局热键改绑要立即生效（不能等下次启动），所以与开机自启同套路：
+  // 值由设置页存进 settings 库，这里只管注册，返回值即「到底注册上没有」
+  ipcMain.handle('app:setGlobalHotkey', (_event, accel: string) =>
+    applyGlobalHotkey(String(accel ?? '')),
+  );
   createWindow();
   registerIpcHandlers();
   // 恢复上次的目录监视（须在 registerIpcHandlers 之后——回调在那里注册）
@@ -223,11 +291,23 @@ app.whenReady().then(async () => {
   } catch { /* 目录已不存在则忽略 */ }
   registerShortcuts();
   createTray();
+  // 恢复全局热键：上次启动时可能被别的软件占用而没注册上，每次启动都按当前值重试一次
+  try {
+    const saved = DatabaseService.getInstance().getSetting('globalHotkey') || '';
+    if (saved && !applyGlobalHotkey(saved)) {
+      console.warn(`[global-hotkey] 注册失败，已被其它程序占用？${saved}`);
+    }
+  } catch { /* 忽略 */ }
   // 恢复防截屏设置：设置页改过之后重启也要继续生效
   try {
     if (DatabaseService.getInstance().isSettingOn('screenProtection')) {
       for (const win of BrowserWindow.getAllWindows()) win.setContentProtection(true);
     }
+  } catch { /* 忽略 */ }
+  // 恢复开机自启设置：用户改过安装目录、升级重装、或在注册表里手动删过，
+  // 每次启动都按当前 exe 路径重新对齐一次（与上面两处同构：失败静默忽略）
+  try {
+    applyAutoLaunch(DatabaseService.getInstance().isSettingOn('autoLaunch'));
   } catch { /* 忽略 */ }
   // 推理走进程内引擎（懒加载，首次 AI 调用时载入模型）；
   // 边车仅作手动回退，不再开机自启，避免模型双份占内存
@@ -257,14 +337,15 @@ app.on('before-quit', () => {
 });
 
 app.on('will-quit', () => {
+  // 全局热键必须在退出前主动摘掉：否则应用都没了，这个键还被占着不响应任何人
+  try { globalShortcut.unregisterAll(); } catch { /* 忽略 */ }
   try { folderWatcher().stop(); } catch { /* 忽略 */ }
-  // 隐私模式：退出时清掉临时数据（章节缓存与剪贴板），不含用户笔记/书签。
+  // 隐私模式：退出时清掉剪贴板，不含用户笔记/书签与调用方的复制内容以外数据。
   // 与下面的会话标记分开 try：隐私清理失败不该连累会话标记，否则正常退出也会
   // 残留 readingSession，下次启动误报「上次没有正常退出」。
   try {
     const db = DatabaseService.getInstance();
     if (db.isSettingOn('privacyAutoClear')) {
-      db.clearChapterCache();
       clipboard.clear();
     }
   } catch { /* 忽略 */ }

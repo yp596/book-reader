@@ -1,5 +1,6 @@
 import fs from 'fs';
 import path from 'path';
+import { pathToFileURL } from 'url';
 import JSZip from 'jszip';
 import * as pdfjsLib from 'pdfjs-dist';
 import mammoth from 'mammoth';
@@ -51,10 +52,26 @@ for (const [name, lang] of [
   hljs.registerLanguage(name, lang as never);
 }
 
-// pdfjs 解析 PDF 需要 worker 伴随文件。不显式指定的话它按包内相对路径找，
-// 打包后找不到就静默失败——PDF 目录会变成空的，且错误被上层 catch 吞掉。
-// 该文件由 vite 构建时拷到主进程产物目录（见 vite.config.ts）。
-pdfjsLib.GlobalWorkerOptions.workerSrc = path.join(__dirname, 'pdf.worker.mjs');
+/**
+ * pdfjs 在 Node 环境下不走真 worker，而是「fake worker」——内部直接 `await import(workerSrc)`。
+ * 因此 workerSrc **必须是合法的 URL**：裸 Windows 路径（`D:\...`）会被 ESM loader 当成
+ * 协议名 "D:" 拒绝（ERR_UNSUPPORTED_ESM_URL_SCHEME），而 pdfjs 会把失败包一层后返回空结果，
+ * 不崩、不抛到界面，只表现为「PDF 书名回落成文件名、目录恒为空」——极难从现象反推。
+ *
+ * 候选按「构建产物 → 源码树」排列，取第一个存在的：打包运行时命中前者
+ * （vite 构建时拷过去的，见 vite.config.ts 的 copyPdfWorker），
+ * 直接跑源码或单元测试时命中后者。
+ */
+function resolvePdfWorkerSrc(): string {
+  const candidates = [
+    path.join(__dirname, 'pdf.worker.mjs'),
+    path.resolve(__dirname, '../../node_modules/pdfjs-dist/build/pdf.worker.mjs'),
+  ];
+  const hit = candidates.find(p => fs.existsSync(p)) ?? candidates[0];
+  return pathToFileURL(hit).href;
+}
+
+pdfjsLib.GlobalWorkerOptions.workerSrc = resolvePdfWorkerSrc();
 
 export interface BookMetadata {
   title: string;
@@ -133,6 +150,36 @@ async function extractPdfMetadata(filePath: string): Promise<BookMetadata | null
   }
 }
 
+/** 书名号 / 双尖括号 / 方头括号，左 ↔ 右 */
+const TITLE_BRACKETS: ReadonlyArray<readonly [string, string]> = [
+  ['《', '》'],
+  ['〈', '〉'],
+  ['【', '】'],
+];
+
+/**
+ * 剥掉包住整行的书名号。
+ *
+ * 不能「首字符是左书名号就删、末字符是右书名号就删」——两边各判各的、不配对，
+ * 会把「《书名》后接正文」削成「书名》后接正文」：半截括号比不剥更糟，
+ * 用户从书名上根本看不出原文长什么样。规则分三种：
+ *   1. 两端成对且配对（且剥完非空）→ 一起剥，这是 `《三体》` 这种正常情况；
+ *   2. 只有左边、整行都没有对应右括号 → 剥（首行被截断，留一个孤零零的左书名号没意义）；
+ *   3. 只有右边、整行都没有对应左括号 → 剥，与 2 对称。
+ * 其余一律原样返回。
+ */
+function stripTitleBrackets(raw: string): string {
+  for (const [open, close] of TITLE_BRACKETS) {
+    const hasClose = raw.includes(close);
+    if (raw.startsWith(open) && hasClose && raw.endsWith(close) && raw.length > open.length + close.length) {
+      return raw.slice(open.length, raw.length - close.length).trim();
+    }
+    if (raw.startsWith(open) && !hasClose) return raw.slice(open.length).trim();
+    if (raw.endsWith(close) && !raw.includes(open)) return raw.slice(0, raw.length - close.length).trim();
+  }
+  return raw;
+}
+
 /** TXT：取首个非空行当书名，匹配「作者：XXX」 */
 function extractTxtMetadata(filePath: string): BookMetadata | null {
   const buffer = fs.readFileSync(filePath);
@@ -153,10 +200,7 @@ function extractTxtMetadata(filePath: string): BookMetadata | null {
 
   // 跳过纯作者行，取第一个像书名的行
   const title = lines.find(l => !/作\s*者\s*[:：]/.test(l)) ?? lines[0];
-  const clean = title
-    .replace(/^[《〈【]/, '')
-    .replace(/[》〉】]$/, '')
-    .trim();
+  const clean = stripTitleBrackets(title).trim();
   if (!clean || clean.length > 60) return null;
   return { title: clean, author };
 }
@@ -184,6 +228,12 @@ export async function extractToc(
         return extractTxtToc(filePath, txtOptions);
       case '.pdf':
         return await extractPdfToc(filePath);
+      // Markdown / DOCX 的目录都是标题列表：走与阅读侧同一套渲染取锚点，
+      // 两边编号规则一致，目录点下去才能落在正确的标题上
+      case '.md':
+        return (await mdRender(filePath)).toc;
+      case '.docx':
+        return (await docxRender(filePath)).toc;
       default:
         return [];
     }
@@ -434,6 +484,42 @@ function readTextHead(filePath: string, maxBytes = 65536): string {
 /** 读取整份文本文件，自动判编码。供文档比较等需要原文的场景使用 */
 export function readPlainTextFile(filePath: string): string {
   return decodeTextAuto(fs.readFileSync(filePath));
+}
+
+/**
+ * 把整份 TXT 按目录规则切成分章正文，供「导出为 EPUB」这类需要章节结构的场景使用。
+ *
+ * 与 `extractTxtSections` 的区别只在读取范围：那个为做目录只读文件前 8MB，大文件会被
+ * 静默截断（够画目录，不够导出），所以这里配 `readPlainTextFile` 全量读取。切分规则两者
+ * 一致——一行文本若与某个目录项的名字完全相同，就视为章节起头。
+ */
+export function splitTxtChapters(
+  text: string,
+  options?: TxtTocOptions,
+): { title: string; text: string }[] {
+  const toc = parseTxtChapters(text, options);
+  if (toc.length === 0) return [{ title: '', text }];
+
+  const titles = new Set(toc.map(t => t.label.trim()).filter(Boolean));
+  const chapters: { title: string; text: string }[] = [];
+  let current = { title: '', lines: [] as string[] };
+  for (const raw of text.split('\n')) {
+    const line = raw.trim();
+    if (line && titles.has(line)) {
+      if (current.title || current.lines.length > 0) {
+        chapters.push({ title: current.title, text: current.lines.join('\n') });
+      }
+      current = { title: line, lines: [] };
+    } else {
+      current.lines.push(raw);
+    }
+  }
+  if (current.title || current.lines.length > 0) {
+    chapters.push({ title: current.title, text: current.lines.join('\n') });
+  }
+  // 丢弃没有正文的碎块。这条同时解决了「前置目录页」：目录页里密排的章节名会各成一个
+  // 标题、正文为空，正文里真正的同名章节才留下——与 extractTxtSections 的取舍一致。
+  return chapters.filter(c => c.text.trim());
 }
 
 function extractTxtToc(filePath: string, options?: TxtTocOptions): TocEntry[] {
@@ -762,99 +848,190 @@ export const imageMediaType = (filePath: string): string =>
 /** 单张图片的体积上限：笔记里塞了超大图时不至于把内存吃爆 */
 const MAX_IMAGE_BYTES = 20 * 1024 * 1024;
 
-export interface MarkdownDocument {
-  chapters: { title: string; content: string; html: string }[];
-  /** 需要随 EPUB 打包的本地图片（zip 内路径 + 源文件路径） */
-  images: { archiveName: string; sourcePath: string }[];
-  /** 引用了但本机找不到的图片数（保持原样，浏览器会显示 alt） */
+/** Markdown 整篇渲染结果（阅读侧按连续滚动显示时用） */
+export interface MarkdownRender {
+  /** 整篇 HTML：标题带 id 锚点，本地图片已换成本机可读的 URL */
+  html: string;
+  /** 目录：href 是 `#` + 标题锚点，阅读侧据此滚动定位 */
+  toc: TocEntry[];
+  /** 正文引用到的本地图片：src 是正文里的引用原文，absPath 是解析出的绝对路径 */
+  images: { src: string; absPath: string }[];
+  /** 引用了但本机找不到的图片数（原样保留引用，阅读器会显示 alt） */
   missingImages: number;
   /** frontmatter 里的属性（键 → 值数组），供书架按属性筛选 */
   props: Record<string, string[]>;
 }
 
 /**
- * 把 Markdown 里引用的本地图片收进 EPUB。
- *
- * 相对路径的图片在 EPUB 里是找不到的：`./images/pic.png` 会被当成包内不存在的资源，
- * 结果是空白或破图。这里按 Markdown 文件所在目录解析、读入字节、统一放到 `Images/` 下，
- * 并把引用改写成 `../Images/xxx`（章节在 Text/ 下，所以要往上一级）。
- * 外链与 data: 内联不动——前者本来就要联网，后者已经自带内容。
+ * 标题锚点前缀，Markdown 与 DOCX 共用（两者都走「整篇渲染 + 目录锚点跳转」这条路）。
+ * 前缀短且带连字符，与正文里已有的 id 不容易撞。
  */
-function collectLocalImages(
-  chapters: { title: string; content: string; html: string }[],
-  baseDir: string,
-): { chapters: { title: string; content: string; html: string }[]; images: { archiveName: string; sourcePath: string }[]; missing: number } {
-  const images: { archiveName: string; sourcePath: string }[] = [];
-  const used = new Set<string>();
-  let missing = 0;
+const DOC_HEADING_PREFIX = 'dh-';
 
-  const rewritten = chapters.map(ch => ({
-    ...ch,
-    html: ch.html.replace(/<img\b[^>]*>/g, tag => {
-      const srcMatch = /src="([^"]*)"/.exec(tag);
-      if (!srcMatch) return tag;
-      const src = srcMatch[1];
-      if (!src || /^(https?:|data:|bookfile:|\/\/)/i.test(src)) return tag;
-
-      const abs = path.resolve(baseDir, decodeURI(src.replace(/^\.\//, '')));
-      let ok = false;
-      try {
-        const st = fs.statSync(abs);
-        ok = st.isFile() && st.size > 0 && st.size <= MAX_IMAGE_BYTES;
-      } catch { /* 文件不在 */ }
-      if (!ok) {
-        missing++;
-        return tag;
-      }
-      if (!IMAGE_MIME[path.extname(abs).toLowerCase()]) return tag;
-
-      let name = path.basename(abs);
-      // 不同目录下的同名图片：加序号避免互相覆盖
-      if (used.has(name)) name = `${used.size}-${name}`;
-      used.add(name);
-      images.push({ archiveName: `Images/${name}`, sourcePath: abs });
-      return tag.replace(/src="[^"]*"/, `src="../Images/${name}"`);
-    }),
-  }));
-
-  return { chapters: rewritten, images, missing };
+/**
+ * 给渲染结果里的标题编锚点、顺手取出目录。
+ *
+ * 编号必须在这里一次编完、且按标题在**渲染结果里出现的先后**编：
+ * 按源文件里的先后编会错位——引用块、列表里的标题在渲染后位置未必与源文一致，
+ * 目录点下去就会落到别的标题上。
+ */
+function anchorHeadings(html: string): { html: string; toc: TocEntry[] } {
+  let seq = 0;
+  const anchored = html.replace(
+    /<h([1-6])(\s[^>]*)?>/g,
+    (_m, level: string, attrs = '') => `<h${level} id="${DOC_HEADING_PREFIX}${seq++}"${attrs}>`,
+  );
+  // 编号已定好，这一遍只取标题文本，不再改动 HTML
+  const toc: TocEntry[] = [];
+  for (const m of anchored.matchAll(
+    new RegExp(`<h([1-6])\\s+id="(${DOC_HEADING_PREFIX}\\d+)"[^>]*>([\\s\\S]*?)</h\\1>`, 'g'),
+  )) {
+    const label = m[3].replace(/<[^>]*>/g, '').trim();
+    if (label) toc.push({ label: label.slice(0, 100), href: `#${m[2]}` });
+  }
+  return { html: anchored, toc };
 }
 
 /**
- * Markdown 转「章 + 本地图片」。
- * 不把整篇合成一章的原因见 mdToChapters 的注释（epubjs 不支持片段锚点）。
+ * 读 Markdown 源文件：编码判断 + Obsidian 语法转换都在这一步，
+ * 得到可直接交给 marked 的 token 流，同时留下解码后的原文（frontmatter 要按原文解析）。
  */
-export async function mdToDocument(filePath: string): Promise<MarkdownDocument> {
-  const chapters = await mdToChapters(filePath);
-  const { chapters: withImages, images, missing } = collectLocalImages(
-    chapters,
+function readMarkdown(filePath: string): { tokens: ReturnType<typeof marked.lexer>; raw: string } {
+  // 与 TXT 同一套编码判断：Windows 记事本存出来的 GBK Markdown 很常见，
+  // 直接按 utf-8 读会整篇变成替换字符，且不可逆
+  const raw = decodeTextAuto(fs.readFileSync(filePath));
+  return { tokens: marked.lexer(preprocessObsidianMarkdown(raw)), raw };
+}
+
+/**
+ * 把 Markdown 正文里引用的本地图片换成本机可读的 URL。
+ *
+ * 相对路径的图片在渲染出来之后是找不到的：`./images/pic.png` 会被当成相对阅读器
+ * 页面解析。这里按 Markdown 文件所在目录解析成绝对路径，交给 resolveImage 换成
+ * 可读 URL（导入时会把图片一起搬进书库，换的就是搬过去之后的地址）。
+ * 外链与 data: 内联不动——前者本来就要联网，后者已经自带内容。
+ * 没提供 resolveImage 时只做登记，HTML 原样不动。
+ */
+function rewriteMarkdownImages(
+  html: string,
+  baseDir: string,
+  resolveImage?: (absPath: string, src: string) => string | null,
+): { html: string; images: { src: string; absPath: string }[]; missing: number } {
+  const images: { src: string; absPath: string }[] = [];
+  let missing = 0;
+
+  const out = html.replace(/<img\b[^>]*>/g, tag => {
+    const srcMatch = /src="([^"]*)"/.exec(tag);
+    if (!srcMatch) return tag;
+    const src = srcMatch[1];
+    if (!src || /^(https?:|data:|bookfile:|\/\/)/i.test(src)) return tag;
+
+    const abs = path.resolve(baseDir, decodeURI(src.replace(/^\.\//, '')));
+    let ok = false;
+    try {
+      const st = fs.statSync(abs);
+      ok = st.isFile() && st.size > 0 && st.size <= MAX_IMAGE_BYTES;
+    } catch { /* 文件不在 */ }
+    if (!ok) {
+      missing++;
+      return tag;
+    }
+    // 非图片后缀不认：避免把任意本地文件都读出来暴露给页面
+    if (!IMAGE_MIME[path.extname(abs).toLowerCase()]) return tag;
+
+    images.push({ src, absPath: abs });
+    const url = resolveImage?.(abs, src);
+    return url ? tag.replace(/src="[^"]*"/, `src="${url}"`) : tag;
+  });
+
+  return { html: out, images, missing };
+}
+
+/**
+ * 按导入时记下的映射换掉正文里的图片引用。
+ *
+ * 阅读时不能像导入那样按相对路径去解析：书库里的 .md 与图片不在同一棵目录树下
+ * （图片统一收在 md-assets/ 里），那个位置的相对路径必然找不到。所以映射按**引用
+ * 原文**索引直接替换，也不受用户原来那个目录后来怎么变的影响。
+ */
+export function applyMarkdownImageMap(html: string, map: Record<string, string>): string {
+  if (Object.keys(map).length === 0) return html;
+  return html.replace(/<img\b[^>]*>/g, tag => {
+    const m = /src="([^"]*)"/.exec(tag);
+    const url = m ? map[m[1]] : undefined;
+    return url ? tag.replace(/src="[^"]*"/, `src="${url}"`) : tag;
+  });
+}
+
+/**
+ * Markdown 整篇渲染：阅读侧按连续滚动显示，不切章、不分页。
+ *
+ * 与 mdToChapters 的区别是渲染目标。那边按 h1/h2 切章是为了塞进 EPUB 的 spine
+ * （epubjs 不支持片段锚点，合章会让目录全部跳到章首），这里整篇是一个 DOM，
+ * 标题带 id、目录直接指锚点——恰是 EPUB 那条路做不到的事。
+ *
+ * 锚点在**渲染完成后**按出现顺序编号，而不是按 token 数：标题也可能出现在引用块
+ * 或列表里，按 token 数编会与真实 DOM 对不上，目录就会跳错位置。
+ */
+export async function mdRender(
+  filePath: string,
+  resolveImage?: (absPath: string, src: string) => string | null,
+): Promise<MarkdownRender> {
+  const { tokens, raw } = readMarkdown(filePath);
+
+  const { html, toc } = anchorHeadings(marked.parser(tokens));
+
+  const { html: withImages, images, missing } = rewriteMarkdownImages(
+    html,
     path.dirname(filePath),
+    resolveImage,
   );
   // 代码高亮放在最后：它只往 <pre><code> 里加 span，不影响前面几步的结果
-  const highlighted = withImages.map(ch => ({ ...ch, html: highlightCodeBlocks(ch.html) }));
+  const highlighted = highlightCodeBlocks(withImages);
+
   // 属性要从未经改写的原文里读：预处理阶段会把 frontmatter 变成信息块
   let props: Record<string, string[]> = {};
   try {
-    props = parseFrontmatter(decodeTextAuto(fs.readFileSync(filePath)));
+    props = parseFrontmatter(raw);
   } catch { /* 读不出来就当没有属性 */ }
-  return { chapters: highlighted, images, missingImages: missing, props };
+
+  return { html: highlighted, toc, images, missingImages: missing, props };
+}
+
+/** DOCX 整篇渲染结果（阅读侧同样按连续滚动显示） */
+export interface DocxRender {
+  /** 整篇 HTML：标题带 id 锚点，图片是随 HTML 内联的 data: 地址 */
+  html: string;
+  /** 目录：href 是 `#` + 标题锚点 */
+  toc: TocEntry[];
 }
 
 /**
- * Markdown 转章节：一级 / 二级标题另起一章，其余内容保留为 HTML，
- * 以留住加粗、列表、代码块等排版。转出的 EPUB 走与 DOCX 相同的后续链路。
+ * DOCX 整篇渲染。
  *
- * 为什么不整篇合成一章：epubjs 不支持片段锚点（spine.get 会把 # 后面的部分丢掉），
- * 合章之后目录里每个标题都会跳到章首，反而不如按标题分章好用。
- * 连续阅读由阅读器的滚动模式负责——Markdown 导入的书默认就用滚动打开。
+ * 走 mammoth 的 HTML 输出，不再转 EPUB：转 EPUB 是为了复用 epubjs 那条阅读链路，
+ * 而 epubjs 不支持片段锚点（`spine.get` 会丢掉 `#` 之后的部分），代价是目录只能按章
+ * 跳转。既然 Markdown 已经改走原生渲染，DOCX 也一起过来——两者在阅读侧本就是同一套：
+ * 连续滚动、按顶层块记位置、按标题锚点跳转。
+ *
+ * 图片由 mammoth 直接内联成 data: 地址，所以不必像 Markdown 那样把图片搬进书库、
+ * 再按引用原文建映射表——整篇 HTML 自带内容，拷到哪都完整。
+ */
+export async function docxRender(filePath: string): Promise<DocxRender> {
+  const { value: html } = await mammoth.convertToHtml({ buffer: fs.readFileSync(filePath) });
+  return anchorHeadings(html);
+}
+
+/**
+ * Markdown 按标题切章：一级 / 二级标题另起一章，其余内容保留为 HTML。
+ *
+ * 阅读侧已经改走 mdRender 的整篇渲染（不切章、不分页），这里现在只服务于元数据汇总
+ * ——#标签、未完成任务、wiki 链接都是按章组织的，切章后每项才好标出它属于哪一节。
  */
 export async function mdToChapters(
   filePath: string,
 ): Promise<{ title: string; content: string; html: string }[]> {
-  // 与 TXT 同一套编码判断：Windows 记事本存出来的 GBK Markdown 很常见，
-  // 直接按 utf-8 读会整篇变成替换字符，且不可逆
-  const text = decodeTextAuto(fs.readFileSync(filePath));
-  const tokens = marked.lexer(preprocessObsidianMarkdown(text));
+  const { tokens, raw } = readMarkdown(filePath);
   const chapters: { title: string; html: string[] }[] = [];
   let current: { title: string; html: string[] } = { title: '', html: [] };
   const flush = () => {
@@ -875,7 +1052,7 @@ export async function mdToChapters(
   if (chapters.length === 0) return [];
   // 无标题文档：合成单章
   if (chapters.length === 1 && !chapters[0].title) {
-    return [{ title: SINGLE_CHAPTER_NAME, content: text, html: toXhtmlFragment(chapters[0].html.join('')) }];
+    return [{ title: SINGLE_CHAPTER_NAME, content: raw, html: toXhtmlFragment(chapters[0].html.join('')) }];
   }
   return chapters.map((c, i) => ({
     title: c.title || untitledChapterName(i),
@@ -1069,6 +1246,12 @@ export async function extractBookSections(
       return extractTxtSections(filePath);
     case '.pdf':
       return extractPdfSections(filePath);
+    // Markdown / DOCX 不转 EPUB，索引也要跟着走原生渲染这条路：
+    // 走不了的话「语义检索」会对这类书直接报「未能提取正文」
+    case '.md':
+      return sectionsFromRenderedHtml((await mdRender(filePath)).html);
+    case '.docx':
+      return sectionsFromRenderedHtml((await docxRender(filePath)).html);
     default:
       return [];
   }
@@ -1117,6 +1300,40 @@ async function extractEpubSections(filePath: string, tocJson?: string): Promise<
       toc.find(t => t.href === href || href.endsWith(t.href) || t.href.endsWith(href))?.label ?? '';
     sections.push({ label, target: JSON.stringify({ href }), text });
   }
+  return sections;
+}
+
+/**
+ * 整篇 HTML（Markdown / DOCX 的渲染结果）→ 检索段落。
+ *
+ * 切点取标题锚点：那是与目录同一批 `dh-N` 编号，命中后能直接跳回那一节。
+ * 没有标题的文档会退化成整篇一段——至少正文进得了索引，不至于一本书都建不了索引。
+ */
+function sectionsFromRenderedHtml(html: string): BookSection[] {
+  const $ = cheerio.load(html);
+  $('script, style').remove();
+
+  const sections: BookSection[] = [];
+  let label = '';
+  let href = '';
+  let buf: string[] = [];
+  const flush = () => {
+    const text = buf.join('\n').replace(/[ \t]+/g, ' ').trim();
+    if (text) sections.push({ label, target: JSON.stringify({ href }), text });
+    buf = [];
+  };
+
+  $.root().children().each((_i, el) => {
+    const $el = $(el);
+    const id = $el.attr('id') ?? '';
+    if (/^h[1-6]$/i.test(el.tagName ?? '') && id.startsWith(DOC_HEADING_PREFIX)) {
+      flush();
+      label = $el.text().trim().slice(0, 100);
+      href = `#${id}`;
+    }
+    buf.push($el.text());
+  });
+  flush();
   return sections;
 }
 

@@ -11,6 +11,8 @@ import {
   findKeyConflict,
   parseShortcutOverrides,
   keyForAction,
+  toGlobalAccelerator,
+  acceleratorLabel,
 } from './shortcuts';
 
 describe('normalizeKey', () => {
@@ -204,5 +206,50 @@ describe('自定义键位', () => {
     expect(parseShortcutOverrides('123')).toEqual({});
     expect(parseShortcutOverrides(JSON.stringify({ 不存在的动作: 'x', next: 5 }))).toEqual({});
     expect(parseShortcutOverrides(JSON.stringify({ next: 'j', prev: '' }))).toEqual({ next: 'j', prev: '' });
+  });
+});
+
+describe('全局热键的 accelerator 转换', () => {
+  it('修饰键按 Electron 的写法输出，单字符转大写', () => {
+    expect(toGlobalAccelerator({ key: 'h', ctrlKey: true, altKey: true })).toBe('Control+Alt+H');
+    expect(toGlobalAccelerator({ key: '`', ctrlKey: true })).toBe('Control+`');
+    expect(toGlobalAccelerator({ key: '7', ctrlKey: true })).toBe('Control+7');
+  });
+
+  it('Shift 必须显式保留，不能被折进字符里', () => {
+    // 这是与 normalizeKey 的分界：那边把 Ctrl+Shift+H 归一成 'Ctrl+h'，
+    // 全局热键若照搬就会把用户的 Ctrl+H 抢走，而自己设的键根本不生效
+    expect(toGlobalAccelerator({ key: 'H', ctrlKey: true, shiftKey: true })).toBe('Control+Shift+H');
+    expect(toGlobalAccelerator({ key: 'h', ctrlKey: true })).toBe('Control+H');
+  });
+
+  it('裸键拒绝：注册成全局热键等于把那个字符从所有软件里夺走', () => {
+    expect(toGlobalAccelerator({ key: 'h' })).toBeNull();
+    expect(toGlobalAccelerator({ key: 'F11' })).toBeNull();
+    expect(toGlobalAccelerator({ key: '`' })).toBeNull();
+  });
+
+  it('特殊键按 Electron 的键码表映射（名字两套不一样，写错只会静默失败）', () => {
+    expect(toGlobalAccelerator({ key: 'ArrowUp', ctrlKey: true })).toBe('Control+Up');
+    expect(toGlobalAccelerator({ key: 'Escape', ctrlKey: true, altKey: true })).toBe('Control+Alt+Escape');
+    expect(toGlobalAccelerator({ key: ' ', ctrlKey: true, altKey: true })).toBe('Control+Alt+Space');
+    expect(toGlobalAccelerator({ key: 'F11', ctrlKey: true })).toBe('Control+F11');
+    expect(toGlobalAccelerator({ key: 'F25', ctrlKey: true })).toBeNull();
+  });
+
+  it('Shift 改写过标点时拒绝，不给一个注册得进去却按不出来的假成功', () => {
+    // Shift+1 的 e.key 已是 '!'，再拼一次 Shift 会得到没人认的组合
+    expect(toGlobalAccelerator({ key: '!', ctrlKey: true, shiftKey: true })).toBeNull();
+    expect(toGlobalAccelerator({ key: '!', ctrlKey: true })).toBe('Control+!');
+    expect(toGlobalAccelerator({ key: 'Dead', ctrlKey: true })).toBeNull();
+  });
+
+  it('Meta 走 Super，不冒充 Control', () => {
+    expect(toGlobalAccelerator({ key: 'h', metaKey: true })).toBe('Super+H');
+  });
+
+  it('展示文案与快捷键列表写法一致', () => {
+    expect(acceleratorLabel('Control+Alt+H')).toBe('Ctrl+Alt+H');
+    expect(acceleratorLabel('')).toBe('');
   });
 });

@@ -25,7 +25,7 @@ type Tab = 'help' | 'about';
 /** 支持格式与说明 */
 const FORMATS = [
   { ext: 'EPUB', note: '最佳体验：目录、字体、高亮、检索全支持' },
-  { ext: 'TXT', note: '支持 UTF-8 / GBK 自动识别，可一键规整排版' },
+  { ext: 'TXT', note: '支持 UTF-8 / GBK / Big5 等自动识别与手动切换，可一键规整排版' },
   { ext: 'PDF', note: '支持缩放、跳页；有文字层的可切换流式重排，扫描版可用本机 OCR 取字' },
   { ext: 'DOCX', note: '导入时自动转换为 EPUB，阅读体验同为 EPUB' },
   { ext: 'CBZ', note: '漫画压缩包，免解压逐页读取' },
@@ -43,7 +43,6 @@ const OPEN_SOURCE = [
   { name: 'pdf-lib', license: 'MIT' },
   { name: 'JSZip', license: 'MIT（双许可 MIT 或 GPL-3.0，本项目按 MIT 使用）' },
   { name: 'marked', license: 'MIT' },
-  { name: 'webdav', license: 'MIT' },
   { name: 'zod', license: 'MIT' },
   { name: 'node-llama-cpp', license: 'MIT' },
   { name: 'ONNX Runtime Web', license: 'MIT' },
@@ -52,7 +51,7 @@ const OPEN_SOURCE = [
 const FAQ = [
   {
     q: '软件需要联网吗？',
-    a: '不需要。书库、笔记、阅读记录全部存在本机。只有当你主动使用在线书源、WebDAV 同步或下载本地 AI 模型时才会联网，这些都可以不用。',
+    a: '不需要。书库、笔记、阅读记录全部存在本机。只有当你主动下载本地 AI 模型，或把 AI 助手、语义检索指向外部服务时才会联网，这些都可以不用。',
   },
   {
     q: '扫描版 PDF 为什么不能重排？',

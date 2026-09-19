@@ -7,7 +7,7 @@ interface CompareProps {
 }
 
 /** 支持比较的格式：与主进程 bookTextLines 保持一致 */
-const COMPARABLE = ['txt', 'epub'];
+const COMPARABLE = ['txt', 'epub', 'md', 'docx'];
 
 export function Compare({ books }: CompareProps) {
   const candidates = useMemo(() => books.filter(b => COMPARABLE.includes(b.file_type)), [books]);
@@ -48,7 +48,7 @@ export function Compare({ books }: CompareProps) {
   return (
     <div className="compare-page">
       <h1>文档比较</h1>
-      <p className="section-desc">比对两本书的正文差异，适合核对同一文档的不同版本。支持 TXT 与 EPUB。</p>
+      <p className="section-desc">比对两本书的正文差异，适合核对同一文档的不同版本。支持 TXT、EPUB、Markdown 与 Word 文档。</p>
 
       <div className="compare-toolbar">
         <select value={leftId} onChange={e => setLeftId(e.target.value === '' ? '' : Number(e.target.value))}>
@@ -79,7 +79,7 @@ export function Compare({ books }: CompareProps) {
 
       {!result && !error && (
         <p className="empty-text">
-          {candidates.length < 2 ? '书库里至少要有两本 TXT 或 EPUB 才能比较' : '选择两本书后点「开始比较」'}
+          {candidates.length < 2 ? '书库里至少要有两本 TXT、EPUB、Markdown 或 Word 文档才能比较' : '选择两本书后点「开始比较」'}
         </p>
       )}
 

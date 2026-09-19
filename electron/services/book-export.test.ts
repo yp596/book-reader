@@ -7,6 +7,7 @@ import {
   backupFileName,
   effectiveStatus,
   STATUS_LABELS,
+  uniqueExportName,
   type BookLike,
 } from './book-export';
 
@@ -193,5 +194,33 @@ describe('buildPlainText', () => {
 
   it('结尾有换行，避免部分编辑器显示最后一行挤在一起', () => {
     expect(buildPlainText([sec('', 'x')]).endsWith('\n')).toBe(true);
+  });
+});
+
+describe('uniqueExportName（批量导出的重名处理）', () => {
+  /** 调用方约定：集合里存的全是小写文件名 */
+  const used = (...names: string[]) => new Set(names.map(n => n.toLowerCase()));
+
+  it('名字没被占用时原样返回', () => {
+    expect(uniqueExportName(used(), '三体', '.txt', 1)).toBe('三体.txt');
+  });
+
+  it('重名时追加序号，而不是把前一本覆盖掉', () => {
+    expect(uniqueExportName(used('三体.txt'), '三体', '.txt', 1)).toBe('三体 (2).txt');
+  });
+
+  it('序号也被占了就继续往后找，不回头复用空缺', () => {
+    expect(uniqueExportName(used('三体.txt', '三体 (2).txt', '三体 (3).txt'), '三体', '.txt', 1)).toBe(
+      '三体 (4).txt',
+    );
+  });
+
+  it('大小写不敏感：Windows 上 A.txt 与 a.txt 指的是同一个文件', () => {
+    // 只按原样比较会判成不冲突，然后把已有文件覆盖掉
+    expect(uniqueExportName(used('SanTi.TXT'), 'santi', '.TXT', 1)).toBe('santi (2).TXT');
+  });
+
+  it('书名 sanitize 后为空时用 id 兜底，不生成只有扩展名的隐藏文件', () => {
+    expect(uniqueExportName(used(), '   ', '.epub', 42)).toBe('book-42.epub');
   });
 });

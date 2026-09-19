@@ -340,8 +340,83 @@
   box-shadow: none;
 }
 
+/* 滑动模式连排：滚动由父容器 .txt-page 统一负责，各块自身不再出滚动条。
+   分页是按字数硬切的，第二块起多半从半句话开始，所以取消首行缩进保持行文连贯。 */
+.txt-flow-page { text-indent: 0; }
+
 .reader-light .txt-page { background: #ffffff; color: #2e2e2e; }
 .reader-sepia .txt-page { background: #f4ecd8; color: #43392c; }
+
+/* ==================== 文档型格式正文（Markdown / DOCX） ====================
+   两者复用同一个滚动容器（.txt-page 提供高度、滚动条、页边距与主题底色），
+   但排版规则要整个换掉：
+   - pre-wrap 会把 HTML 标签之间的换行也显示出来（TXT 的换行才是内容本身）；
+   - text-indent 是给没有段落结构的 TXT 用的，这两者的段落有自己的 <p>。
+   下面用到的一律是半透明灰，深浅两套主题下都成立，不引死色值。 */
+.doc-page {
+  white-space: normal;
+  text-indent: 0;
+}
+.doc-page > * + * { margin-top: 1em; }
+.doc-page h1, .doc-page h2, .doc-page h3, .doc-page h4, .doc-page h5, .doc-page h6 {
+  margin: 0; font-weight: 700; line-height: 1.5;
+}
+.doc-page h1 { font-size: 1.6em; }
+.doc-page h2 { font-size: 1.35em; }
+.doc-page h3 { font-size: 1.15em; }
+.doc-page h4, .doc-page h5, .doc-page h6 { font-size: 1em; }
+/* 标题上方的留白大于下方，章节感才出得来 */
+.doc-page > * + h1, .doc-page > * + h2, .doc-page > * + h3 { margin-top: 1.6em; }
+.doc-page p { margin: 0; }
+.doc-page ul, .doc-page ol { margin: 0; padding-left: 1.6em; }
+.doc-page li { margin: 0.25em 0; }
+.doc-page li > ul, .doc-page li > ol { margin-top: 0.25em; }
+.doc-page li input[type='checkbox'] { margin-right: 0.4em; }
+.doc-page blockquote {
+  margin: 0; padding: 0.1em 0 0.1em 1em;
+  border-left: 3px solid rgba(127, 127, 127, 0.45);
+}
+.doc-page hr { margin: 1.6em 0; border: none; border-top: 1px solid rgba(127, 127, 127, 0.3); }
+.doc-page a { color: var(--accent-light); }
+.doc-page img { display: block; max-width: 100%; height: auto; margin: 1em auto; border-radius: 4px; }
+.doc-page pre {
+  margin: 0; padding: 12px 14px;
+  background: rgba(127, 127, 127, 0.13);
+  border: 1px solid rgba(127, 127, 127, 0.22);
+  border-radius: var(--radius-sm);
+  overflow-x: auto;
+  /* 代码块里的空白是内容，不能被容器继承来的两端对齐与缩进改样 */
+  text-align: left;
+  font-family: var(--font-mono);
+  font-size: 0.86em;
+  line-height: 1.7;
+}
+.doc-page code { font-family: var(--font-mono); font-size: 0.9em; }
+.doc-page :not(pre) > code {
+  background: rgba(127, 127, 127, 0.18);
+  border-radius: 3px;
+  padding: 0.1em 0.35em;
+}
+.doc-page table { width: 100%; border-collapse: collapse; font-size: 0.92em; text-align: left; }
+.doc-page th, .doc-page td { border: 1px solid rgba(127, 127, 127, 0.3); padding: 6px 10px; }
+.doc-page th { background: rgba(127, 127, 127, 0.13); font-weight: 600; }
+
+/* 代码高亮的着色。主进程用 highlight.js 输出 hljs-* 类名，但只在 EPUB 里带过样式，
+   原生渲染这条路以前没走过，不给颜色就是一片单色。取的都是中等明度的色，
+   深浅两套主题下都还看得清。 */
+.doc-page .hljs-comment, .doc-page .hljs-quote { color: #8a8f98; font-style: italic; }
+.doc-page .hljs-keyword, .doc-page .hljs-selector-tag, .doc-page .hljs-literal,
+.doc-page .hljs-doctag, .doc-page .hljs-name { color: #c678dd; }
+.doc-page .hljs-string, .doc-page .hljs-regexp, .doc-page .hljs-addition { color: #98c379; }
+.doc-page .hljs-number, .doc-page .hljs-symbol, .doc-page .hljs-bullet { color: #d19a66; }
+.doc-page .hljs-title, .doc-page .hljs-section, .doc-page .hljs-selector-id,
+.doc-page .hljs-selector-class { color: #61afef; }
+.doc-page .hljs-built_in, .doc-page .hljs-type, .doc-page .hljs-class .hljs-title { color: #56b6c2; }
+.doc-page .hljs-attr, .doc-page .hljs-attribute, .doc-page .hljs-variable,
+.doc-page .hljs-template-variable, .doc-page .hljs-property { color: #e06c75; }
+.doc-page .hljs-meta, .doc-page .hljs-deletion { color: #9aa0aa; }
+.doc-page .hljs-emphasis { font-style: italic; }
+.doc-page .hljs-strong { font-weight: 700; }
 
 .reader-content iframe { background: transparent; }
 
@@ -418,6 +493,10 @@
   overflow-y: auto;
   display: flex;
   justify-content: center;
+  /* flex 默认 align-items: stretch，会把 canvas 纵向拉到容器高——
+     默认 pdfScale 1.5 时页面本该 892×1263，会被压成 892×628，长宽比失真，
+     而且永远撑不出溢出、容器从来不滚。靠上排，页面保持原比例、超出就滚。 */
+  align-items: flex-start;
   padding: 24px;
 }
 .pdf-page canvas {
@@ -425,6 +504,17 @@
   border-radius: 3px;
   max-width: 100%;
   height: auto;
+}
+
+/* 拖拽移动视图：只给「整页一张图」的固定版式（PDF 原始版式、漫画），
+   且由 TS 侧按容器**此刻是否真有可滚动量**决定挂不挂——
+   整页装得下时挂一只抓手，等于承诺一个拖不动的手势。
+   文字类格式的滚动区没挂这套类，因为那里按住拖动是划词选中 */
+.pan-surface {
+  cursor: grab;
+}
+.pan-surface.pan-active {
+  cursor: grabbing;
 }
 
 .reader-content.no-shadow .txt-page,

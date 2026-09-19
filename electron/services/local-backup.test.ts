@@ -23,7 +23,6 @@ function makeFakeDb() {
     bookmarks: [] as any[],
     notes: [] as any[],
     words: [] as any[],
-    sources: [] as any[],
   };
   let idc = 100;
   const db: any = {
@@ -32,8 +31,7 @@ function makeFakeDb() {
         t === 'books' ? state.books
         : t === 'bookmarks' ? state.bookmarks
         : t === 'notes' ? state.notes
-        : t === 'words' ? state.words
-        : state.sources;
+        : state.words;
       if (!since) return [...rows];
       return rows.filter(r => (r.updated_at ?? r.created_at ?? '') > since);
     },
@@ -95,11 +93,6 @@ function makeFakeDb() {
     getAllWords: () => state.words,
     insertWord: (w: any) => {
       state.words.push({ id: ++idc, ...w });
-      return idc;
-    },
-    getAllSources: () => state.sources,
-    insertSource: (s: any) => {
-      state.sources.push({ id: ++idc, ...s });
       return idc;
     },
   };
@@ -197,13 +190,6 @@ describe('mergeBackup · 合并与去重', () => {
     mergeBackup(db, wrap({ words: [{ word: 'ephemeral', definition: '短暂的' }] }));
     mergeBackup(db, wrap({ words: [{ word: 'ephemeral', definition: '短暂的（改）' }] }));
     expect(state.words).toHaveLength(1);
-  });
-
-  it('书源：同名不同址视为两条', () => {
-    const { db, state } = makeFakeDb();
-    mergeBackup(db, wrap({ sources: [{ name: '站A', url: 'https://a.com' }] }));
-    mergeBackup(db, wrap({ sources: [{ name: '站A', url: 'https://b.com' }] }));
-    expect(state.sources).toHaveLength(2);
   });
 
   it('设置：不同值才计入变更数', () => {

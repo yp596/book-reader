@@ -27,6 +27,9 @@ describe('parseBookPrefs', () => {
       pagePadding: 72,
       paraSpacing: 1.2,
       pageGap: 40,
+      letterSpacing: 0.08,
+      textIndent: 2,
+      pageAnimation: 'reduced',
       hideMarks: true,
     };
     expect(parseBookPrefs(JSON.stringify(prefs))).toEqual(prefs);
@@ -139,5 +142,27 @@ describe('排版自定义字段校验', () => {
     expect(parseBookPrefs(JSON.stringify({ pageGap: 0 }))).toEqual({ pageGap: 0 });
     expect(parseBookPrefs(JSON.stringify({ pageGap: -1 }))).toEqual({});
     expect(parseBookPrefs(JSON.stringify({ pageGap: 500 }))).toEqual({});
+  });
+
+  it('字间距钳制在 0-0.5，且 0 是合法值（不加字距）', () => {
+    expect(parseBookPrefs(JSON.stringify({ letterSpacing: 0.05 }))).toEqual({ letterSpacing: 0.05 });
+    expect(parseBookPrefs(JSON.stringify({ letterSpacing: 0 }))).toEqual({ letterSpacing: 0 });
+    expect(parseBookPrefs(JSON.stringify({ letterSpacing: -0.1 }))).toEqual({});
+    expect(parseBookPrefs(JSON.stringify({ letterSpacing: 2 }))).toEqual({});
+  });
+
+  it('首行缩进钳制在 0-4，且 0 是合法值（不缩进）', () => {
+    expect(parseBookPrefs(JSON.stringify({ textIndent: 2 }))).toEqual({ textIndent: 2 });
+    expect(parseBookPrefs(JSON.stringify({ textIndent: 0 }))).toEqual({ textIndent: 0 });
+    expect(parseBookPrefs(JSON.stringify({ textIndent: -1 }))).toEqual({});
+    expect(parseBookPrefs(JSON.stringify({ textIndent: 8 }))).toEqual({});
+  });
+
+  it('翻页动画只接受三个档位，非法值丢弃', () => {
+    expect(parseBookPrefs(JSON.stringify({ pageAnimation: 'smooth' }))).toEqual({ pageAnimation: 'smooth' });
+    expect(parseBookPrefs(JSON.stringify({ pageAnimation: 'reduced' }))).toEqual({ pageAnimation: 'reduced' });
+    expect(parseBookPrefs(JSON.stringify({ pageAnimation: 'off' }))).toEqual({ pageAnimation: 'off' });
+    expect(parseBookPrefs(JSON.stringify({ pageAnimation: 'fancy' }))).toEqual({});
+    expect(parseBookPrefs(JSON.stringify({ pageAnimation: true }))).toEqual({});
   });
 });

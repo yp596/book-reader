@@ -1,6 +1,19 @@
 import type { ThemeName } from './reader-options';
 import { STYLE_PRESETS } from './reading-styles';
 
+/** 翻页动画：平滑 / 减弱（更短更轻） / 关闭 */
+export type PageAnimation = 'smooth' | 'reduced' | 'off';
+
+/** 翻页动画档位（UI 下拉与校验共用一份，避免两处各写各的） */
+export const PAGE_ANIMATIONS: { key: PageAnimation; label: string }[] = [
+  { key: 'smooth', label: '平滑' },
+  { key: 'reduced', label: '减弱' },
+  { key: 'off', label: '关闭' },
+];
+
+const isPageAnimation = (v: unknown): v is PageAnimation =>
+  v === 'smooth' || v === 'reduced' || v === 'off';
+
 /** 单本书的阅读排版偏好（缺项回退全局默认） */
 export interface ReaderPrefs {
   theme: ThemeName;
@@ -29,6 +42,12 @@ export interface ReaderPrefs {
   paraSpacing: number;
   /** 页面上下留白（像素，叠加在默认留白之上；0=只用默认） */
   pageGap: number;
+  /** 字间距（em，0=不加）。与阅读样式的固定字距叠加，允许用户精细调 */
+  letterSpacing: number;
+  /** 首行缩进（em，0=不缩进）。EPUB 对正文段落生效，TXT 以空行分段不适用 */
+  textIndent: number;
+  /** 翻页动画。默认关闭以保持原有的瞬切手感，由用户主动开启 */
+  pageAnimation: PageAnimation;
   /** 阅读样式预设（EPUB 正文），值取自 reading-styles 的预设名 */
   readingStyle: string;
   /** 隐藏批注标记（只隐藏，不删除） */
@@ -51,6 +70,9 @@ export const DEFAULT_READER_PREFS: ReaderPrefs = {
   pagePadding: 56,
   paraSpacing: 0,
   pageGap: 0,
+  letterSpacing: 0,
+  textIndent: 0,
+  pageAnimation: 'off',
   readingStyle: 'none',
   hideMarks: false,
 };
@@ -99,6 +121,9 @@ export function parseBookPrefs(raw: string | null | undefined): Partial<ReaderPr
   if (numIn(parsed.pagePadding, 0, 200)) out.pagePadding = parsed.pagePadding;
   if (numIn(parsed.paraSpacing, 0, 3)) out.paraSpacing = parsed.paraSpacing;
   if (numIn(parsed.pageGap, 0, 200)) out.pageGap = parsed.pageGap;
+  if (numIn(parsed.letterSpacing, 0, 0.5)) out.letterSpacing = parsed.letterSpacing;
+  if (numIn(parsed.textIndent, 0, 4)) out.textIndent = parsed.textIndent;
+  if (isPageAnimation(parsed.pageAnimation)) out.pageAnimation = parsed.pageAnimation;
   // 预设名要在白名单里：脏值会让面板下拉显示空白项
   if (typeof parsed.readingStyle === 'string' && STYLE_PRESETS.some(p => p.key === parsed.readingStyle)) {
     out.readingStyle = parsed.readingStyle;

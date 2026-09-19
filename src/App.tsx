@@ -4,7 +4,6 @@ import { BookList } from './components/BookList';
 import { BookDetail } from './components/BookDetail';
 import { Reader } from './components/Reader';
 import { Sidebar } from './components/Sidebar';
-import { SourceManager } from './components/SourceManager';
 import { SemanticSearch } from './components/SemanticSearch';
 import { Vocab } from './components/Vocab';
 import { Notes } from './components/Notes';
@@ -16,7 +15,7 @@ import { Statistics } from './components/Statistics';
 import { Compare } from './components/Compare';
 import { PdfTools } from './components/PdfTools';
 
-type View = 'library' | 'detail' | 'reader' | 'sources' | 'rag' | 'vocab' | 'notes' | 'models' | 'settings' | 'stats' | 'help' | 'compare' | 'pdf';
+type View = 'library' | 'detail' | 'reader' | 'rag' | 'vocab' | 'notes' | 'models' | 'settings' | 'stats' | 'help' | 'compare' | 'pdf';
 
 // 安全获取 electronAPI，preload 未就绪时返回空实现
 const api = window.electronAPI ?? {
@@ -25,12 +24,6 @@ const api = window.electronAPI ?? {
   getBookById: async () => null,
   deleteBook: async () => {},
   updateProgress: async () => {},
-  getAllSources: async () => [],
-  addSource: async () => 0,
-  deleteSource: async () => {},
-  searchBooks: async () => [],
-  getChapters: async () => [],
-  getChapterContent: async () => '',
   getBookmarks: async () => [],
   addBookmark: async () => 0,
   deleteBookmark: async () => {},
@@ -41,6 +34,8 @@ const api = window.electronAPI ?? {
   setSetting: async () => {},
   importPaths: async () => ({ imported: [], failed: [] }),
   onOpenFile: () => () => {},
+  onCloseTab: () => () => {},
+  setWindowTitle: async () => {},
 };
 
 function App() {
@@ -64,11 +59,48 @@ function App() {
     toastTimerRef.current = setTimeout(() => setToast(''), 3000);
   };
 
+  /**
+   * 首次启动引导的判定。
+   *
+   * 这段以前是 `window.electronAPI?.getSetting('onboarded').then(...).catch(() => {})`，
+   * 三重静默叠在一起：可选链在 preload 缺失时整条短路、catch 吞掉 IPC 失败、
+   * 且**一次都不重试**。任何一次瞬时失败都会变成「引导页永远不弹」，而控制台
+   * 一条线索都没有——查起来无从下手（本文件顶部给 api 做空实现兜底，说明
+   * 「preload 未就绪」是被承认过的场景，唯独这里没兜）。
+   *
+   * 现在：读不到就短退避重试；重试完仍读不到，按**未看过**处理并留一条 warn。
+   * 依据是「取不到标记」不等于「用户看过」——而这是一张纯说明卡，
+   * 误弹一次的代价远低于让新用户永远得不到引导。
+   */
   useEffect(() => {
-    window.electronAPI
-      ?.getSetting('onboarded')
-      .then(v => { if (v !== '1') setShowOnboarding(true); })
-      .catch(() => {});
+    let alive = true;
+    const ATTEMPTS = 5;
+    const RETRY_DELAY_MS = 200;
+
+    /** 读到值就返回它（没存过是 null）；读不到返回 undefined，由调用方决定要不要重试 */
+    const readOnboarded = async (): Promise<string | null | undefined> => {
+      try {
+        return await window.electronAPI?.getSetting('onboarded');
+      } catch {
+        return undefined;
+      }
+    };
+
+    void (async () => {
+      for (let i = 0; i < ATTEMPTS; i++) {
+        const v = await readOnboarded();
+        if (v !== undefined) {
+          if (alive && v !== '1') setShowOnboarding(true);
+          return;
+        }
+        await new Promise(r => setTimeout(r, RETRY_DELAY_MS));
+      }
+      if (!alive) return;
+      console.warn('[onboarding] 读不到 onboarded 标记，按首次启动处理');
+      setShowOnboarding(true);
+    })();
+
+    return () => { alive = false; };
   }, []);
 
   // 文件夹监视自动入库：主进程推来书名后刷新书架并说一句。
@@ -219,6 +251,27 @@ function App() {
     }
   };
 
+  /**
+   * Ctrl+W 关闭当前文档。键由主进程拦下再转发（EPUB 正文在 iframe 里，
+   * 渲染层的 window 监听收不到那里的按键），这里只按当前视图决定关哪个标签。
+   * 不在阅读视图时静默忽略——无应用菜单时该键本就没有默认行为，白拦一下无妨。
+   */
+  useEffect(() => {
+    return api.onCloseTab(() => {
+      if (view !== 'reader' || !currentBook) return;
+      closeTab(currentBook.id);
+    });
+  }, [view, currentBook, closeTab]);
+
+  /**
+   * 窗口标题跟随当前书——任务栏悬停时显示的就是这行字，多开几本书时靠它分辨谁是谁。
+   * 只在阅读视图用书名，回到书架 / 详情页 / 侧栏各页一律回到应用名：
+   * 标题停在上一本书上，比没有标题更误导。
+   */
+  useEffect(() => {
+    void api.setWindowTitle(view === 'reader' && currentBook ? currentBook.title : '阅读书架');
+  }, [view, currentBook]);
+
   /** 笔记 → 原文：打开对应书籍并定位到批注位置 */
   const handleOpenNote = async (bookId: number, position: string) => {
     const api = window.electronAPI;
@@ -286,8 +339,8 @@ function App() {
             onOpenBook={handleSelectBook}
           />
         );
-        // 只有一个标签时不套外壳，布局与原来完全一致
-        if (tabs.length <= 1) return reader;
+        // 标签栏常驻：单标签时也要能点 × 关掉。此前「只有一个标签时不套外壳」
+        // 会让标签栏在关到剩一个时消失，最后一个标签再没有关闭入口。
         return (
           <div className="reader-tabs-wrap">
             <div className="reader-tabs">
@@ -316,8 +369,6 @@ function App() {
           </div>
         );
       }
-      case 'sources':
-        return <SourceManager />;
       case 'rag':
         return <SemanticSearch books={books} onOpenBook={handleSelectBook} />;
       case 'vocab':

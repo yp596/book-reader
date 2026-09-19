@@ -15,6 +15,8 @@ import {
   findKeyConflict,
   keyForAction,
   parseShortcutOverrides,
+  toGlobalAccelerator,
+  acceleratorLabel,
   type ShortcutAction,
   type ShortcutOverrides,
 } from '../utils/shortcuts';
@@ -72,9 +74,6 @@ interface SettingsData {
   aiBaseUrl: string;
   aiModel: string;
   aiApiKey: string;
-  webdavUrl: string;
-  webdavUser: string;
-  webdavPass: string;
   aiEmbedUrl: string;
   fontSize: number;
   lineHeight: number;
@@ -93,8 +92,12 @@ interface SettingsData {
   closeToTray: boolean;
   /** 防截屏：窗口内容在截图/录屏中不显示 */
   screenProtection: boolean;
+  /** 开机自启动（默认关，便携版不支持） */
+  autoLaunch: boolean;
   /** 当前快捷键预设 key */
   shortcutPreset: string;
+  /** 全局热键（Electron accelerator 写法，空串=未设）：窗口不在前台时也能唤出 / 收起 */
+  globalHotkey: string;
   /** 全局强制统一字体（压过电子书自带字体） */
   forceFont: boolean;
   /** 批注只读：禁止新增/删除批注 */
@@ -121,9 +124,6 @@ export function Settings() {
     aiBaseUrl: 'http://localhost:11434',
     aiModel: 'minicpm5-1b',
     aiApiKey: '',
-    webdavUrl: '',
-    webdavUser: '',
-    webdavPass: '',
     aiEmbedUrl: 'http://localhost:8081',
     fontSize: 18,
     lineHeight: 1.8,
@@ -138,7 +138,9 @@ export function Settings() {
     privacyAutoClear: false,
     closeToTray: false,
     screenProtection: false,
+    autoLaunch: false,
     shortcutPreset: DEFAULT_SHORTCUT_PRESET,
+    globalHotkey: '',
     forceFont: false,
     annotationsReadonly: false,
     idleDays: 90,
@@ -150,33 +152,28 @@ export function Settings() {
     onlineFeaturesEnabled: false,
   });
   const [saved, setSaved] = useState(false);
-  const [syncing, setSyncing] = useState(false);
-  const [lastSync, setLastSync] = useState('');
+  /** 便携版：exe 随可移动盘走，开机自启路径会失效，需置灰该项 */
+  const [isPortable, setIsPortable] = useState(false);
   /** 自定义快捷键：动作 → 归一化按键（空串=显式不绑定），与预设合成后生效 */
   const [shortcutCustom, setShortcutCustom] = useState<ShortcutOverrides>({});
   /** 正在录制新键的动作 */
   const [recording, setRecording] = useState<ShortcutAction | null>(null);
+  /** 正在录制全局热键 */
+  const [recordingHotkey, setRecordingHotkey] = useState(false);
+  /** 全局热键的提示：注册失败（被别的软件占用）或这个键不能用 */
+  const [hotkeyNotice, setHotkeyNotice] = useState('');
   /** 改绑提示（例如「这个键原本属于谁」） */
   const [keyNotice, setKeyNotice] = useState('');
 
   useEffect(() => {
     loadSettings();
-    loadLastSync();
     loadSnapshots();
     loadLastBackup();
     loadCacheStats();
     loadWatch();
     loadFonts();
+    window.electronAPI?.getAppInfo().then(info => setIsPortable(info.isPortable)).catch(() => {});
   }, []);
-
-  const loadLastSync = async () => {
-    const api = window.electronAPI;
-    if (!api) return;
-    try {
-      const v = await api.getSetting('lastSyncAt');
-      if (v) setLastSync(v);
-    } catch { /* 读不到就保持空，不影响其它设置项 */ }
-  };
 
   /** 备份里挂不上书的条目会被丢弃，不说明白用户会以为数据全回来了 */
   const describeDropped = (dropped?: { books: number; bookmarks: number; notes: number }) => {
@@ -192,7 +189,7 @@ export function Settings() {
   const loadSettings = async () => {
     const api = window.electronAPI;
     if (!api) return;
-    const BOOL_KEYS: (keyof SettingsData)[] = ['autoTheme', 'privacyAutoClear', 'forceFont', 'annotationsReadonly', 'closeToTray', 'screenProtection', 'onlineFeaturesEnabled'];
+    const BOOL_KEYS: (keyof SettingsData)[] = ['autoTheme', 'privacyAutoClear', 'forceFont', 'annotationsReadonly', 'closeToTray', 'screenProtection', 'autoLaunch', 'onlineFeaturesEnabled'];
     const NUM_KEYS: (keyof SettingsData)[] = [
       'fontSize', 'lineHeight', 'ttsRate', 'autoThemeDayStart', 'autoThemeNightStart', 'idleDays', 'dailyGoalMinutes',
     ];
@@ -300,6 +297,50 @@ export function Settings() {
     delete next[action];
     setKeyNotice('');
     persistShortcutCustom(next);
+  };
+
+  // ---------- 全局热键 ----------
+
+  /**
+   * 录制全局热键。与阅读器内快捷键**不能共用一套归一化**：
+   * 那边把 Shift 折进字符本身（Ctrl+Shift+H 记成 'Ctrl+h'），照搬过来会把用户的
+   * Ctrl+H 抢走、而自己设的键根本不生效。这里走 toGlobalAccelerator，Shift 显式保留。
+   *
+   * 注册失败（键被别的软件占着）时不落盘：界面显示「已设置」却按不出来，
+   * 比明说「没设上」难查得多。
+   */
+  const captureHotkey = async (e: ReactKeyboardEvent) => {
+    if (!recordingHotkey) return;
+    e.preventDefault();
+    e.stopPropagation();
+    if (e.key === 'Escape') {
+      setRecordingHotkey(false);
+      setHotkeyNotice('');
+      return;
+    }
+    const accel = toGlobalAccelerator(e);
+    if (!accel) {
+      setHotkeyNotice('这个键做不了全局热键：至少要带 Ctrl / Alt / Shift 中的一个修饰键。');
+      return;
+    }
+    const ok = await window.electronAPI?.setGlobalHotkey(accel);
+    if (!ok) {
+      setHotkeyNotice(`「${acceleratorLabel(accel)}」没能注册上——多半已被别的软件占用，换一个试试。`);
+      return;
+    }
+    setSettings(s => ({ ...s, globalHotkey: accel }));
+    void persistSettings({ globalHotkey: accel });
+    setRecordingHotkey(false);
+    setHotkeyNotice(`已生效：任何时候按 ${acceleratorLabel(accel)} 都能把窗口叫出来 / 收起来。`);
+  };
+
+  /** 清除全局热键：连同系统里的注册一起摘掉，不留一个没人认的占用 */
+  const clearHotkey = () => {
+    void window.electronAPI?.setGlobalHotkey('');
+    setSettings(s => ({ ...s, globalHotkey: '' }));
+    void persistSettings({ globalHotkey: '' });
+    setRecordingHotkey(false);
+    setHotkeyNotice('');
   };
 
   // ---------- 本地字体 ----------
@@ -520,7 +561,6 @@ export function Settings() {
   // ---------- 缓存管理 ----------
 
   const [cacheStats, setCacheStats] = useState<{
-    chapterCount: number;
     snapshotBytes: number;
     booksBytes: number;
   } | null>(null);
@@ -534,7 +574,7 @@ export function Settings() {
     } catch { /* 统计失败不阻塞页面 */ }
   };
 
-  const handleClearCache = async (opts: { snapshots?: boolean; chapterCache?: boolean }) => {
+  const handleClearCache = async (opts: { snapshots?: boolean }) => {
     const api = window.electronAPI;
     if (!api) return;
     if (!confirm('确定清理所选缓存？此操作不可撤销。')) return;
@@ -545,7 +585,6 @@ export function Settings() {
       await loadSnapshots();
       const parts: string[] = [];
       if (r.snapshots) parts.push(`备份存档 ${r.snapshots} 份`);
-      if (r.chapterCache) parts.push(`章节缓存 ${r.chapterCache} 条`);
       alert(`已清理：${parts.length > 0 ? parts.join('、') : '没有需要清理的内容'}`);
     } catch (err) {
       alert(`清理失败：${err instanceof Error ? err.message : '未知错误'}`);
@@ -557,11 +596,10 @@ export function Settings() {
   // ---------- 隐私清理 ----------
 
   const [privacyOpts, setPrivacyOpts] = useState({
-    // 默认只勾最无害的在线章节缓存：剪贴板与阅读位置一旦清掉无法恢复，
+    // 默认只勾最无害的阅读时间戳：剪贴板与阅读位置一旦清掉无法恢复，
     // 让用户自己勾，别替他决定
     positions: false,
-    chapterCache: true,
-    timestamps: false,
+    timestamps: true,
     clipboard: false,
   });
   const [privacyBusy, setPrivacyBusy] = useState(false);
@@ -579,7 +617,6 @@ export function Settings() {
       const r = await api.clearPrivacy(privacyOpts);
       const parts: string[] = [];
       if (r.positions) parts.push(`阅读位置记录 ${r.positions} 条`);
-      if (r.chapterCache) parts.push(`章节缓存 ${r.chapterCache} 条`);
       if (r.timestamps) parts.push(`阅读时间戳 ${r.timestamps} 本`);
       if (r.clipboard) parts.push('系统剪贴板已清空');
       alert(`清理完成：${parts.length > 0 ? parts.join('、') : '没有需要清理的数据'}`);
@@ -587,39 +624,6 @@ export function Settings() {
       alert(`清理失败：${err instanceof Error ? err.message : '请重试'}`);
     } finally {
       setPrivacyBusy(false);
-    }
-  };
-
-  const handleBackup = async () => {
-    const api = window.electronAPI;
-    if (!api) return;
-    setSyncing(true);
-    try {
-      // 先保存当前配置再同步；保存失败也要有反馈，不能按钮点了没动静
-      await handleSave(true);
-      await api.syncBackup();
-      await loadLastSync();
-      alert('已备份到云端。');
-    } catch (err) {
-      alert(`备份失败：${err instanceof Error ? err.message : '请检查云端地址与账号后重试'}`);
-    } finally {
-      setSyncing(false);
-    }
-  };
-
-  const handleRestore = async () => {
-    if (!confirm('从 WebDAV 恢复会合并远端数据，确定继续？')) return;
-    const api = window.electronAPI;
-    if (!api) return;
-    setSyncing(true);
-    try {
-      const count = await api.syncRestore();
-      await loadLastSync();
-      alert(`恢复完成，合并 ${count} 条数据`);
-    } catch (err) {
-      alert(`恢复失败：${err instanceof Error ? err.message : '未知错误'}`);
-    } finally {
-      setSyncing(false);
     }
   };
 
@@ -853,12 +857,12 @@ export function Settings() {
         <h2>联网附加能力</h2>
         <p className="section-desc" style={{ lineHeight: 1.9 }}>
           软件默认纯离线运行，解析、显示、检索、存储全部在本机完成，不发起任何网络请求。
-          只有下面这一道开关打开后，需要联网的能力才会生效：在线书源与在线阅读、WebDAV 同步、
-          本地模型的下载、以及 AI 助手与语义检索连接外部服务时。
+          只有下面这一道开关打开后，需要联网的能力才会生效：本地模型的下载、
+          以及 AI 助手与语义检索连接外部服务时。
         </p>
         <p className="section-desc" style={{ lineHeight: 1.9 }}>
           指向本机的服务（localhost / 127.0.0.1）不受此开关限制，只在需要访问外部地址时才要求打开。
-          已下载到本机的模型、已缓存的在线章节不受影响，关闭联网后依然可用。
+          已下载到本机的模型不受影响，关闭联网后依然可用。
         </p>
         <div className="form-row" style={{ marginTop: 10 }}>
           <label className="checkbox-row">
@@ -867,7 +871,7 @@ export function Settings() {
               checked={settings.onlineFeaturesEnabled}
               onChange={e => {
                 const next = e.target.checked;
-                if (next && !confirm('开启后软件会访问网络（在线书源、WebDAV 同步、模型下载、远端 AI 服务）。确定开启？')) {
+                if (next && !confirm('开启后软件会访问网络（模型下载、远端 AI 服务）。确定开启？')) {
                   return;
                 }
                 handleChange('onlineFeaturesEnabled', next);
@@ -1002,10 +1006,6 @@ export function Settings() {
             <span style={{ width: 110 }}>备份存档</span>
             <span>{cacheStats ? formatFileSize(cacheStats.snapshotBytes) : '统计中...'}</span>
           </div>
-          <div className="info-row">
-            <span style={{ width: 110 }}>章节缓存</span>
-            <span>{cacheStats ? `${cacheStats.chapterCount} 条` : '统计中...'}</span>
-          </div>
         </div>
         <div className="form-actions" style={{ justifyContent: 'flex-start', gap: 10 }}>
           <button
@@ -1014,13 +1014,6 @@ export function Settings() {
             disabled={cacheBusy}
           >
             清理备份存档
-          </button>
-          <button
-            className="btn-secondary"
-            onClick={() => handleClearCache({ chapterCache: true })}
-            disabled={cacheBusy}
-          >
-            清理章节缓存
           </button>
           <button
             className="btn-secondary"
@@ -1133,6 +1126,43 @@ export function Settings() {
           点键位后按下新键即可改绑，Esc 取消；抢了别的动作的键时会明确告知。
           固定键位：Esc 收起面板 / 返回书架；Alt+← → 前进后退。
         </p>
+
+        <p className="section-desc" style={{ marginTop: 18 }}>
+          <strong>全局热键</strong>：窗口被别的软件挡住、或已收进托盘时，也能一键把它叫到面前
+          ——阅读器内快捷键做不到这一点（按键得先落到本应用窗口上）。默认不设；
+          点下面的键位，再按组合键，Esc 取消。
+        </p>
+        <div className="keymap-list">
+          <div className="keymap-row">
+            <kbd
+              tabIndex={0}
+              className={recordingHotkey ? 'recording' : ''}
+              title="点一下，再按组合键；Esc 取消"
+              onClick={() => {
+                setRecordingHotkey(true);
+                setHotkeyNotice('');
+              }}
+              onKeyDown={captureHotkey}
+            >
+              {recordingHotkey
+                ? '按下组合键…'
+                : settings.globalHotkey
+                  ? acceleratorLabel(settings.globalHotkey)
+                  : '未设置'}
+            </kbd>
+            <span>隐藏 / 显示窗口</span>
+            {settings.globalHotkey && (
+              <button className="link-btn" onClick={clearHotkey}>
+                清除
+              </button>
+            )}
+          </div>
+        </div>
+        {hotkeyNotice && (
+          <p className="section-desc" style={{ marginTop: 8, color: 'var(--accent)' }}>
+            {hotkeyNotice}
+          </p>
+        )}
       </section>
 
       <section className="settings-section">
@@ -1144,7 +1174,6 @@ export function Settings() {
         <div className="privacy-opts">
           {([
             ['positions', '阅读位置记录', '正常退出/异常退出自动留下的断点（手动标记的保留）'],
-            ['chapterCache', '在线章节缓存', '在线书源抓取的正文缓存，需要时可重新抓取'],
             ['timestamps', '阅读时间戳', '抹掉「什么时候读过」，阅读进度不受影响'],
             ['clipboard', '系统剪贴板', '会清掉你在其它软件里复制的内容，无法恢复'],
           ] as [keyof typeof privacyOpts, string, string][]).map(([key, label, hint]) => (
@@ -1177,7 +1206,7 @@ export function Settings() {
             />
             <span>
               退出软件时自动清理
-              <em className="privacy-hint">仅清章节缓存与剪贴板；笔记、书签、进度一律保留</em>
+              <em className="privacy-hint">仅清剪贴板；笔记、书签、进度一律保留</em>
             </span>
           </label>
         </div>
@@ -1201,6 +1230,7 @@ export function Settings() {
             <input
               type="checkbox"
               checked={settings.screenProtection}
+              disabled={isPortable}
               onChange={e => {
                 handleChange('screenProtection', e.target.checked);
                 window.electronAPI?.setContentProtection(e.target.checked);
@@ -1212,35 +1242,30 @@ export function Settings() {
             </span>
           </label>
         </div>
-      </section>
 
-      <section className="settings-section">
-        <h2>WebDAV 同步</h2>
-        <p className="section-desc">配置 WebDAV 服务器同步书架、进度和笔记</p>
-        <div className="form-row">
-          <label>服务器地址</label>
-          <input value={settings.webdavUrl} onChange={e => handleChange('webdavUrl', e.target.value)} placeholder="https://dav.example.com" />
+        <div className="form-row" style={{ marginTop: 10 }}>
+          <label className="checkbox-row">
+            <input
+              type="checkbox"
+              checked={settings.autoLaunch}
+              disabled={isPortable}
+              onChange={e => {
+                handleChange('autoLaunch', e.target.checked);
+                const next = e.target.checked;
+                window.electronAPI?.setAutoLaunch(next);
+                void persistSettings({ autoLaunch: next });
+              }}
+            />
+            <span>
+              开机自启动
+              <em className="privacy-hint">
+                {isPortable
+                  ? '便携版不支持：exe 在可移动盘上，自启路径会失效'
+                  : '登录 Windows 后自动打开本应用，立即生效'}
+              </em>
+            </span>
+          </label>
         </div>
-        <div className="form-row">
-          <label>用户名</label>
-          <input value={settings.webdavUser} onChange={e => handleChange('webdavUser', e.target.value)} />
-        </div>
-        <div className="form-row">
-          <label>密码</label>
-          <input type="password" value={settings.webdavPass} onChange={e => handleChange('webdavPass', e.target.value)} />
-        </div>
-        <div className="form-actions" style={{ justifyContent: 'flex-start' }}>
-          <button className="btn-secondary" onClick={handleBackup} disabled={syncing}>
-            {syncing ? '同步中...' : <><Icon name="cloud-up" size={15} /> 备份到云端</>}
-          </button>
-          <button className="btn-secondary" onClick={handleRestore} disabled={syncing}>
-            {syncing ? '同步中...' : <><Icon name="cloud-down" size={15} /> 从云端恢复</>}
-          </button>
-          {lastSync && <span className="book-meta">上次同步：{lastSync}</span>}
-        </div>
-        <p className="section-desc" style={{ marginTop: 12, marginBottom: 0 }}>
-          同步进度、书签、笔记、书源和阅读偏好，不含书籍文件（各设备需各自导入同名书籍）。
-        </p>
       </section>
 
       <div className="settings-footer">

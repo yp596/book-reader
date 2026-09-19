@@ -1,10 +1,10 @@
-import { useState, useEffect, useMemo, useRef, type CSSProperties } from 'react';
+import { useState, useEffect, useLayoutEffect, useMemo, useRef, type CSSProperties } from 'react';
 import ePub from 'epubjs';
 import * as pdfjsLib from 'pdfjs-dist';
 import PdfWorkerUrl from 'pdfjs-dist/build/pdf.worker.min.mjs?url';
 import { Book, Bookmark, Note, TocEntry, ReadingPosition } from '../types';
 import { Icon } from './Icon';
-import { escapeHtml, excerptAround, clampPage, lineToPageIndex, paginateText, parseSavedPosition, serializeSavedPosition, findKeyword, buildKeywordRegex, type SavedPosition, type KeywordOptions } from '../utils/text';
+import { escapeHtml, excerptAround, clampPage, lineToPageIndex, paginateText, parseSavedPosition, serializeSavedPosition, findKeyword, buildKeywordRegex, epubSectionText, markKeywordHtml, type SavedPosition, type KeywordOptions } from '../utils/text';
 import { fontStackOf, highlightColorOf, HIGHLIGHT_COLORS, type ThemeName } from '../utils/reader-options';
 import { resolveThemeByClock, type AutoThemeConfig } from '../utils/auto-theme';
 import {
@@ -12,6 +12,8 @@ import {
   mergePrefs,
   bookPrefsKey,
   DEFAULT_READER_PREFS,
+  PAGE_ANIMATIONS,
+  type PageAnimation,
   type ReaderPrefs,
 } from '../utils/book-prefs';
 import { parseMindmap, MindNode } from '../utils/mindmap';
@@ -43,9 +45,116 @@ const STYLE_NODE_ID = 'reader-style-preset';
 /** 缩略图目标宽度（px）：和面板两列布局对齐，漫画原图几 MB 也先缩到这里 */
 const THUMB_WIDTH = 96;
 
+/**
+ * 漫画类格式：CBZ=zip、CBR=rar、CBT=tar、CB7=7z。
+ *
+ * 底层 electron/services/comic.ts 是按文件头魔数识别容器的，与 file_type 无关，
+ * 所以这四种包只要阅读侧认它们是漫画就能读。此前只判 'cbz'，导致 rar/tar/7z 的包
+ * 能导入、能上书架，点开却报「不支持的文件格式」。
+ */
+const COMIC_FILE_TYPES = new Set(['cbz', 'cbr', 'cbt', 'cb7']);
+
+/** 是否漫画类格式：判定集中一处，别再到处写 === 'cbz' */
+const isComicFile = (fileType: string) => COMIC_FILE_TYPES.has(fileType);
+
+/**
+ * 文档型格式：Markdown 与 DOCX。
+ *
+ * 两者在阅读侧是同一套——整篇 HTML 连续滚动、不分章不分页，位置记「第几个顶层块」，
+ * 跳转靠标题锚点。判定集中在这里，别再到处写 === 'md'。
+ */
+const DOC_FILE_TYPES = new Set(['md', 'docx']);
+const isDocFile = (fileType: string) => DOC_FILE_TYPES.has(fileType);
+
+/**
+ * 文档型格式的批注位置串前缀，形如 `doc:块序号:起:止`。
+ * 早期只有 Markdown 时存的是 `md:`，读的时候一并认，免得已做的批注失效。
+ */
+const isDocPos = (position: string) => position.startsWith('doc:') || position.startsWith('md:');
+
+/** 滑动模式无目录时的连排块大小（页）。按块对齐，同一块内滚动不会反复换内容 */
+const TXT_FLOW_WINDOW = 20;
+
+/** 滑动模式单次连排渲染的页数上限：超长章节不许把整个 DOM 一次性撑起来 */
+const TXT_FLOW_LIMIT = 100;
+
 /** 字体 key → CSS font-family：本地导入的字体直接用其 family，预设走原有映射 */
 const stackOfFontKey = (key: string) =>
   key.startsWith(LOCAL_FONT_PREFIX) ? `'${key.slice(LOCAL_FONT_PREFIX.length)}'` : fontStackOf(key);
+
+/** 文档型格式 块内的一处标记：偏移按块内文本节点顺序累加 */
+export interface DocRange {
+  s: number;
+  e: number;
+  /** 检索词标记的类名；书签不带类名，靠行内 style 上色 */
+  cls?: string;
+  style?: string;
+  /** 书签 id，落到 data-id 上供点击反查 */
+  id?: number;
+}
+
+/**
+ * 在某个块的 DOM 里按文本偏移套上标记。
+ *
+ * 偏移 → 节点的换算必须一次算完：套标记会切分文本节点，之后再换算就是按切分后的
+ * 长度算了，后面的标记会整体错位。所以先记下锚点，再从后往前套——改动总落在更靠后的
+ * 位置上，前面已记好的锚点不受影响。
+ */
+export function wrapDocRanges(doc: Document, block: HTMLElement, ranges: DocRange[]): void {
+  const nodes: Text[] = [];
+  const walker = doc.createTreeWalker(block, window.NodeFilter.SHOW_TEXT);
+  let n: Node | null;
+  while ((n = walker.nextNode())) nodes.push(n as Text);
+
+  const starts: number[] = [];
+  let acc = 0;
+  for (const t of nodes) {
+    starts.push(acc);
+    acc += (t.textContent || '').length;
+  }
+  const total = acc;
+  const anchorOf = (off: number) => {
+    const clamped = Math.max(0, Math.min(off, total));
+    for (let i = nodes.length - 1; i >= 0; i--) {
+      if (clamped >= starts[i]) {
+        const len = (nodes[i].textContent || '').length;
+        return { node: nodes[i], offset: Math.min(clamped - starts[i], len) };
+      }
+    }
+    return null;
+  };
+
+  // 去掉重叠：两条标记相交时套上去会互相吞并，后一条整条跳过（前面的书签优先保留）
+  const kept: DocRange[] = [];
+  let last = 0;
+  for (const r of [...ranges].sort((a, b) => a.s - b.s)) {
+    if (r.s < last || r.e <= r.s) continue;
+    kept.push(r);
+    last = r.e;
+  }
+
+  for (let k = kept.length - 1; k >= 0; k--) {
+    const r = kept[k];
+    const a = anchorOf(r.s);
+    const b = anchorOf(r.e);
+    if (!a || !b) continue;
+    const mark = doc.createElement('mark');
+    if (r.cls) mark.className = r.cls;
+    if (r.style) mark.setAttribute('style', r.style);
+    if (r.id != null) mark.setAttribute('data-id', String(r.id));
+    const range = doc.createRange();
+    try {
+      range.setStart(a.node, a.offset);
+      range.setEnd(b.node, b.offset);
+      // 用 extractContents 而不是 surroundContents：标记跨过 <strong>、<code> 这类
+      // 行内元素边界时 surroundContents 会直接抛错，抽出来再套回去则两种情形都能落
+      mark.appendChild(range.extractContents());
+      range.insertNode(mark);
+    } catch {
+      /* 区间失效（位置串与当前正文对不上）就跳过这一条，正文照常显示 */
+    }
+  }
+}
 
 interface ReaderProps {
   book: Book;
@@ -76,11 +185,54 @@ interface SearchHit {
 }
 
 export function Reader({ book, onBack, initialTarget, initialPosition, onOpenBook }: ReaderProps) {
+  /**
+   * 当前这本书的格式能力。
+   *
+   * UI 里所有「这个功能对它有没有用」的判断都从这里取，不再到处写
+   * book.file_type === 'xxx'。散判最容易漏——漏一处就是一个点了没反应的按钮。
+   * 拿不准某按钮该不该出现时，先问：它依赖下面哪一项能力？
+   * 放在组件最前面，是因为快捷键处理也要用，那段的引用位置更早。
+   */
+  const isDoc = isDocFile(book.file_type);
+  const caps = {
+    /** 能划词、能提取正文——朗读 / 检索 / AI / 双栏 / 标注都靠它 */
+    text: book.file_type === 'epub' || book.file_type === 'txt' || isDoc,
+    /**
+     * 能书内检索。
+     * PDF 划不了词，本来进不来；但 pdfjs 抽出来的文字层足够做检索，所以单开一个口子。
+     * 不能直接并进 caps.text——那一个开关还管着朗读、笔记、AI、双栏和标注十来处，
+     * 放开它等于让 PDF 长出四个它支撑不了的功能。
+     */
+    search: book.file_type === 'epub' || book.file_type === 'txt' || isDoc || book.file_type === 'pdf',
+    /**
+     * 有「分页 / 连续滚动」两种版式。
+     * 文档型格式不在此列：它天生是一份连续文档，没有页可分，见 caps.vertical 同理。
+     */
+    flow: book.file_type === 'epub' || book.file_type === 'txt',
+    /** 能竖排 */
+    vertical: book.file_type === 'epub' || book.file_type === 'txt',
+    /** 整页即一张图 */
+    image: book.file_type === 'pdf' || isComicFile(book.file_type),
+    /**
+     * 能分双栏。分栏靠 CSS 多列，得有一个「一屏高」的容器才成立；
+     * 文档型格式是一整篇连续长文、高度不受限，分栏后第二栏会跑到视口右边够不着。
+     */
+    dualColumn: book.file_type === 'epub' || book.file_type === 'txt',
+    /** 有页面缩略图（一页一张图才有意义；TXT/EPUB/文档用目录跳转更省） */
+    thumbs: book.file_type === 'pdf' || isComicFile(book.file_type),
+    /** 能识别当前页文字 */
+    ocr: book.file_type === 'pdf' || isComicFile(book.file_type),
+    /** 字号 / 字体族对正文生效（PDF 重排成流式排版后、文档型格式正文也吃这一套） */
+    font: book.file_type === 'epub' || book.file_type === 'txt' || book.file_type === 'pdf' || isDoc,
+  };
+
   const viewerRef = useRef<HTMLDivElement>(null);
   const bookRef = useRef<any>(null);
   const renditionRef = useRef<any>(null);
   const lastContentsRef = useRef<any>(null);
   const pdfDocRef = useRef<any>(null);
+  /** PDF 每页文字层，供书内检索用；换书时随 pdfDocRef 一起清掉 */
+  const pdfPageTextRef = useRef<{ doc: unknown; texts: string[] } | null>(null);
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const txtRef = useRef<HTMLDivElement>(null);
   const readStartRef = useRef<number>(Date.now());
@@ -157,11 +309,24 @@ export function Reader({ book, onBack, initialTarget, initialPosition, onOpenBoo
   const chapterLabelsRef = useRef<Set<string>>(new Set());
   /** 每页起始段落行号，用于目录行号 ↔ 页码互转 */
   const txtPageStartRef = useRef<number[]>([]);
+  /** 滑动模式：上一次的连排窗口起点，用于区分「换了窗口」与「窗口内滚动」 */
+  const lastFlowStartRef = useRef(-1);
+  /** 滑动模式：本次 pageIndex 变化是否由滚动回填引起（是则不要重新定位视口） */
+  const txtScrollByUserRef = useRef(false);
+  /** 滑动模式：滚动回填已排入下一帧，避免一帧内重复处理 */
+  const flowScrollTickRef = useRef(false);
+  /** 文档型格式：滚动回填已排入下一帧，避免一帧内重复处理 */
+  const docScrollTickRef = useRef(false);
   /** 漫画（CBZ）：页面条目名清单与当前页图片数据，按页拉取，不整包驻留 */
   const [comicPages, setComicPages] = useState<string[]>([]);
   const [comicPageData, setComicPageData] = useState<{ data: string; mime: string } | null>(null);
   /** 双页合并时右半页（页码在后的那页）的数据 */
   const [comicNextData, setComicNextData] = useState<{ data: string; mime: string } | null>(null);
+  /**
+   * 漫画页的小窗口缓存：只保留可见页前后各一页，翻页即换窗口、离开窗口的页立刻丢弃。
+   * 这样前后翻页不必再等一次 IPC，且窗口大小与书有多少页无关，不会把整包留在内存里。
+   */
+  const comicCacheRef = useRef<Map<string, { data: string; mime: string }>>(new Map());
   const [comicSpread, setComicSpread] = useState(false);
   const [comicRtl, setComicRtl] = useState(false);
   /** 竖排阅读：只对文字类格式生效 */
@@ -178,8 +343,10 @@ export function Reader({ book, onBack, initialTarget, initialPosition, onOpenBoo
 
   // EPUB 版式
   const [flowMode, setFlowMode] = useState<'paginated' | 'scrolled'>('paginated');
-  /** 打开这本书时该用的版式：Markdown 导入的书默认连续滚动，其余按偏好 */
+  /** 打开这本书时该用的版式：文档型格式 导入的书默认连续滚动，其余按偏好 */
   const initialFlowRef = useRef<'paginated' | 'scrolled'>('paginated');
+  /** 当前版式：relocated 回调要据此判断——滚动模式下 relocated 会随滚动频繁触发，不该放翻页动效 */
+  const flowModeRef = useRef<'paginated' | 'scrolled'>('paginated');
   /** 同理：双栏偏好也要在 renderTo 之前就备好——setState 是异步的，读 state 会拿到旧值 */
   const initialDualRef = useRef(false);
 
@@ -207,9 +374,25 @@ export function Reader({ book, onBack, initialTarget, initialPosition, onOpenBoo
   const [pdfReflow, setPdfReflow] = useState(false);
   const [reflowPages, setReflowPages] = useState<ReflowBlock[][]>([]);
   const [reflowPage, setReflowPage] = useState(0);
+  /** PDF 的书签目录（主进程从 outline 解析，带页码），原始版式下跳页用 */
+  const [pdfToc, setPdfToc] = useState<TocEntry[]>([]);
+  /**
+   * PDF 已重排：视图按「重排屏」渲染。屏是按字数重新切的，跨原始页边界，
+   * 与 PDF 原始页序是两套坐标——所有跳转与位置记忆都得先认清当前是哪一套。
+   */
+  const inPdfReflow = book.file_type === 'pdf' && pdfReflow && reflowPages.length > 0;
   const [reflowBusy, setReflowBusy] = useState(false);
-  /** 排版自定义：背景色 / 文字色 / 页边距 / 段间距 */
-  const [typo, setTypo] = useState({ bgColor: '', textColor: '', pagePadding: 56, paraSpacing: 0, pageGap: 0 });
+  /**
+   * 文档型格式 正文与目录。
+   * 整篇一个 HTML，靠滚动阅读——不切章、不分页，所以没有「当前第几页」这回事，
+   * 阅读位置改记「第几个顶层块」（见 SavedPosition.docBlock）。
+   */
+  const [docHtml, setDocHtml] = useState('');
+  const [docToc, setDocToc] = useState<TocEntry[]>([]);
+  /** 文档型格式 当前所在的顶层块序号，滚动时回填 */
+  const [docBlock, setDocBlock] = useState(0);
+  /** 排版自定义：背景色 / 文字色 / 页边距 / 段间距 / 字间距 / 首行缩进 */
+  const [typo, setTypo] = useState({ bgColor: '', textColor: '', pagePadding: 56, paraSpacing: 0, pageGap: 0, letterSpacing: 0, textIndent: 0 });
   const typoRef = useRef(typo);
   /** 阅读样式预设：styleCssRef 存当前要注入的 CSS，切换时免去异步读设置 */
   const [stylePreset, setStylePreset] = useState('none');
@@ -224,6 +407,11 @@ export function Reader({ book, onBack, initialTarget, initialPosition, onOpenBoo
   const [hideMarks, setHideMarks] = useState(false);
   /** EPUB 注解在绘制那一刻就定死了样式，重绘时要读最新值，故另存 ref */
   const hideMarksRef = useRef(false);
+  /** 翻页动画档位：平滑 / 减弱 / 关闭。动画回调不在 React 渲染周期里，另存 ref */
+  const [pageAnim, setPageAnim] = useState<PageAnimation>('off');
+  const pageAnimRef = useRef<PageAnimation>('off');
+  /** 系统「减少动态效果」：开启时平滑档也要降级，无障碍偏好优先于应用设置 */
+  const prefersReducedMotionRef = useRef(false);
   /** 全局强制统一字体：压过电子书自带的奇葩字体 */
   const forceFontRef = useRef(false);
   /** 批注只读：屏蔽新增/删除批注的操作入口 */
@@ -233,6 +421,10 @@ export function Reader({ book, onBack, initialTarget, initialPosition, onOpenBoo
   /** TXT 规整：原文缓存 + 开关（非破坏性，原文与磁盘文件都不动） */
   const txtRawRef = useRef<string>('');
   const [normalizeOn, setNormalizeOn] = useState(false);
+  /** TXT 原始字节：手动换编码要反复重解码同一份字节，解码后的字符串存不下这个信息 */
+  const txtBytesRef = useRef<Uint8Array | null>(null);
+  /** TXT 编码：'auto' 为自动识别（UTF-8 严格模式失败回退 GBK），其余为 TextDecoder 编码名 */
+  const [txtEncoding, setTxtEncoding] = useState('auto');
   /** 原文批注预览：点击正文高亮时展开对应的完整笔记 */
   const [markPreview, setMarkPreview] = useState<{
     position: string;
@@ -582,6 +774,8 @@ export function Reader({ book, onBack, initialTarget, initialPosition, onOpenBoo
       renditionRef.current = null;
       pdfDocRef.current?.destroy();
       pdfDocRef.current = null;
+      // 页文字层缓存留着会把上一本书的正文搜出来，跟着 doc 一起清
+      pdfPageTextRef.current = null;
     };
   }, [book.id]);
 
@@ -686,12 +880,12 @@ export function Reader({ book, onBack, initialTarget, initialPosition, onOpenBoo
   };
 
   const samePos = (a: SavedPosition, b: SavedPosition) =>
-    a.cfi === b.cfi && a.page === b.page;
+    a.cfi === b.cfi && a.page === b.page && a.reflow === b.reflow && a.docBlock === b.docBlock;
 
   /** 跳转前调用：把当前位置压入历史栈 */
   const pushHistory = () => {
     const pos = currentPosRef.current;
-    if (!pos || (pos.cfi == null && pos.page == null)) return;
+    if (!pos || (pos.cfi == null && pos.page == null && pos.reflow == null && pos.docBlock == null)) return;
     const h = histRef.current;
     if (h.idx >= 0 && samePos(h.stack[h.idx], pos)) return;
     h.stack = h.stack.slice(0, h.idx + 1);
@@ -703,6 +897,12 @@ export function Reader({ book, onBack, initialTarget, initialPosition, onOpenBoo
 
   const applyPos = (pos: SavedPosition) => {
     if (book.file_type === 'epub' && pos.cfi) renditionRef.current?.display(pos.cfi);
+    // 文档型格式 没有页，历史栈里带的是块序号
+    else if (isDoc && pos.docBlock != null) scrollToDocBlock(pos.docBlock);
+    // 重排下屏序与原始页序不换算：历史栈里带了屏号就按屏号还原
+    else if (inPdfReflow && pos.reflow != null) {
+      setReflowPage(Math.min(pos.reflow, reflowPages.length - 1));
+    }
     // 历史栈里的页码可能来自规整前的旧版本，页数变少后直接跳会落到不存在的空白页
     else if (pos.page != null) {
       setPageIndex(totalPages > 0 ? clampPage(pos.page + 1, totalPages) - 1 : pos.page);
@@ -729,13 +929,35 @@ export function Reader({ book, onBack, initialTarget, initialPosition, onOpenBoo
 
   const goToFirst = () => {
     pushHistory();
-    if (book.file_type === 'epub') renditionRef.current?.display();
-    else setPageIndex(0);
+    if (book.file_type === 'epub') {
+      renditionRef.current?.display();
+      return;
+    }
+    // 文档型格式 没有页，回到文档顶端
+    if (isDoc) {
+      scrollToDocBlock(0);
+      return;
+    }
+    // 重排后视图读的是 reflowPage，喂 pageIndex 等于没按
+    if (inPdfReflow) {
+      setReflowPage(0);
+      return;
+    }
+    setPageIndex(0);
   };
 
   const goToLast = () => {
     pushHistory();
+    if (isDoc) {
+      const el = txtRef.current;
+      if (el) el.scrollTop = el.scrollHeight;
+      return;
+    }
     if (book.file_type !== 'epub') {
+      if (inPdfReflow) {
+        setReflowPage(reflowPages.length - 1);
+        return;
+      }
       if (totalPages > 0) setPageIndex(totalPages - 1);
       return;
     }
@@ -779,6 +1001,232 @@ export function Reader({ book, onBack, initialTarget, initialPosition, onOpenBoo
     } catch {
       showToast('跳转失败，请重试');
     }
+  };
+
+  // ---------- 文档型格式（整篇连续滚动）----------
+  // 与 TXT 的「滑动模式」是两回事：那边是把按字数切好的页连起来排（有页码、有连排窗口），
+  // 这边根本没有页——一整篇文档从头滚到尾，位置只能指望顶层块。
+
+  /** 正文容器里的顶层块（段落 / 标题 / 列表 / 代码块…），序号即阅读位置的锚点 */
+  const docBlocksOf = (): HTMLElement[] =>
+    txtRef.current ? (Array.from(txtRef.current.children) as HTMLElement[]) : [];
+
+  /**
+   * 从第 index 个顶层块起取纯文本。
+   * 朗读要的是「从这里读到文末」，AI 上下文要的是「眼前这一段」，
+   * 差别只在 maxChars：给了就截断，不给就取到底。
+   */
+  const docTextFrom = (index: number, maxChars = 0): string => {
+    let out = '';
+    for (const b of docBlocksOf().slice(Math.max(0, index))) {
+      out += (b.textContent || '') + '\n';
+      if (maxChars > 0 && out.length >= maxChars) break;
+    }
+    const text = out.trim();
+    return maxChars > 0 ? text.slice(0, maxChars) : text;
+  };
+
+  /** 把某一块顶到视口上沿。用增量而非绝对赋值，免得算错 padding / border 整体偏一截 */
+  const scrollToDocBlock = (index: number) => {
+    const el = txtRef.current;
+    const blocks = docBlocksOf();
+    if (!el || blocks.length === 0) return;
+    const target = blocks[Math.min(Math.max(index, 0), blocks.length - 1)];
+    if (!target) return;
+    el.scrollTop += target.getBoundingClientRect().top - el.getBoundingClientRect().top - el.clientTop;
+  };
+
+  /** 滚动回填当前块：视口上沿之下最后一块，就是眼前正在读的那块 */
+  const handleDocScroll = () => {
+    if (docScrollTickRef.current) return;
+    docScrollTickRef.current = true;
+    requestAnimationFrame(() => {
+      docScrollTickRef.current = false;
+      const el = txtRef.current;
+      if (!el) return;
+      const base = el.getBoundingClientRect().top;
+      const blocks = Array.from(el.children) as HTMLElement[];
+      let current = 0;
+      for (let i = 0; i < blocks.length; i++) {
+        if (blocks[i].getBoundingClientRect().top - base <= 8) current = i;
+        else break;
+      }
+      setDocBlock(prev => (prev === current ? prev : current));
+    });
+  };
+
+  /** 目录 / 待办跳转：滚到对应标题。目标不存在就当没点，不动视图 */
+  const goToDocAnchor = (href: string) => {
+    const el = txtRef.current;
+    if (!el) return;
+    const target = el.querySelector<HTMLElement>(`[id="${href.replace(/^#/, '')}"]`);
+    if (!target) return;
+    pushHistory();
+    el.scrollTop += target.getBoundingClientRect().top - el.getBoundingClientRect().top - el.clientTop;
+    setPanel(null);
+  };
+
+  /**
+   * 正文挂上 DOM 之后再定位。
+   * 顺序不能反：渲染前容器里还没有那些标题和块，怎么算都落不到地方。
+   */
+  useEffect(() => {
+    if (!isDoc || !docHtml) return;
+    const el = txtRef.current;
+    if (!el) return;
+    // 优先级与别的格式一致：指定位置 > 指定锚点 > 上次阅读位置 > 从头开始
+    if (initialPosition && isDocPos(initialPosition)) {
+      const block = Number(initialPosition.split(':')[1]);
+      if (!Number.isNaN(block)) {
+        scrollToDocBlock(block);
+        return;
+      }
+    }
+    if (initialTarget?.href) {
+      const target = el.querySelector<HTMLElement>(`[id="${initialTarget.href.replace(/^#/, '')}"]`);
+      if (target) {
+        el.scrollTop += target.getBoundingClientRect().top - el.getBoundingClientRect().top - el.clientTop;
+        return;
+      }
+    }
+    if (savedPosRef.current?.docBlock != null) scrollToDocBlock(savedPosRef.current.docBlock);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [docHtml, book.id]);
+
+  /**
+   * 正文 HTML → 带批注 / 检索标记的显示内容。
+   *
+   * 不能像 TXT 那样按纯文本下标切字符串：文档型格式 正文本身就是 HTML，下标一旦跨过
+   * 标签边界就会把标签切碎。所以先解析成 DOM，按顶层块收集文本节点，再用与划词时
+   * 同一套规则（文本节点顺序拼接后的偏移）落标记，最后整段取回 innerHTML——
+   * 算出来的和标上去的因此天然一致，也不会有上一轮的标记残留。
+   */
+  const docDisplayHtml = useMemo(() => {
+    if (!isDoc || !docHtml) return '';
+    const markable = !hideMarks && bookmarks.some(b => isDocPos(b.position));
+    if (!markable && !searchMark) return docHtml;
+
+    // 用 DOMParser 而不是 document.createElement：解析出来的文档没有浏览上下文，
+    // 里面的图片不会真的去加载，免得为了套标记把整篇的图都再取一遍
+    const doc = new DOMParser().parseFromString('<div id="doc-hold"></div>', 'text/html');
+    const root = doc.getElementById('doc-hold') as HTMLElement | null;
+    if (!root) return docHtml;
+    root.innerHTML = docHtml;
+
+    const byBlock = new Map<number, DocRange[]>();
+    const add = (bi: number, r: DocRange) => {
+      const list = byBlock.get(bi);
+      if (list) list.push(r);
+      else byBlock.set(bi, [r]);
+    };
+
+    if (markable) {
+      for (const b of bookmarks) {
+        const parts = b.position.split(':');
+        if (!isDocPos(b.position)) continue;
+        const bi = Number(parts[1]);
+        const s = Number(parts[2]);
+        const e = Number(parts[3]);
+        if (!Number.isInteger(bi) || Number.isNaN(s) || Number.isNaN(e) || s >= e) continue;
+        const color = highlightColorOf(b.color || 'yellow');
+        const style = b.style === 'underline'
+          ? `border-bottom:2px solid ${color.solid}; background:transparent`
+          : `background:${color.css}`;
+        add(bi, { s, e, style, id: b.id });
+      }
+    }
+
+    const blocks = Array.from(root.children) as HTMLElement[];
+    if (searchMark) {
+      const base = buildKeywordRegex(searchMark, {
+        caseSensitive: searchCaseSensitive,
+        wholeWord: searchWholeWord,
+      });
+      // 另起一个带 g 的实例：复用同一个正则，exec 的 lastIndex 会跨块串味
+      const re = new RegExp(base.source, base.flags + 'g');
+      blocks.forEach((block, bi) => {
+        const text = block.textContent || '';
+        re.lastIndex = 0;
+        let m: RegExpExecArray | null;
+        while ((m = re.exec(text)) !== null) {
+          // 空匹配会让 lastIndex 原地打转，直接跳出
+          if (m[0].length === 0) break;
+          const s = m.index;
+          const e = s + m[0].length;
+          // 与书签重叠的跳过：书签是用户标的，检索标记只是临时提示
+          const taken = (byBlock.get(bi) ?? []).some(r => s < r.e && e > r.s);
+          if (!taken) add(bi, { s, e, cls: 'search-mark' });
+          re.lastIndex = e;
+        }
+      });
+    }
+
+    for (const [bi, ranges] of byBlock) {
+      const block = blocks[bi];
+      if (block) wrapDocRanges(doc, block, ranges);
+    }
+    return root.innerHTML;
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [docHtml, isDoc, bookmarks, hideMarks, searchMark, searchCaseSensitive, searchWholeWord]);
+
+  /**
+   * 标记一变，容器里的 HTML 整块换掉，滚动位置有可能被打回顶部。
+   * 重绘后把视口重新对齐回原来读的那一块：没被打回时这一步等于原地不动，不碍事。
+   */
+  useLayoutEffect(() => {
+    if (!isDoc || !docDisplayHtml) return;
+    scrollToDocBlock(docBlock);
+    // 只在标记重绘后对齐一次；docBlock 变了不代表 HTML 变了，列进来会与滚动回填互相打架
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [docDisplayHtml]);
+
+  /**
+   * 文档型格式 划词：锚点记「第几个顶层块 + 块内文本偏移」。
+   * 不用页码——文档型格式 没有页；也不用绝对字符偏移——块才是重新打开时算得准的那个基准。
+   */
+  const handleDocMouseUp = () => {
+    if (!isDoc) return;
+    const container = txtRef.current;
+    const selection = window.getSelection();
+    if (!container || !selection || selection.isCollapsed) return;
+    if (!container.contains(selection.anchorNode)) return;
+    const raw = selection.toString();
+    const text = raw.trim();
+    if (!text) return;
+
+    // 顶层块是锚点的第一段。选区跨块时以起点所在块为准，与 TXT 滑动模式一致
+    const anchorEl =
+      selection.anchorNode instanceof Element
+        ? selection.anchorNode
+        : selection.anchorNode?.parentElement ?? null;
+    let node: Element | null = anchorEl;
+    while (node && node.parentElement !== container) node = node.parentElement;
+    if (!node) return;
+    const block = node as HTMLElement;
+    const blocks = Array.from(container.children) as HTMLElement[];
+    const blockIdx = blocks.indexOf(block);
+    if (blockIdx < 0) return;
+
+    const range = selection.getRangeAt(0);
+    const pre = range.cloneRange();
+    pre.selectNodeContents(block);
+    let start: number;
+    try {
+      pre.setEnd(range.startContainer, range.startOffset);
+      start = pre.toString().length;
+    } catch {
+      // 起点不在这一块里（跨块拖选），没有可靠锚点
+      return;
+    }
+    const end = Math.min(start + raw.length, (block.textContent || '').length);
+
+    const rect = range.getBoundingClientRect();
+    setSel({
+      x: Math.min(rect.left, window.innerWidth - 240),
+      y: rect.bottom + 8,
+      text,
+      position: `doc:${blockIdx}:${start}:${end}`,
+    });
   };
 
   /** 读取阅读偏好与上次位置，然后加载书籍 */
@@ -862,17 +1310,14 @@ export function Reader({ book, onBack, initialTarget, initialPosition, onOpenBoo
       setFontKey(merged.fontFamily);
       initialDualRef.current = merged.dualColumn;
       setDualColumn(merged.dualColumn);
-      // Markdown 导入的书默认用连续滚动阅读：一篇笔记从头读到尾才顺，也贴近
-      // Typora / Obsidian 的习惯。用户自己切过分页/滚动之后，以他的选择为准。
-      let mdFlow: 'paginated' | 'scrolled' = merged.flowMode;
-      try {
-        const isMdBook = (await window.electronAPI?.getSetting(`mdSource:${book.id}`)) === '1';
-        const rawPrefs = await window.electronAPI?.getSetting(bookPrefsKey(book.id));
-        const userChoseFlow = parseBookPrefs(rawPrefs).flowMode !== undefined;
-        if (isMdBook && !userChoseFlow) mdFlow = 'scrolled';
-      } catch { /* 读不到就按默认分页 */ }
-      initialFlowRef.current = mdFlow;
-      setFlowMode(mdFlow);
+      // 版式默认按格式定：TXT 小说整章连排滚动才读得顺，被字数阈值切成好几页很割裂；
+      // EPUB 保持分页——滚动版式下 epub.js 的 next()/prev() 不是翻页语义，翻页键会失灵。
+      // 用户在本节里切过版式（saved.flowMode）就以他的选择为准，不再被默认值改回去。
+      const flow: 'paginated' | 'scrolled' =
+        saved.flowMode ?? (book.file_type === 'txt' ? 'scrolled' : 'paginated');
+      initialFlowRef.current = flow;
+      setFlowMode(flow);
+      flowModeRef.current = flow;
       setPdfScale(merged.pdfScale);
       const typoNext = {
         bgColor: merged.bgColor,
@@ -880,6 +1325,8 @@ export function Reader({ book, onBack, initialTarget, initialPosition, onOpenBoo
         pagePadding: merged.pagePadding,
         paraSpacing: merged.paraSpacing,
         pageGap: merged.pageGap,
+        letterSpacing: merged.letterSpacing,
+        textIndent: merged.textIndent,
       };
       typoRef.current = typoNext;
       setTypo(typoNext);
@@ -890,6 +1337,8 @@ export function Reader({ book, onBack, initialTarget, initialPosition, onOpenBoo
       verticalRef.current = merged.vertical;
       setHideMarks(merged.hideMarks);
       hideMarksRef.current = merged.hideMarks;
+      setPageAnim(merged.pageAnimation);
+      pageAnimRef.current = merged.pageAnimation;
       savedPosRef.current = parseSavedPosition(pos);
     } catch {
       /* 读取失败按默认值走 */
@@ -911,13 +1360,22 @@ export function Reader({ book, onBack, initialTarget, initialPosition, onOpenBoo
     setSel(null);
     setNoteDraft(null);
     setHits([]);
+    setDocHtml('');
+    setDocToc([]);
+    setDocBlock(0);
     try {
       const api = window.electronAPI;
       if (!api) throw new Error('系统接口未就绪，请重启应用');
 
-      if (book.file_type === 'cbz') {
+      if (isComicFile(book.file_type)) {
         // 漫画按页取用，不把整个压缩包读进渲染进程
         await loadComic();
+      } else if (isDoc) {
+        // 文档型格式（Markdown / DOCX）由主进程整篇渲染好再送过来：语法、公式、
+        // 代码高亮、图片这一整套处理只有一份实现，在渲染进程重写一遍必然慢慢走样
+        const doc = await api.getDocHtml(book.id);
+        setDocHtml(doc.html);
+        setDocToc(doc.toc);
       } else {
         const base64 = await api.getBookFileData(book.id);
         const bytes = Uint8Array.from(atob(base64), c => c.charCodeAt(0));
@@ -931,6 +1389,10 @@ export function Reader({ book, onBack, initialTarget, initialPosition, onOpenBoo
           chapterLabelsRef.current = new Set(toc.map(t => t.label.trim()).filter(Boolean));
           loadTxt(bytes);
         } else if (book.file_type === 'pdf') {
+          // PDF 的 outline 目录主进程侧就能解析，里面带页码；原始版式下也把目录给出来，
+          // 不能只在「重排」之后才有——那边用的是重排后的屏号，是另一套坐标系
+          const toc = ((await api.getBookToc(book.id)) as TocEntry[]) || [];
+          setPdfToc(toc.filter(t => t.page != null));
           await loadPdf(bytes);
         } else {
           throw new Error(`不支持的文件格式：${book.file_type}`);
@@ -1133,6 +1595,8 @@ export function Reader({ book, onBack, initialTarget, initialPosition, onOpenBoo
       setChapterPage(startPage);
       setChapterTotal(total);
       setBookPercent(Math.round(progress * 100));
+      // 分页模式下每次换页放一次动效；滚动模式下 relocated 会随滚动频繁触发，放了反而晃眼
+      if (flowModeRef.current === 'paginated') playFlipFx();
     });
   };
 
@@ -1178,15 +1642,23 @@ export function Reader({ book, onBack, initialTarget, initialPosition, onOpenBoo
     setTotalPages(total);
   };
 
-  const loadTxt = (bytes: Uint8Array) => {
-    let text: string;
+  /** TXT 解码：auto 走严格 UTF-8 探测（失败回退 GBK），指定编码则强制按该编码解。
+   *  注：fatal 只对 UTF-8 是真严格，GBK/Big5 等遇到非法字节只会静默替换成 U+FFFD，
+   *  所以「自动识别」只能靠 UTF-8 fatal 探测，不能反过来对 GBK 探测。 */
+  const decodeTxt = (bytes: Uint8Array, encoding: string): string => {
+    if (encoding !== 'auto') return new TextDecoder(encoding).decode(bytes);
     try {
-      text = new TextDecoder('utf-8', { fatal: true }).decode(bytes);
+      return new TextDecoder('utf-8', { fatal: true }).decode(bytes);
     } catch {
-      text = new TextDecoder('gbk').decode(bytes);
+      return new TextDecoder('gbk').decode(bytes);
     }
+  };
+
+  const loadTxt = (bytes: Uint8Array, encoding = txtEncoding, keepPage: number | null = null) => {
+    txtBytesRef.current = bytes;
+    const text = decodeTxt(bytes, encoding);
     txtRawRef.current = text;
-    paginateTxt(normalizeOn ? normalizeText(text) : text);
+    paginateTxt(normalizeOn ? normalizeText(text) : text, keepPage);
   };
 
   /** 切换文本规整：只换渲染源，不动原文、不写磁盘，可随时还原 */
@@ -1196,6 +1668,17 @@ export function Reader({ book, onBack, initialTarget, initialPosition, onOpenBoo
     const raw = txtRawRef.current;
     if (!raw) return;
     paginateTxt(next ? normalizeText(raw) : raw, pageIndex);
+  };
+
+  /** 手动指定 TXT 编码：只重解码重分页，不动原文件、不写磁盘，页码尽量保住 */
+  const changeTxtEncoding = (encoding: string) => {
+    setTxtEncoding(encoding);
+    const bytes = txtBytesRef.current;
+    if (!bytes) return;
+    loadTxt(bytes, encoding, pageIndex);
+    // 换编码后页码数值可能不变（keepPage 保持原值），React 会跳过相同 state 的 effect，
+    // 进度不主动落册就要等用户翻页才刷新（书架百分比停在旧值），这里主动存一次
+    scheduleSavePos({ page: pageIndex });
   };
 
   /** TXT 目录跳转：优先按段落行号换算页码，缺失时退回页号 */
@@ -1338,6 +1821,36 @@ export function Reader({ book, onBack, initialTarget, initialPosition, onOpenBoo
           progress: locationRef.current.progress,
         };
       }
+      // 文档型格式 没有页可分，位置就是「第几个顶层块」。标签取最近的那个标题，
+      // 比「第 37 段」有用得多——一眼就知道读到哪一节了
+      if (isDoc) {
+        const blocks = docBlocksOf();
+        const total = blocks.length || 1;
+        const headings = Array.from(
+          txtRef.current?.querySelectorAll<HTMLElement>('[id^="dh-"]') ?? [],
+        );
+        let label = '';
+        for (const h of headings) {
+          const idx = blocks.indexOf(h);
+          if (idx < 0) continue; // 嵌在引用块里的标题，不属于顶层块序列
+          if (idx > docBlock) break;
+          label = (h.textContent || '').trim();
+        }
+        return {
+          position: serializeSavedPosition({ docBlock }),
+          label: (label || `第 ${docBlock + 1} 段`).slice(0, 60),
+          progress: total > 1 ? docBlock / total : 0,
+        };
+      }
+      // PDF 重排后眼前的「屏」与原始页序没有换算关系：两套坐标都带上，
+      // 切回原始版式时用 page，留在重排里就用 reflow
+      if (inPdfReflow) {
+        return {
+          position: serializeSavedPosition({ page: pageIndex, reflow: reflowPage }),
+          label: `第 ${reflowPage + 1}/${reflowPages.length} 屏`,
+          progress: reflowPages.length > 0 ? reflowPage / reflowPages.length : 0,
+        };
+      }
       return {
         position: serializeSavedPosition({ page: pageIndex }),
         label: totalPages > 0 ? `第 ${pageIndex + 1}/${totalPages} 页` : '当前页',
@@ -1385,6 +1898,12 @@ export function Reader({ book, onBack, initialTarget, initialPosition, onOpenBoo
       void renditionRef.current?.display(pos.cfi)?.catch?.(() => {
         showToast('这个位置已失效，建议从目录重新定位');
       });
+    } else if (isDoc && pos.docBlock != null) {
+      // 文档型格式 没有页，断点记的是块序号
+      scrollToDocBlock(pos.docBlock);
+    } else if (inPdfReflow && pos.reflow != null) {
+      // 人正留在重排模式里：屏序与原始页序不换算，要用当初记下的屏号
+      setReflowPage(Math.min(pos.reflow, reflowPages.length - 1));
     } else if (pos.page != null) {
       // 规整、重新解析都会让页数变少，按当时的页码直接跳会落到不存在的空白页
       setPageIndex(totalPages > 0 ? clampPage(pos.page + 1, totalPages) - 1 : pos.page);
@@ -1409,6 +1928,78 @@ export function Reader({ book, onBack, initialTarget, initialPosition, onOpenBoo
   const clearEpubSelection = () => {
     try { lastContentsRef.current?.window.getSelection().removeAllRanges(); } catch { /* 忽略 */ }
   };
+
+  /**
+   * 拖拽移动视图（PDF 原始版式、漫画这类「整页一张图」的内容）。
+   *
+   * 为什么不给文字类格式也开：那几类里按住拖动**就是划词选中**，划词菜单、高亮、
+   * 笔记全建立在它上面，把按下事件抢过来等于把它们一起废掉。而拖拽平移在概念上
+   * 本来就只属于固定版式——流式排版的正文是纵向流动的，滚动条已经把它表达完了。
+   *
+   * 用 Pointer Events + setPointerCapture：指针划出容器、划出窗口都不会丢事件，
+   * 松手时能确定地收尾；若退回用挂在 window 上的 mousemove，这些边界都得自己兜。
+   */
+  const panRef = useRef<{ id: number; x: number; y: number; left: number; top: number } | null>(null);
+  const [panActive, setPanActive] = useState(false);
+  /**
+   * 容器此刻是否真的有可滚动的量。没有就不给 grab 光标——「整页装得下」的 PDF
+   * 悬停时若显示一只抓手，等于承诺了一个拖不动的手势。
+   * 只在指针移入时判定一次，不挂 ResizeObserver：能改变滚动量的操作（缩放、翻页、
+   * 切窗口大小）都要先把鼠标移出容器去点按钮或拖边框，回来时判定的就是最新结果，
+   * 为此常驻两个观察者不划算。
+   */
+  const [panReady, setPanReady] = useState(false);
+
+  const hasPanRoom = (el: HTMLElement) =>
+    el.scrollHeight > el.clientHeight || el.scrollWidth > el.clientWidth;
+
+  const handlePanDown = (e: React.PointerEvent<HTMLDivElement>) => {
+    // 只认左键：右键要留给上下文菜单，中键留给系统自动滚动
+    if (e.button !== 0) return;
+    const el = e.currentTarget;
+    // 没得滚就不接管，免得把指针捕获过去却什么都动不了
+    if (!hasPanRoom(el)) return;
+    panRef.current = { id: e.pointerId, x: e.clientX, y: e.clientY, left: el.scrollLeft, top: el.scrollTop };
+    el.setPointerCapture(e.pointerId);
+    setPanActive(true);
+  };
+
+  const handlePanMove = (e: React.PointerEvent<HTMLDivElement>) => {
+    const p = panRef.current;
+    if (!p || p.id !== e.pointerId) return;
+    // 往右拖内容就跟着往右走，所以滚动量是起始值减去位移
+    e.currentTarget.scrollLeft = p.left - (e.clientX - p.x);
+    e.currentTarget.scrollTop = p.top - (e.clientY - p.y);
+  };
+
+  const handlePanUp = (e: React.PointerEvent<HTMLDivElement>) => {
+    const p = panRef.current;
+    if (!p || p.id !== e.pointerId) return;
+    panRef.current = null;
+    setPanActive(false);
+    if (e.currentTarget.hasPointerCapture(e.pointerId)) {
+      e.currentTarget.releasePointerCapture(e.pointerId);
+    }
+  };
+
+  const handlePanEnter = (e: React.PointerEvent<HTMLDivElement>) => {
+    setPanReady(hasPanRoom(e.currentTarget));
+  };
+
+  const handlePanLeave = () => setPanReady(false);
+
+  const panHandlers = {
+    onPointerDown: handlePanDown,
+    onPointerMove: handlePanMove,
+    onPointerUp: handlePanUp,
+    onPointerCancel: handlePanUp,
+    onPointerEnter: handlePanEnter,
+    onPointerLeave: handlePanLeave,
+  };
+
+  /** 只有一套视图会挂载，panActive 是全局的也不会串到别的容器上 */
+  const panClass = (base = '') =>
+    [base, panReady ? 'pan-surface' : '', panActive ? 'pan-active' : ''].filter(Boolean).join(' ');
 
   /** 点击空白处收起划词条（点操作条本身或刚划完词时不收起） */
   const handleContentClick = (e: React.MouseEvent) => {
@@ -1648,6 +2239,10 @@ export function Reader({ book, onBack, initialTarget, initialPosition, onOpenBoo
     pushHistory();
     if (book.file_type === 'epub') {
       renditionRef.current?.display(position);
+    } else if (isDocPos(position)) {
+      // 文档型格式的批注锚点是块序号
+      const block = Number(position.split(':')[1]);
+      if (!Number.isNaN(block)) scrollToDocBlock(block);
     } else if (position.startsWith('txt:')) {
       const page = Number(position.split(':')[1]);
       if (!Number.isNaN(page)) setPageIndex(Math.min(page, totalPages - 1));
@@ -1677,27 +2272,55 @@ export function Reader({ book, onBack, initialTarget, initialPosition, onOpenBoo
     const text = selection.toString().trim();
     if (!text) return;
     const range = selection.getRangeAt(0);
+
+    // 滑动模式下容器里连排了好几页，偏移必须相对「选区所在的那一块」来算，页号也取该块的
+    // data-page；否则前面几块的字数会被算进来，标注锚点整体前移、落在别的页上。
+    // 分页模式没有分块，基准就退回容器本身。
+    let base: Node = container;
+    let markedPage = pageIndex;
+    const anchorEl =
+      selection.anchorNode instanceof Element
+        ? selection.anchorNode
+        : selection.anchorNode?.parentElement ?? null;
+    const block = anchorEl?.closest<HTMLElement>('.txt-flow-page') ?? null;
+    if (block) {
+      base = block;
+      const p = Number(block.dataset.page);
+      if (!Number.isNaN(p)) markedPage = p;
+    }
+
     const pre = range.cloneRange();
-    pre.selectNodeContents(container);
-    pre.setEnd(range.startContainer, range.startOffset);
-    const start = pre.toString().length;
+    pre.selectNodeContents(base);
+    let start: number;
+    try {
+      pre.setEnd(range.startContainer, range.startOffset);
+      start = pre.toString().length;
+    } catch {
+      // 跨块拖选时起点不在基准块内，setEnd 会抛错；这种选区没有可靠的单页锚点，放弃
+      return;
+    }
     const rect = range.getBoundingClientRect();
     setSel({
       x: Math.min(rect.left, window.innerWidth - 240),
       y: rect.bottom + 8,
       text,
-      position: `txt:${pageIndex}:${start}:${start + selection.toString().length}`,
+      position: `txt:${markedPage}:${start}:${start + selection.toString().length}`,
     });
   };
 
   /** TXT 当前页渲染：书签高亮（含颜色）+ 检索词高亮合并 */
-  const renderTxtHtml = () => {
-    const text = txtPages[pageIndex] || '';
+  /**
+   * 把某一页正文渲染成「已注入批注 / 检索标记」的 HTML。
+   * 该页没有任何标记时返回 null，调用方直接走纯文本节点这条更快路径。
+   * 参数化页码是为了滑动模式：那里要一次连排渲染好几页，各页的批注偏移都按自己的页号算。
+   */
+  const renderTxtPageHtml = (pageIdx: number): string | null => {
+    const text = txtPages[pageIdx] || '';
     interface TxtRange { s: number; e: number; cls: string; style?: string; id?: number }
     const ranges: TxtRange[] = [];
     // 书签优先（隐藏批注时整段跳过）
     for (const b of hideMarks ? [] : bookmarks) {
-      if (!b.position.startsWith(`txt:${pageIndex}:`)) continue;
+      if (!b.position.startsWith(`txt:${pageIdx}:`)) continue;
       const parts = b.position.split(':');
       const s = Number(parts[2]);
       const e = Number(parts[3]);
@@ -1743,6 +2366,67 @@ export function Reader({ book, onBack, initialTarget, initialPosition, onOpenBoo
     return html;
   };
 
+  // ---------- TXT 滑动（连排滚动）----------
+  // 这段必须在 advancePage 之前：翻页键在滑动模式下要靠窗口范围判断滚一屏还是翻页。
+
+  /**
+   * 滑动模式（连续滚动）是否生效：小说一章常被字数阈值切成好几页，连排才读得顺。
+   * 竖排（古籍右起）时滚动轴是横向的，与这里的纵向连排对不上，退回分页。
+   */
+  const txtFlowOn =
+    book.file_type === 'txt' && flowMode === 'scrolled' && txtPages.length > 0 && !vertical;
+
+  /**
+   * 连排窗口的起点页。
+   *
+   * 有目录取当前页所在章的章首，没目录按固定页数分块；章过长时再在章内按页数分块。
+   * 三种都刻意只依赖「块起点」这一个稳定值：同一窗口内滚动时它不变，
+   * 下面的 range 与内容 memo 就不重算，滚动才不会一顿一顿。
+   */
+  const txtFlowStart = useMemo(() => {
+    if (!txtFlowOn) return -1;
+    const last = txtPages.length - 1;
+    const starts = txtPageStartRef.current;
+    if (txtToc.length > 0 && starts.length === txtPages.length) {
+      let chapStart = 0;
+      let chapEnd = last;
+      for (const t of txtToc) {
+        if (t.line == null) continue;
+        const p = lineToPageIndex(starts, t.line);
+        if (p <= pageIndex) chapStart = p;
+        else break;
+      }
+      for (const t of txtToc) {
+        if (t.line == null) continue;
+        const p = lineToPageIndex(starts, t.line);
+        if (p > chapStart) { chapEnd = p - 1; break; }
+      }
+      if (chapEnd - chapStart + 1 > TXT_FLOW_LIMIT) {
+        chapStart += Math.floor((pageIndex - chapStart) / TXT_FLOW_LIMIT) * TXT_FLOW_LIMIT;
+      }
+      return chapStart;
+    }
+    return Math.floor(pageIndex / TXT_FLOW_WINDOW) * TXT_FLOW_WINDOW;
+  }, [txtFlowOn, pageIndex, txtPages, txtToc]);
+
+  /** 连排窗口 [起点, 终点]（闭区间）；分页模式为 null */
+  const txtFlowRange = useMemo<[number, number] | null>(() => {
+    if (txtFlowStart < 0) return null;
+    const last = txtPages.length - 1;
+    const starts = txtPageStartRef.current;
+    let end = Math.min(last, txtFlowStart + TXT_FLOW_WINDOW - 1);
+    if (txtToc.length > 0 && starts.length === txtPages.length) {
+      end = last;
+      for (const t of txtToc) {
+        if (t.line == null) continue;
+        const p = lineToPageIndex(starts, t.line);
+        if (p > txtFlowStart) { end = p - 1; break; }
+      }
+    }
+    end = Math.min(end, txtFlowStart + TXT_FLOW_LIMIT - 1, last);
+    return [txtFlowStart, Math.max(end, txtFlowStart)];
+  }, [txtFlowStart, txtPages, txtToc]);
+
   // ---------- TTS ----------
 
   const speak = (text: string) => {
@@ -1767,10 +2451,14 @@ export function Reader({ book, onBack, initialTarget, initialPosition, onOpenBoo
     setSpeaking(false);
   };
 
-  /** 取当前页文本（AI 上下文用）：TXT 取本页，EPUB 取当前 CFI 范围 */
+  /** 取当前页文本（AI 上下文用）：TXT 取本页，EPUB 取当前 CFI 范围，文档型格式 取眼前这一段 */
   const getCurrentPageText = async (): Promise<string> => {
     if (book.file_type === 'txt') {
       return txtPages[pageIndex] || '';
+    }
+    // 文档型格式 没有页，按「从当前块起一段」给，长度对齐一屏的量级
+    if (isDoc) {
+      return docTextFrom(docBlock, 2000);
     }
     if (book.file_type === 'epub') {
       try {
@@ -1787,7 +2475,7 @@ export function Reader({ book, onBack, initialTarget, initialPosition, onOpenBoo
     return '';
   };
 
-  /** 顶栏朗读：TXT 读剩余全文，EPUB 读当前页 */
+  /** 顶栏朗读：TXT 读剩余全文，EPUB 读当前页，文档型格式 从眼前这块读到文末 */
   const handleHeaderSpeak = async () => {
     if (speaking) {
       stopSpeak();
@@ -1795,6 +2483,9 @@ export function Reader({ book, onBack, initialTarget, initialPosition, onOpenBoo
     }
     if (book.file_type === 'txt') {
       speak(txtPages.slice(pageIndex).join('\n'));
+    } else if (isDoc) {
+      const text = docTextFrom(docBlock);
+      if (text) speak(text);
     } else if (book.file_type === 'epub') {
       try {
         const loc = renditionRef.current?.currentLocation?.();
@@ -1894,12 +2585,17 @@ export function Reader({ book, onBack, initialTarget, initialPosition, onOpenBoo
       'body':
         ` background: ${bg} !important; color: ${fg} !important;` +
         ` line-height: ${lineHeight} !important;` +
+        (t.letterSpacing > 0 ? ` letter-spacing: ${t.letterSpacing}em !important;` : '') +
         (verticalRef.current ? ' writing-mode: vertical-rl;' : '') +
         (stack ? ` font-family: ${stack}${force ? ' !important' : ''};` : ''),
       'p, div, span': { 'font-size': `${fontSize}px !important` },
     };
-    if (t.paraSpacing > 0) {
-      rules['p'] = { 'margin-bottom': `${t.paraSpacing}em !important` };
+    // 段落间距与首行缩进合并进同一条 p 规则：rules 是整表替换，分开写会让后者覆盖前者
+    if (t.paraSpacing > 0 || t.textIndent > 0) {
+      const pRule: Record<string, string> = {};
+      if (t.paraSpacing > 0) pRule['margin-bottom'] = `${t.paraSpacing}em !important`;
+      if (t.textIndent > 0) pRule['text-indent'] = `${t.textIndent}em !important`;
+      rules['p'] = pRule;
     }
     // 强制统一：连元素级 font-family 一并压过，解决异体字/缺字乱码
     if (force && stack) {
@@ -1911,7 +2607,15 @@ export function Reader({ book, onBack, initialTarget, initialPosition, onOpenBoo
   const toggleFlow = () => {
     const next = flowMode === 'paginated' ? 'scrolled' : 'paginated';
     setFlowMode(next);
+    flowModeRef.current = next;
     renditionRef.current?.flow(next);
+    // 竖排的滚动轴是横向的，连排滑动要的是纵向，两者互斥：开滚动就自动转回横排
+    if (next === 'scrolled' && verticalRef.current) {
+      setVertical(false);
+      verticalRef.current = false;
+      queueSaveBookPrefs({ vertical: false });
+      if (renditionRef.current) applyTheme(renditionRef.current);
+    }
     queueSaveBookPrefs({ flowMode: next });
   };
 
@@ -1930,7 +2634,8 @@ export function Reader({ book, onBack, initialTarget, initialPosition, onOpenBoo
 
   /**
    * 生成打印用 HTML：只含当前阅读内容，工具条在打印时隐藏。
-   * 各格式取当前可见内容——TXT 当前页、EPUB 当前章节、漫画当前页图、PDF 当前页画布。
+   * 各格式取当前可见内容——TXT 当前页、EPUB 当前章节、漫画当前页图、PDF 当前页画布、
+   * 文档型格式 此刻在屏幕上的那几块。
    */
   const buildPrintHtml = async (): Promise<string> => {
     let body = '';
@@ -1940,19 +2645,48 @@ export function Reader({ book, onBack, initialTarget, initialPosition, onOpenBoo
       const href = locationRef.current.href;
       const text = href ? await loadChapterText(href) : '';
       body = text ? `<p>${escapeHtml(text)}</p>` : '<p>（未取到当前章节内容）</p>';
-    } else if (book.file_type === 'cbz') {
+    } else if (isComicFile(book.file_type)) {
       body = comicPageData
         ? `<img src="data:${comicPageData.mime};base64,${comicPageData.data}" alt="">`
         : '<p>（当前页尚未加载）</p>';
     } else if (book.file_type === 'pdf') {
       const dataUrl = canvasRef.current?.toDataURL('image/png');
       body = dataUrl ? `<img src="${dataUrl}" alt="">` : '<p>（当前页尚未渲染）</p>';
+    } else if (isDoc) {
+      const el = txtRef.current;
+      const blocks = docBlocksOf();
+      if (el && blocks.length > 0) {
+        const { top, bottom } = el.getBoundingClientRect();
+        const shown = blocks.filter(b => {
+          const r = b.getBoundingClientRect();
+          return r.bottom > top && r.top < bottom;
+        });
+        const from = shown.length > 0 ? blocks.indexOf(shown[0]) : docBlock;
+        const to = shown.length > 0 ? blocks.indexOf(shown[shown.length - 1]) + 1 : docBlock + 1;
+        // 打印排版好的 HTML 而不是纯文本：标题、列表、代码块、表格本来就是
+        // 文档型格式 的内容本身，退化成纯文本等于把这份文档拆了
+        body = `<div class="doc-out">${blocks
+          .slice(from, to)
+          .map(b => b.outerHTML)
+          .join('')}</div>`;
+      }
+      if (!body) body = '<p>（当前内容尚未加载）</p>';
     }
     return `<!doctype html><html><head><meta charset="utf-8"><title>${escapeHtml(book.title)}</title>
 <style>
   body { font-family: "Noto Serif SC","Songti SC",serif; line-height: 1.8; margin: 0; padding: 24px; color: #222; }
   pre { white-space: pre-wrap; word-break: break-word; font: inherit; margin: 0; }
   img { max-width: 100%; height: auto; display: block; margin: 0 auto; }
+  /* 文档型格式的正文块要按文档排版，这些规则只作用于 .doc-out，不影响别的格式 */
+  .doc-out h1, .doc-out h2, .doc-out h3, .doc-out h4 { line-height: 1.4; margin: 18px 0 8px; }
+  .doc-out p { margin: 0 0 12px; }
+  .doc-out pre { background: #f5f5f5; padding: 8px 10px; border-radius: 4px; overflow: auto;
+                font-family: ui-monospace, Menlo, Consolas, monospace; font-size: 0.92em; }
+  .doc-out code { font-family: ui-monospace, Menlo, Consolas, monospace; font-size: 0.92em; }
+  .doc-out blockquote { margin: 0 0 12px; padding-left: 12px; border-left: 3px solid #ddd; color: #555; }
+  .doc-out table { border-collapse: collapse; margin: 0 0 12px; }
+  .doc-out th, .doc-out td { border: 1px solid #ccc; padding: 4px 8px; }
+  .doc-out img { margin: 12px 0; }
 </style></head><body>
 ${body}</body></html>`;
   };
@@ -1965,6 +2699,22 @@ ${body}</body></html>`;
       await api.printPreview(await buildPrintHtml(), book.title);
     } catch (err) {
       alert(`打开预览失败：${err instanceof Error ? err.message : '未知错误'}`);
+    }
+  };
+
+  /**
+   * 应用内直接打印：与预览同源，但不先看预览，直接唤起系统打印对话框。
+   * 用户主动取消不打扰；真正的失败（没有打印机、驱动报错）必须说清楚——
+   * 「点了没反应」比「打印不了」更难排查。
+   */
+  const handlePrintNow = async () => {
+    const api = window.electronAPI;
+    if (!api?.printContent) return;
+    try {
+      const r = await api.printContent(await buildPrintHtml(), book.title);
+      if (!r.ok && !r.cancelled) alert(`打印没能开始：${r.reason ?? '未知原因'}`);
+    } catch (err) {
+      alert(`打印失败：${err instanceof Error ? err.message : '未知错误'}`);
     }
   };
 
@@ -2014,6 +2764,12 @@ ${body}</body></html>`;
     setVertical(next);
     verticalRef.current = next;
     queueSaveBookPrefs({ vertical: next });
+    // 竖排是横向滚动轴，与连排滑动对不上：开竖排就退回分页，别留个按了没反应的版式开关
+    if (next && flowModeRef.current === 'scrolled') {
+      setFlowMode('paginated');
+      flowModeRef.current = 'paginated';
+      queueSaveBookPrefs({ flowMode: 'paginated' });
+    }
     if (renditionRef.current) applyTheme(renditionRef.current);
   };
 
@@ -2030,6 +2786,42 @@ ${body}</body></html>`;
     setTypo(next);
     queueSaveBookPrefs(patch);
     if (renditionRef.current) applyTheme(renditionRef.current);
+  };
+
+  /**
+   * 翻页动效：内容换好后做一次快速淡入，让翻页不至于「硬切」。
+   *
+   * 用 Web Animations API 而不是 React 状态 + class：连点翻页时每次调用都会新建一份
+   * 动画，不会互相打断；也不必为动画触发额外的重渲染。
+   * 「减弱」档位把时长压到一半；系统若开了「减少动态效果」，平滑档也降级为减弱档。
+   * 关闭档直接返回，不做任何事。
+   */
+  const playFlipFx = () => {
+    const mode = pageAnimRef.current;
+    if (mode === 'off') return;
+    const el = viewerRef.current;
+    if (!el || typeof el.animate !== 'function') return;
+    const soft = mode === 'reduced' || prefersReducedMotionRef.current;
+    try {
+      el.animate(
+        [
+          { opacity: soft ? 0.6 : 0.3 },
+          { opacity: 1 },
+        ],
+        { duration: soft ? 90 : 180, easing: 'ease-out' },
+      );
+    } catch {
+      /* 动画不可用时静默跳过，翻页本身不受影响 */
+    }
+  };
+
+  /** 切换翻页动画档位（按书记忆） */
+  const changePageAnim = (key: PageAnimation) => {
+    setPageAnim(key);
+    pageAnimRef.current = key;
+    queueSaveBookPrefs({ pageAnimation: key });
+    // 立刻放一次，让人当场看到这档动画长什么样
+    playFlipFx();
   };
 
   const changeTheme = (theme: 'dark' | 'light' | 'sepia') => {
@@ -2105,6 +2897,15 @@ ${body}</body></html>`;
     return () => mq.removeEventListener('change', onChange);
   }, [dpr]);
 
+  /** 跟随系统「减少动态效果」：开启时翻页动画降级为减弱档 */
+  useEffect(() => {
+    const mq = window.matchMedia('(prefers-reduced-motion: reduce)');
+    const sync = () => { prefersReducedMotionRef.current = mq.matches; };
+    sync();
+    mq.addEventListener('change', sync);
+    return () => mq.removeEventListener('change', sync);
+  }, []);
+
   /** 当前在跑的 PDF 渲染任务：同一张 canvas 上不能再起第二个 */
   const pdfRenderTaskRef = useRef<{ cancel: () => void; promise: Promise<void> } | null>(null);
 
@@ -2148,20 +2949,53 @@ ${body}</body></html>`;
 
   useEffect(() => {
     if (book.file_type === 'pdf' && pdfReady && pdfDocRef.current && !loading && !pdfReflow) {
-      renderPdfPage(pdfDocRef.current, pageIndex + 1, pdfScale, pdfRotation).catch(err => {
-        if ((err as { name?: string } | null)?.name !== 'RenderingCancelledException') {
-          showToast('这一页渲染失败，文件可能已损坏');
-        }
-      });
+      renderPdfPage(pdfDocRef.current, pageIndex + 1, pdfScale, pdfRotation)
+        // 画布重绘完成再放动效：先淡出旧页、再跳出新页会闪一下
+        .then(() => playFlipFx())
+        .catch(err => {
+          if ((err as { name?: string } | null)?.name !== 'RenderingCancelledException') {
+            showToast('这一页渲染失败，文件可能已损坏');
+          }
+        });
     }
   }, [pdfReady, pageIndex, loading, pdfScale, pdfReflow, pdfRotation, dpr]);
 
   // TXT / PDF：页码变化即记录阅读位置（加载完成前不写，避免覆盖上次位置）
   useEffect(() => {
     if (loading || book.file_type === 'epub') return;
-    scheduleSavePos({ page: pageIndex });
-    currentPosRef.current = { page: pageIndex };
-  }, [pageIndex, loading, book.file_type]);
+    // PDF 重排下变的是屏号，两套坐标一起记，切回原始版式才不会丢位置
+    const pos: SavedPosition = inPdfReflow
+      ? { page: pageIndex, reflow: reflowPage }
+      : { page: pageIndex };
+    scheduleSavePos(pos);
+    currentPosRef.current = pos;
+    // TXT 换页是同步替换文本，这里放动效；PDF 与漫画等内容真正就绪后再放（见各自分支）
+    // 滑动模式下 pageIndex 由滚动回填，放动效会在连续滚动中反复闪，跳过
+    if (book.file_type === 'txt' && !txtFlowOn) playFlipFx();
+  }, [pageIndex, loading, book.file_type, txtFlowOn, reflowPage, inPdfReflow]);
+
+  // 文档型格式：块序号变化即记录阅读位置。
+  // 打开时会先写一次 docBlock=0，但紧接着的定位滚动会把它改回来，800ms 的防抖
+  // 把两次合并成一次落盘，落下去的仍是定位后的块。
+  useEffect(() => {
+    if (loading || !isDoc || !docHtml) return;
+    const pos: SavedPosition = { docBlock };
+    scheduleSavePos(pos);
+    currentPosRef.current = pos;
+    // 书架上的百分比也得跟着走：文档型格式 没有页，别的格式那几处 updateProgress
+    // 都挂在翻页上，这里不主动上报的话进度会一直停在打开时的值
+    window.electronAPI?.updateProgress(book.id, docBlock / Math.max(1, docBlocksOf().length));
+  }, [docBlock, loading, isDoc, docHtml]);
+
+  // 漫画：图片是异步取回来的，等当前页数据到位再放动效，否则淡入的是上一页
+  useEffect(() => {
+    if (isComicFile(book.file_type) && comicPageData) playFlipFx();
+  }, [comicPageData, book.file_type]);
+
+  // PDF 重排：页码变化即整页重绘，直接放动效
+  useEffect(() => {
+    if (book.file_type === 'pdf' && pdfReflow) playFlipFx();
+  }, [reflowPage, pdfReflow, book.file_type]);
 
   /** PDF 缩放档位 */
   /**
@@ -2238,6 +3072,12 @@ ${body}</body></html>`;
 
   const togglePdfReflow = async () => {
     if (pdfReflow) {
+      // 关掉重排：按屏序比例换算回原始页序。不换算就会跳回「进入重排时」那个旧页码，
+      // 读了几十屏再切回去等于白读。与开启时的换算对称。
+      if (reflowPages.length > 0 && totalPages > 0) {
+        const ratio = reflowPage / reflowPages.length;
+        setPageIndex(Math.min(totalPages - 1, Math.floor(ratio * totalPages)));
+      }
       setPdfReflow(false);
       return;
     }
@@ -2318,8 +3158,56 @@ ${body}</body></html>`;
     }
   };
 
+  /**
+   * EPUB 滚动版式下把视口滚动一屏。
+   * epub.js 在 scrolled 下的 next() 是「跳下一个 section」——section 比视口高时，中间整段内容会被
+   * 直接跳过，所以这里自己滚容器。内容没超出视口、或已在两端时返回 false，交回章节翻页。
+   */
+  const scrollEpubBy = (dir: 1 | -1): boolean => {
+    const container = (renditionRef.current as any)?.manager?.container as HTMLElement | undefined;
+    if (!container) return false;
+    const max = container.scrollHeight - container.clientHeight;
+    if (max <= 0) return false;
+    const before = container.scrollTop;
+    const step = Math.max(80, Math.round(container.clientHeight * 0.88));
+    const target = Math.max(0, Math.min(max, before + dir * step));
+    if (target === before) return false;
+    container.scrollTo({ top: target, behavior: 'smooth' });
+    return true;
+  };
+
   /** 无副作用翻页（自动播放用，不停播） */
   const advancePage = (dir: 1 | -1) => {
+    // 滚动版式下「下一页」= 滚一屏，到两端才退回章节翻页
+    if (book.file_type === 'epub' && flowModeRef.current === 'scrolled' && scrollEpubBy(dir)) return;
+    if (txtFlowOn || isDoc) {
+      const el = txtRef.current;
+      if (el) {
+        const max = el.scrollHeight - el.clientHeight;
+        const before = el.scrollTop;
+        const step = Math.max(80, Math.round(el.clientHeight * 0.88));
+        const target = Math.max(0, Math.min(max, before + dir * step));
+        if (target !== before) {
+          el.scrollTo({ top: target, behavior: 'smooth' });
+          return;
+        }
+        // 已滚到容器两端：把页号推过连排窗口边界，让窗口整体前移 / 后退，
+        // 否则同一窗口内 setPageIndex 不会触发重排，按键等于没反应。
+        // 文档型格式 没有「下一屏内容」这回事，滚到头就停住，不往下走。
+        if (txtFlowOn && txtFlowRange) {
+          if (dir > 0 && txtFlowRange[1] < txtPages.length - 1) {
+            setPageIndex(txtFlowRange[1] + 1);
+            setSearchMark('');
+            return;
+          }
+          if (dir < 0 && txtFlowRange[0] > 0) {
+            setPageIndex(txtFlowRange[0] - 1);
+            setSearchMark('');
+            return;
+          }
+        }
+      }
+    }
     if (book.file_type === 'epub') {
       clearEpubSearchMarks();
       setSearchMark('');
@@ -2361,13 +3249,13 @@ ${body}</body></html>`;
       );
     } else if (dir > 0 && pageIndex < totalPages - 1) {
       // 漫画双页合并时一次跨两页
-      const step = book.file_type === 'cbz' && comicSpread ? 2 : 1;
+      const step = isComicFile(book.file_type) && comicSpread ? 2 : 1;
       const next = Math.min(pageIndex + step, totalPages - 1);
       setPageIndex(next);
       setSearchMark('');
       window.electronAPI?.updateProgress(book.id, totalPages > 0 ? next / totalPages : 0);
     } else if (dir < 0 && pageIndex > 0) {
-      const step = book.file_type === 'cbz' && comicSpread ? 2 : 1;
+      const step = isComicFile(book.file_type) && comicSpread ? 2 : 1;
       const next = Math.max(pageIndex - step, 0);
       setPageIndex(next);
       setSearchMark('');
@@ -2471,7 +3359,7 @@ ${body}</body></html>`;
       if (!action) return;
       e.preventDefault();
       // 日漫右向左：左右键的语义与横排文本相反，翻页动作对调
-      if (book.file_type === 'cbz' && comicRtlRef.current) {
+      if (isComicFile(book.file_type) && comicRtlRef.current) {
         if (action === 'next') action = 'prev';
         else if (action === 'prev') action = 'next';
       }
@@ -2484,29 +3372,36 @@ ${body}</body></html>`;
         case 'fontUp': changeFontSize(2); break;
         case 'fontDown': changeFontSize(-2); break;
         case 'openToc':
-          // TXT 也有目录面板（自动解析或手动登记），别让人按了没反应
-          if (book.file_type === 'epub' || book.file_type === 'txt') togglePanel('toc');
+          // 文字类按章节切；PDF 重排后也有章节，原始版式的 PDF 与漫画没有
+          if (panelAllowed('toc')) togglePanel('toc');
           else showToast('这种格式没有目录面板，PDF 与漫画可用缩略图跳页');
           break;
         case 'openSearch':
-          if (book.file_type === 'epub' || book.file_type === 'txt') togglePanel('search');
+          if (caps.search) togglePanel('search');
           else showToast('这种格式暂不支持书内检索');
           break;
-        case 'openNotes': togglePanel('notes'); break;
+        case 'openNotes':
+          // 纯图格式划不了词，笔记必然是空的；说清楚，别让人以为面板坏了
+          if (caps.text) togglePanel('notes');
+          else showToast('这种格式不能划词，笔记用不上；标页请用「阅读位置」');
+          break;
         case 'openPositions': togglePanel('positions'); break;
         case 'highlight':
-          if (sel) handleHighlight();
+          if (!caps.text) showToast('这种格式不能划词标注；标页请用「阅读位置」');
+          else if (sel) handleHighlight();
           else showToast('请先选中一段文字，再按高亮键');
           break;
         case 'addNote':
-          if (sel) {
+          if (!caps.text) showToast('这种格式不能划词，写不了笔记');
+          else if (sel) {
             setNoteDraft({ text: sel.text, position: sel.position });
             setNoteContent('');
-          } else {
-            showToast('请先选中一段文字，再按笔记键');
-          }
+          } else showToast('请先选中一段文字，再按笔记键');
           break;
-        case 'toggleDualColumn': toggleDualColumn(); break;
+        case 'toggleDualColumn':
+          if (caps.text) toggleDualColumn();
+          else showToast('双栏只作用于文字排版，这种格式用不上');
+          break;
         case 'toggleFullscreen': handleToggleFullscreen(); break;
       }
     };
@@ -2515,6 +3410,29 @@ ${body}</body></html>`;
   });
 
   // ---------- 检索 ----------
+
+  /**
+   * PDF 每页的文字层，供书内检索用。
+   * 按行拼、而不是把 text item 直接用空格连起来：itemsToLines 会依据字间距决定补不补空格，
+   * 直接连会往中文词中间塞空格，明明在书上、却一搜就搜不到。
+   * 整本抽一遍不便宜，按 doc 实例缓存；换书时 doc 换了，缓存自然作废。
+   */
+  const getPdfPageTexts = async (doc: any): Promise<string[]> => {
+    const cached = pdfPageTextRef.current;
+    if (cached && cached.doc === doc) return cached.texts;
+    const texts: string[] = [];
+    for (let i = 1; i <= doc.numPages; i++) {
+      const page = await doc.getPage(i);
+      const tc = await page.getTextContent();
+      texts.push(
+        itemsToLines((tc.items as any[]).filter(it => typeof it.str === 'string'))
+          .map(l => l.text)
+          .join('\n'),
+      );
+    }
+    pdfPageTextRef.current = { doc, texts };
+    return texts;
+  };
 
   const handleSearch = async () => {
     const kw = keyword.trim();
@@ -2537,6 +3455,25 @@ ${body}</body></html>`;
           }
         });
         setHits(found);
+      } else if (isDoc) {
+        const found: SearchHit[] = [];
+        // 逐顶层块找，不是逐页：文档型格式 没有页，块既是阅读位置也是跳转目标。
+        // 标签取该块之前最近的那个标题，与断点标签同一套算法
+        let heading = '';
+        docBlocksOf().forEach((block, i) => {
+          const own = (block.textContent || '').trim();
+          const text = block.textContent || '';
+          if (block.id?.startsWith('dh-')) heading = own;
+          const hit = findKeyword(text, kw, opts);
+          if (!hit) return;
+          found.push({
+            label: (heading || `第 ${i + 1} 段`).slice(0, 40),
+            // 摘要从命中处截，否则「全词匹配」命中的是后一处、看到的却是前一处的上下文
+            excerpt: excerptAround(text.slice(hit.index), kw),
+            target: i,
+          });
+        });
+        setHits(found);
       } else if (book.file_type === 'epub' && bookRef.current) {
         const epubBook = bookRef.current;
         const found: SearchHit[] = await Promise.all(
@@ -2544,7 +3481,8 @@ ${body}</body></html>`;
             item
               .load(epubBook.load.bind(epubBook))
               .then((doc: any) => {
-                const text = (doc?.body?.textContent as string) || '';
+                // 正文取法有坑（epub.js 交出的是 <html> 而不是 Document），见 epubSectionText
+                const text = epubSectionText(doc);
                 const hit = findKeyword(text, kw, opts);
                 item.unload();
                 if (!hit) return null;
@@ -2559,6 +3497,39 @@ ${body}</body></html>`;
           ),
         ).then(list => list.filter((x): x is SearchHit => x !== null));
         setHits(found);
+      } else if (book.file_type === 'pdf') {
+        const found: SearchHit[] = [];
+        if (inPdfReflow) {
+          // 重排视图已经按语义切好了块，直接搜块；坐标系是「屏 + 块」，
+          // 和原始页不是一回事，所以跳转目标要同时带上两个数（见 jumpToHit）
+          let heading = '';
+          reflowPages.forEach((blocks, page) => {
+            blocks.forEach((block, index) => {
+              if (block.kind === 'heading') heading = block.text.trim();
+              const hit = findKeyword(block.text, kw, opts);
+              if (!hit) return;
+              found.push({
+                label: (heading || `第 ${page + 1} 屏`).slice(0, 40),
+                excerpt: excerptAround(block.text.slice(hit.index), kw),
+                target: `${page}:${index}`,
+              });
+            });
+          });
+        } else if (pdfDocRef.current) {
+          const texts = await getPdfPageTexts(pdfDocRef.current);
+          texts.forEach((text, i) => {
+            const hit = findKeyword(text, kw, opts);
+            if (!hit) return;
+            found.push({
+              label: `第 ${i + 1} 页`,
+              excerpt: excerptAround(text.slice(hit.index), kw),
+              target: i,
+            });
+          });
+          // 一页都没抽出字，基本就是扫描版：说清楚，别让人以为检索坏了
+          if (texts.every(t => !t)) showToast('这份 PDF 没有文字层，可能是扫描版；可先用「识别」取字');
+        }
+        setHits(found);
       }
     } finally {
       setSearching(false);
@@ -2571,12 +3542,27 @@ ${body}</body></html>`;
       setSearchMark(keyword.trim());
       // 检索用的是当前分页的页码，但跳转时阅读设置可能已经改过、页数也变了
       setPageIndex(totalPages > 0 ? clampPage(hit.target + 1, totalPages) - 1 : hit.target);
+    } else if (isDoc && typeof hit.target === 'number') {
+      setSearchMark(keyword.trim());
+      // 标记一变，正文 HTML 会整块重绘。把目标块同步记下来：重绘后的对齐用的是
+      // 这个值，否则会被「重绘前读到的那一块」拉回去
+      setDocBlock(hit.target);
+      scrollToDocBlock(hit.target);
     } else if (book.file_type === 'epub' && typeof hit.target === 'string') {
       const kw = keyword.trim();
       setSearchMark(kw);
       // 章节显示完成后再框选关键词；带上当前检索选项，标红位置才和命中列表一致
       const opts: KeywordOptions = { caseSensitive: searchCaseSensitive, wholeWord: searchWholeWord };
       renditionRef.current?.display(hit.target).then(() => markEpubKeyword(kw, opts)).catch(() => {});
+    } else if (book.file_type === 'pdf' && typeof hit.target === 'number') {
+      // 原始版式：正文是 canvas 画出来的，没有 DOM 可标红，只能跳到那一页让人自己看
+      setSearchMark('');
+      setPageIndex(clampPage(hit.target + 1, totalPages) - 1);
+    } else if (book.file_type === 'pdf' && typeof hit.target === 'string') {
+      // 重排视图：块是我们自己渲染的，标红方式和文字类一致
+      setSearchMark(keyword.trim());
+      const [page, index] = hit.target.split(':').map(Number);
+      jumpToReflowBlock(page, index);
     }
     setPanel(null);
   };
@@ -2635,24 +3621,53 @@ ${body}</body></html>`;
 
   // ---------- 渲染 ----------
 
-  const togglePanel = (p: Exclude<Panel, null>) => setPanel(cur => (cur === p ? null : p));
+  /**
+   * 该面板对当前格式有没有意义。没意义就别开——开了只会是个空壳，
+   * 用户还得自己琢磨「为什么点开什么都没有」。
+   */
+  const panelAllowed = (p: Exclude<Panel, null>): boolean => {
+    switch (p) {
+      case 'ocr': return caps.ocr;
+      // 重排把页面重新切过，缩略图上的原始页与眼前的屏对不上，这时候不给
+      case 'thumbs': return caps.thumbs && !(book.file_type === 'pdf' && pdfReflow);
+      case 'notes':
+      case 'marks':
+      case 'ai': return caps.text;
+      // 检索与上面三个不同：PDF 划不了词，但它有文字层，搜得动（见 caps.search）
+      case 'search': return caps.search;
+      // 目录：文字类走章节；PDF 重排后按重排屏切、原始版式按 outline 页码切，
+      // 两者是不同坐标系，各自有内容才给面板；漫画没有目录
+      case 'toc':
+        if (caps.text) return true;
+        if (book.file_type !== 'pdf') return false;
+        return pdfReflow ? reflowToc.length > 0 : pdfToc.length > 0;
+      // 排版自定义（页间距等）与阅读位置各格式都用得上
+      case 'typo':
+      case 'positions': return true;
+      default: return true;
+    }
+  };
+
+  const togglePanel = (p: Exclude<Panel, null>) => {
+    if (!panelAllowed(p)) return;
+    setPanel(cur => (cur === p ? null : p));
+  };
+
+  // 换书时当前面板若对新格式没意义（比如从 EPUB 的笔记翻到漫画），直接关掉
+  useEffect(() => {
+    setPanel(cur => (cur && !panelAllowed(cur) ? null : cur));
+    // panelAllowed 随格式与 pdfReflow 变化，这里只在换书时兜一次
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [book.id]);
 
   const readerThemeClass =
     settings.theme === 'light' ? 'reader-light' : settings.theme === 'sepia' ? 'reader-sepia' : '';
-  /** 支持文本类操作（朗读/检索/笔记/双栏/脑图）的格式；漫画与 PDF 不适用 */
-  const supportsTextOps = book.file_type === 'epub' || book.file_type === 'txt';
-  /**
-   * PDF/漫画的检索、朗读等是整页渲染后取不到文字的，做不到就是做不到。
-   * 但按钮直接隐藏会让用户以为功能不存在，所以保留入口、置灰并说明原因。
-   */
-  const textOpsHint = '该格式按页渲染，无法提取文字，暂不支持此操作';
-  /** 缩略图只对「一页就是一张图」的格式有意义；TXT/EPUB 用目录跳转更省 */
-  const supportsThumbs = book.file_type === 'pdf' || book.file_type === 'cbz';
-  const thumbCount = book.file_type === 'cbz' ? comicPages.length : totalPages;
-  // 换书清空缩略图缓存，别把上一本的图留着占内存
+  const thumbCount = isComicFile(book.file_type) ? comicPages.length : totalPages;
+  // 换书清空缩略图与漫画页缓存，别把上一本的图留着占内存
   useEffect(() => {
     setThumbs({});
     thumbPendingRef.current.clear();
+    comicCacheRef.current.clear();
   }, [book.id]);
 
   /** 把整页图缩成缩略图：漫画单页可能几 MB，原样留在列表里滚动会把内存吃光 */
@@ -2682,7 +3697,7 @@ ${body}</body></html>`;
     thumbPendingRef.current.add(idx);
     try {
       let url: string | null = null;
-      if (book.file_type === 'cbz') {
+      if (isComicFile(book.file_type)) {
         const name = comicPages[idx];
         const page = name ? await window.electronAPI?.getComicPage(book.id, name) : null;
         if (page) url = await downscaleToThumb(`data:${page.mime};base64,${page.data}`);
@@ -2712,7 +3727,7 @@ ${body}</body></html>`;
 
   // 滚到可见才生成：500 页的 PDF 全量渲染要几十秒，用户多半只看附近几页
   useEffect(() => {
-    if (panel !== 'thumbs' || !supportsThumbs) return;
+    if (panel !== 'thumbs' || !caps.thumbs) return;
     const observer = new IntersectionObserver(
       entries => {
         for (const entry of entries) {
@@ -2728,32 +3743,61 @@ ${body}</body></html>`;
     // 打开面板时把当前页那格滚进视野，长文档不用自己找
     document.querySelector('.thumb-item.active')?.scrollIntoView({ block: 'center' });
     return () => observer.disconnect();
-  }, [panel, supportsThumbs, book.id, thumbCount]);
+  }, [panel, caps.thumbs, book.id, thumbCount]);
 
-  // 漫画翻页：按需拉取当前页（双页合并时连下一页一起），翻页后丢弃旧图，避免整包驻留内存
+  // 漫画翻页：按需拉取当前页（双页合并时连下一页一起），并预热前后各一页。
+  // 只缓存可见页 ±1 这一小段，翻页即换窗口、离开的页立即释放，避免整包驻留内存。
   useEffect(() => {
-    if (book.file_type !== 'cbz') return;
+    if (!isComicFile(book.file_type)) return;
     const api = window.electronAPI;
     const current = comicPages[pageIndex];
-    const neighbor = comicSpread ? comicPages[pageIndex + 1] : undefined;
     if (!api || !current) {
+      comicCacheRef.current.clear();
       setComicPageData(null);
       setComicNextData(null);
       return;
     }
+    const spreadNext = comicSpread ? comicPages[pageIndex + 1] : undefined;
+
+    // 可见页是当前页（双页时再加下一页）；预热范围是可见页前后各一页
+    const visible = spreadNext ? [current, spreadNext] : [current];
+    const desired = new Set<string>();
+    for (const name of visible) {
+      const i = comicPages.indexOf(name);
+      for (const j of [i - 1, i, i + 1]) {
+        if (j >= 0 && j < comicPages.length) desired.add(comicPages[j]);
+      }
+    }
+    // 先淘汰再预热：窗口外的页留着只会白占内存
+    for (const key of [...comicCacheRef.current.keys()]) {
+      if (!desired.has(key)) comicCacheRef.current.delete(key);
+    }
+
     let alive = true;
-    api
-      .getComicPage(book.id, current)
+    const load = async (name: string) => {
+      const cached = comicCacheRef.current.get(name);
+      if (cached) return cached;
+      const page = await api.getComicPage(book.id, name);
+      if (page) comicCacheRef.current.set(name, page);
+      return page ?? null;
+    };
+
+    load(current)
       .then(page => { if (alive) setComicPageData(page); })
       .catch(() => { if (alive) setComicPageData(null); });
-    if (neighbor) {
-      api
-        .getComicPage(book.id, neighbor)
+    if (spreadNext) {
+      load(spreadNext)
         .then(page => { if (alive) setComicNextData(page); })
         .catch(() => { if (alive) setComicNextData(null); });
     } else {
       setComicNextData(null);
     }
+    // 预热只暖缓存，不动当前显示的图；失败也不要紧，真翻过去时会再取一次
+    for (const name of desired) {
+      if (name === current || name === spreadNext) continue;
+      void load(name).catch(() => { /* 预热失败忽略 */ });
+    }
+
     return () => { alive = false; };
   }, [book.file_type, book.id, comicPages, pageIndex, comicSpread]);
 
@@ -2782,7 +3826,101 @@ ${body}</body></html>`;
     };
   }, []);
 
-  const txtHtml = book.file_type === 'txt' ? renderTxtHtml() : null;
+  // 分页模式才用得上单页 HTML；滑动模式走连排窗口，这里不必白算一页
+  const txtHtml = book.file_type === 'txt' && !txtFlowOn ? renderTxtPageHtml(pageIndex) : null;
+
+  // 文档型格式 没有页码，底部只能给个「读到全篇的百分之多少」——块序号就是位置
+  const docPercent = isDoc ? Math.round((docBlock / Math.max(1, docBlocksOf().length)) * 100) : 0;
+  /** 翻页键在 文档型格式 里滚的是「一屏」，按钮文案跟着说清楚 */
+  const pageNavLabels = isDoc ? { prev: '上一屏', next: '下一屏' } : { prev: '上一页', next: '下一页' };
+
+  /** 连排窗口内各页的标记 HTML（该页无标记时为空串，渲染时直接输出纯文本） */
+  const txtFlowHtml = useMemo(() => {
+    if (!txtFlowRange) return null;
+    const out: string[] = [];
+    for (let i = txtFlowRange[0]; i <= txtFlowRange[1]; i++) out.push(renderTxtPageHtml(i) ?? '');
+    return out;
+    // renderTxtPageHtml 每次 render 都是新闭包，但它读的量下面全列了：依赖不变则结果不变
+  }, [txtFlowRange, txtPages, bookmarks, searchMark, hideMarks, searchCaseSensitive, searchWholeWord]);
+
+  /**
+   * 滑动模式滚动时把「当前可见页」回填进 pageIndex。
+   * 进度、页码、位置记忆全靠它；缺了它连续滚动时这些数字都是死的。
+   * 用 rAF 收口：滚动事件比屏幕刷新密得多，逐个处理只会白算一批马上被推翻的位置。
+   */
+  const handleTxtFlowScroll = () => {
+    if (flowScrollTickRef.current) return;
+    flowScrollTickRef.current = true;
+    requestAnimationFrame(() => {
+      flowScrollTickRef.current = false;
+      const el = txtRef.current;
+      if (!el || !txtFlowRange) return;
+      const base = el.getBoundingClientRect().top;
+      let current = txtFlowRange[0];
+      for (const node of el.querySelectorAll<HTMLElement>('[data-page]')) {
+        if (node.getBoundingClientRect().top - base <= 8) current = Number(node.dataset.page);
+        else break;
+      }
+      if (current !== pageIndex) {
+        // 记下这次页码变化来自滚动，下面的定位 effect 要据此放行，否则会把读者拽回去
+        txtScrollByUserRef.current = true;
+        setPageIndex(current);
+      }
+    });
+  };
+
+  /**
+   * 把视口对准 pageIndex 所在的那一块。
+   * 触发它的 pageIndex 变化有两个来源，要求正好相反：
+   *   - 滚动回填（txtScrollByUserRef 置位）：视口本来就在那儿，再定位一次会把读者拽回去；
+   *   - 跳转（目录 / 批注 / 断点 / 搜索 / 翻页跨到窗口边界）：必须定位，否则点了没反应。
+   * 所以只放行后者；但窗口起点也变了时要一律定位——新渲染的块得重新对齐 scrollTop。
+   */
+  useEffect(() => {
+    if (!txtFlowRange) {
+      lastFlowStartRef.current = -1;
+      return;
+    }
+    const el = txtRef.current;
+    if (!el) return;
+    const windowChanged = lastFlowStartRef.current !== txtFlowStart;
+    const byScroll = txtScrollByUserRef.current;
+    txtScrollByUserRef.current = false;
+    lastFlowStartRef.current = txtFlowStart;
+    if (byScroll && !windowChanged) return;
+    const node = el.querySelector<HTMLElement>(`[data-page="${pageIndex}"]`);
+    if (!node) return;
+    // 增量修正：把该块顶部对齐到容器可视区顶部。用增量而非绝对赋值，
+    // 免得算错 padding / border 把定位整体偏移一截。
+    el.scrollTop += node.getBoundingClientRect().top - el.getBoundingClientRect().top - el.clientTop;
+  }, [txtFlowStart, txtFlowRange, pageIndex]);
+
+  /**
+   * 排版量（字号 / 行距 / 页边距等）一变，正文高度就变，原来的 scrollTop 会把视口带到别的
+   * 段落去。这里在重排后把当前块顶部重新对齐一次。与上面那个 effect 分开写：那个跟「跳到哪」，
+   * 这个只跟「排版变了」。
+   */
+  useEffect(() => {
+    if (!txtFlowRange) return;
+    const el = txtRef.current;
+    if (!el) return;
+    const node = el.querySelector<HTMLElement>(`[data-page="${pageIndex}"]`);
+    if (!node) return;
+    el.scrollTop += node.getBoundingClientRect().top - el.getBoundingClientRect().top - el.clientTop;
+    // pageIndex 不列入依赖：它由上面的 effect 负责，列进来会与滚动回填互相打架
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [
+    txtFlowRange,
+    settings.fontSize,
+    settings.lineHeight,
+    fontKey,
+    dualColumn,
+    typo.pagePadding,
+    typo.paraSpacing,
+    typo.pageGap,
+    typo.letterSpacing,
+  ]);
+
   return (
     <div className={`reader ${view.autoHideBar ? 'bar-auto-hide' : ''}`}>
       {view.autoHideBar && (
@@ -2798,12 +3936,15 @@ ${body}</body></html>`;
         </button>
         <h2 className="reader-title">{book.title}</h2>
         <div className="reader-actions">
-          <select
-            className="reader-select"
-            value={fontKey}
-            onChange={e => changeFont(e.target.value)}
-            title="字体"
-          >
+          {/* 字体与字号只作用于正文排版：漫画整页是图，调了没有任何反应，直接不给 */}
+          {caps.font && (
+            <>
+              <select
+                className="reader-select"
+                value={fontKey}
+                onChange={e => changeFont(e.target.value)}
+                title="字体"
+              >
             <option value="system">系统字体</option>
             <option value="serif">宋体</option>
             <option value="sans">黑体</option>
@@ -2815,8 +3956,10 @@ ${body}</body></html>`;
               </option>
             ))}
           </select>
-          <button onClick={() => changeFontSize(-2)} title="缩小字号">A−</button>
-          <button onClick={() => changeFontSize(2)} title="放大字号">A+</button>
+              <button onClick={() => changeFontSize(-2)} title="缩小字号">A−</button>
+              <button onClick={() => changeFontSize(2)} title="放大字号">A+</button>
+            </>
+          )}
           <span className="tool-sep" />
           <button onClick={() => changeTheme('dark')} className={settings.theme === 'dark' ? 'active' : ''} title="深色主题">
             <Icon name="moon" size={15} />
@@ -2828,28 +3971,27 @@ ${body}</body></html>`;
             <Icon name="palette" size={15} />
           </button>
           <span className="tool-sep" />
-          {supportsTextOps ? (
+          {caps.text && (
             <button onClick={handleHeaderSpeak} className={speaking ? 'active' : ''} title={speaking ? '停止朗读' : '朗读'}>
               <Icon name={speaking ? 'stop' : 'volume'} size={15} />
             </button>
-          ) : (
-            <button disabled title={`朗读：${textOpsHint}`}>
-              <Icon name="volume" size={15} />
-            </button>
           )}
-          {book.file_type === 'epub' && (
+          {caps.flow && (
             <button onClick={toggleFlow} title={flowMode === 'paginated' ? '切换滚动模式' : '切换分页模式'}>
               <Icon name={flowMode === 'paginated' ? 'book' : 'rows'} size={15} />
             </button>
           )}
-          <button onClick={handlePrint} title="打印 / 打印预览">
+          <button onClick={handlePrintNow} title="打印当前内容（唤起系统打印对话框）">
             <Icon name="printer" size={15} />
+          </button>
+          <button onClick={handlePrint} title="打印预览（先在独立窗口里看一眼）">
+            预览
           </button>
           <button onClick={handleExportPageImage} title="导出当前页为图片（PNG）">
             <Icon name="image" size={15} />
           </button>
           <span className="tool-sep" />
-          {supportsThumbs && (
+          {panelAllowed('thumbs') && (
             <button
               onClick={() => togglePanel('thumbs')}
               className={panel === 'thumbs' ? 'active' : ''}
@@ -2858,15 +4000,13 @@ ${body}</body></html>`;
               <Icon name="grid" size={15} />
             </button>
           )}
-          {(book.file_type === 'epub' ||
-            book.file_type === 'txt' ||
-            (book.file_type === 'pdf' && pdfReflow && reflowToc.length > 0)) && (
+          {panelAllowed('toc') && (
             <button onClick={() => togglePanel('toc')} className={panel === 'toc' ? 'active' : ''} title="目录">
               <Icon name="list" size={15} />
               目录
             </button>
           )}
-          {(book.file_type === 'epub' || book.file_type === 'txt') && (
+          {caps.vertical && (
             <button
               onClick={toggleVertical}
               className={vertical ? 'active' : ''}
@@ -2875,7 +4015,7 @@ ${body}</body></html>`;
               <Icon name={vertical ? 'columns' : 'rows'} size={15} />
             </button>
           )}
-          {book.file_type === 'cbz' && (
+          {isComicFile(book.file_type) && (
             <>
               <button
                 onClick={toggleComicSpread}
@@ -2923,7 +4063,7 @@ ${body}</body></html>`;
               </button>
             </>
           )}
-          {(book.file_type === 'pdf' || book.file_type === 'cbz') && (
+          {caps.ocr && (
             <button
               onClick={() => togglePanel('ocr')}
               className={panel === 'ocr' ? 'active' : ''}
@@ -2940,21 +4080,27 @@ ${body}</body></html>`;
           >
             <Icon name="type" size={15} />
           </button>
-          <button onClick={() => togglePanel('notes')} className={panel === 'notes' ? 'active' : ''} title="笔记">
-            <Icon name="note" size={15} />
-            {notes.length > 0 ? notes.length : null}
-          </button>
-          <button
-            onClick={toggleHideMarks}
-            className={hideMarks ? 'active' : ''}
-            title={hideMarks ? '显示批注' : '隐藏批注（不删除）'}
-          >
-            <Icon name={hideMarks ? 'eye-off' : 'eye'} size={15} />
-          </button>
-          <button onClick={() => togglePanel('marks')} className={panel === 'marks' ? 'active' : ''} title="书签">
-            <Icon name="bookmark" size={15} />
-            {bookmarks.length > 0 ? bookmarks.length : null}
-          </button>
+          {/* 书签 / 笔记 / 批注显隐都要先划词，纯图格式永远划不中，
+              留着按钮只会让人以为是坏的。PDF 与漫画标页请用「阅读位置」 */}
+          {caps.text && (
+            <>
+              <button onClick={() => togglePanel('notes')} className={panel === 'notes' ? 'active' : ''} title="笔记">
+                <Icon name="note" size={15} />
+                {notes.length > 0 ? notes.length : null}
+              </button>
+              <button
+                onClick={toggleHideMarks}
+                className={hideMarks ? 'active' : ''}
+                title={hideMarks ? '显示批注' : '隐藏批注（不删除）'}
+              >
+                <Icon name={hideMarks ? 'eye-off' : 'eye'} size={15} />
+              </button>
+              <button onClick={() => togglePanel('marks')} className={panel === 'marks' ? 'active' : ''} title="书签">
+                <Icon name="bookmark" size={15} />
+                {bookmarks.length > 0 ? bookmarks.length : null}
+              </button>
+            </>
+          )}
           {book.file_type === 'txt' && (
             <button
               onClick={toggleNormalize}
@@ -2965,39 +4111,43 @@ ${body}</body></html>`;
               规整
             </button>
           )}
+          {book.file_type === 'txt' && (
+            <select
+              className="reader-select"
+              value={txtEncoding}
+              onChange={e => changeTxtEncoding(e.target.value)}
+              title="文本编码：出现乱码时手动指定原文编码（只改显示，不改原文件）"
+            >
+              <option value="auto">编码：自动</option>
+              <option value="utf-8">UTF-8</option>
+              <option value="gbk">GBK / GB2312</option>
+              <option value="gb18030">GB18030</option>
+              <option value="big5">Big5（繁体）</option>
+              <option value="utf-16le">UTF-16 LE</option>
+              <option value="utf-16be">UTF-16 BE</option>
+            </select>
+          )}
           <button onClick={() => togglePanel('positions')} className={panel === 'positions' ? 'active' : ''} title="阅读位置">
             <Icon name="map-pin" size={15} />
             {positions.length > 0 ? positions.length : null}
           </button>
           <span className="tool-sep" />
-          {supportsTextOps ? (
+          {caps.search && (
             <button onClick={() => togglePanel('search')} className={panel === 'search' ? 'active' : ''} title="书内检索">
               <Icon name="search" size={15} />
             </button>
-          ) : (
-            <button disabled title={`书内检索：${textOpsHint}`}>
-              <Icon name="search" size={15} />
-            </button>
           )}
-          {supportsTextOps ? (
+          {caps.text && (
             <button onClick={() => togglePanel('ai')} className={panel === 'ai' ? 'active' : ''} title="AI 助手">
               <Icon name="sparkles" size={15} />
             </button>
-          ) : (
-            <button disabled title={`AI 助手：${textOpsHint}`}>
-              <Icon name="sparkles" size={15} />
-            </button>
           )}
-          {supportsTextOps ? (
+          {caps.dualColumn && (
             <button
               onClick={toggleDualColumn}
               className={dualColumn ? 'active' : ''}
               title="双栏 / 单栏"
             >
-              <Icon name="side-by-side" size={15} />
-            </button>
-          ) : (
-            <button disabled title={`双栏 / 单栏：${textOpsHint}`}>
               <Icon name="side-by-side" size={15} />
             </button>
           )}
@@ -3092,6 +4242,18 @@ ${body}</body></html>`;
             </select>
           </label>
           <label className="view-row">
+            <span>翻页动画</span>
+            <select
+              value={pageAnim}
+              onChange={e => changePageAnim(e.target.value as PageAnimation)}
+              title="翻页时内容淡入。「减弱」更短更轻；系统若开启「减少动态效果」会自动按减弱档播放"
+            >
+              {PAGE_ANIMATIONS.map(a => (
+                <option key={a.key} value={a.key}>{a.label}</option>
+              ))}
+            </select>
+          </label>
+          <label className="view-row">
             <input
               type="checkbox"
               checked={view.alwaysOnTop}
@@ -3160,6 +4322,23 @@ ${body}</body></html>`;
           </div>
         )}
 
+        {/* 原始版式下的 PDF 目录：走的是 PDF 自带的书签 outline，页码即原始页序，
+            与上面重排分支的「屏号」不是一回事，所以分成两块 */}
+        {panel === 'toc' && book.file_type === 'pdf' && !pdfReflow && (
+          <div className="toc-panel">
+            <h3>目录（{pdfToc.length}）</h3>
+            {pdfToc.length === 0 ? (
+              <p className="empty-text">这份 PDF 没有书签目录</p>
+            ) : (
+              pdfToc.map((item, i) => (
+                <div key={i} className="toc-item" onClick={() => jumpToPage(String(item.page))}>
+                  {item.label}
+                </div>
+              ))
+            )}
+          </div>
+        )}
+
         {panel === 'toc' && book.file_type === 'txt' && (
           <div className="toc-panel">
             <div className="panel-title-row">
@@ -3181,6 +4360,22 @@ ${body}</body></html>`;
           </div>
         )}
 
+        {/* 文档型格式 的目录就是标题列表：点一下滚到对应标题，与浏览器里看锚点链接是一回事 */}
+        {panel === 'toc' && isDoc && (
+          <div className="toc-panel">
+            <h3>目录（{docToc.length}）</h3>
+            {docToc.length === 0 ? (
+              <p className="empty-text">正文里没有标题</p>
+            ) : (
+              docToc.map((t, i) => (
+                <div key={i} className="toc-item" onClick={() => goToDocAnchor(t.href)}>
+                  {t.label}
+                </div>
+              ))
+            )}
+          </div>
+        )}
+
         {panel === 'toc' && book.file_type === 'epub' && (
           <div className="toc-panel">
             <h3>目录</h3>
@@ -3192,7 +4387,7 @@ ${body}</body></html>`;
           </div>
         )}
 
-        {panel === 'thumbs' && supportsThumbs && (
+        {panel === 'thumbs' && caps.thumbs && (
           <div className="toc-panel">
             <h3>页面缩略图</h3>
             <div className="thumb-list">
@@ -3324,8 +4519,33 @@ ${body}</body></html>`;
               />
             </div>
 
+            <div className="form-row">
+              <label>字间距 {typo.letterSpacing.toFixed(2)} 字</label>
+              <input
+                type="range"
+                min={0}
+                max={0.5}
+                step={0.01}
+                value={typo.letterSpacing}
+                onChange={e => applyTypo({ letterSpacing: Number(e.target.value) })}
+              />
+            </div>
+
+            <div className="form-row">
+              <label>首行缩进 {typo.textIndent.toFixed(1)} 字</label>
+              <input
+                type="range"
+                min={0}
+                max={4}
+                step={0.5}
+                value={typo.textIndent}
+                onChange={e => applyTypo({ textIndent: Number(e.target.value) })}
+              />
+            </div>
+
             <p className="section-desc" style={{ marginBottom: 0 }}>
-              阅读样式与段落间距对 EPUB 生效，TXT 以空行分段、不受这两项影响。
+              阅读样式、段落间距与首行缩进对 EPUB 生效（TXT 以空行分段、没有段落结构，不适用首行缩进）；
+              字间距对 EPUB 与 TXT 都生效。
               页面间距是叠加在默认留白之上的上下留白（漫画双页合并时也用作两页之间的间隙），
               EPUB 的版式由 epub.js 控制、此项对其不生效。
               以上设置按书记忆，下次打开自动还原；自定义 CSS 是全局的，对所有书生效。
@@ -3439,17 +4659,10 @@ ${body}</body></html>`;
                 <Icon name="network" size={14} />
                 思维导图
               </button>
-              {supportsTextOps ? (
-                <button className="btn-secondary small" onClick={handleBookMindmap} disabled={aiLoading}>
-                  <Icon name="library" size={14} />
-                  本书思维导图
-                </button>
-              ) : (
-                <button className="btn-secondary small" disabled title={textOpsHint}>
-                  <Icon name="library" size={14} />
-                  本书思维导图
-                </button>
-              )}
+              <button className="btn-secondary small" onClick={handleBookMindmap} disabled={aiLoading}>
+                <Icon name="library" size={14} />
+                本书思维导图
+              </button>
               {aiContext && (
                 <button className="btn-secondary small" onClick={() => setAiContext('')}>
                   改用整页
@@ -3573,10 +4786,15 @@ ${body}</body></html>`;
               </div>
             </div>
           )}
-          {!loading && !error && book.file_type === 'cbz' && totalPages > 0 && (
+          {!loading && !error && isComicFile(book.file_type) && totalPages > 0 && (
             <div
+              {...panHandlers}
+              className={panClass('comic-pane')}
               style={{
-                flex: 1,
+                // 这里必须是 height:100%。`flex: 1` 在这一层是无效声明——
+                // .reader-content 不是 flex 容器，高度会退化成 auto 随图片撑开，
+                // 容器自身不滚，比窗口高的漫画页会被直接裁掉、滚不到。
+                height: '100%',
                 display: 'flex',
                 justifyContent: 'center',
                 alignItems: 'flex-start',
@@ -3603,6 +4821,9 @@ ${body}</body></html>`;
                         key={i}
                         src={`data:${page.mime};base64,${page.data}`}
                         alt=""
+                        // 不关掉的话按住拖动走的是 HTML5 拖拽（拖出一张半透明残影），
+                        // 指针事件被它吃掉，平移就永远触发不了
+                        draggable={false}
                         style={{
                           maxWidth: comicSpread ? '50%' : '100%',
                           height: 'auto',
@@ -3631,23 +4852,62 @@ ${body}</body></html>`;
                 // 叠加在样式表的默认留白（上 40 / 下 60）之上，默认 0 时外观与原来一致
                 paddingTop: 40 + typo.pageGap,
                 paddingBottom: 60 + typo.pageGap,
+                // 字间距：TXT 无段落结构，首行缩进不适用，只给字符加间距
+                letterSpacing: typo.letterSpacing ? `${typo.letterSpacing}em` : undefined,
                 columnCount: dualColumn ? 2 : undefined,
                 columnGap: dualColumn ? '48px' : undefined,
                 writingMode: vertical ? 'vertical-rl' : undefined,
               } as CSSProperties}
               onMouseUp={handleTxtMouseUp}
               onClick={handleTxtMarkClick}
+              onScroll={txtFlowRange ? handleTxtFlowScroll : undefined}
             >
-              {txtHtml ? (
+              {txtFlowRange ? (
+                // 滑动模式：整块连排渲染，每页带 data-page 供滚动回填与跳转定位
+                Array.from({ length: txtFlowRange[1] - txtFlowRange[0] + 1 }, (_, k) => {
+                  const p = txtFlowRange[0] + k;
+                  const html = txtFlowHtml?.[k];
+                  return (
+                    <div className="txt-flow-page" data-page={p} key={p}>
+                      {html ? <span dangerouslySetInnerHTML={{ __html: html }} /> : txtPages[p]}
+                    </div>
+                  );
+                })
+              ) : txtHtml ? (
                 <span dangerouslySetInnerHTML={{ __html: txtHtml }} />
               ) : (
                 txtPages[pageIndex]
               )}
             </div>
           )}
+          {!loading && !error && isDoc && docHtml && (
+            // 整篇一个滚动容器，不切章不分页：文档型格式 本来就没有页码这回事，
+            // 定位靠顶层块、跳转靠标题锚点（见上面的 docBlocksOf / goToDocAnchor）
+            <div
+              ref={txtRef}
+              className="txt-page doc-page"
+              style={{
+                fontSize: settings.fontSize,
+                lineHeight: settings.lineHeight,
+                fontFamily: stackOfFontKey(fontKey) || undefined,
+                background: typo.bgColor || undefined,
+                color: typo.textColor || undefined,
+                paddingLeft: typo.pagePadding,
+                paddingRight: typo.pagePadding,
+                paddingTop: 40 + typo.pageGap,
+                paddingBottom: 60 + typo.pageGap,
+                letterSpacing: typo.letterSpacing ? `${typo.letterSpacing}em` : undefined,
+              } as CSSProperties}
+              onMouseUp={handleDocMouseUp}
+              onClick={handleTxtMarkClick}
+              onScroll={handleDocScroll}
+              dangerouslySetInnerHTML={{ __html: docDisplayHtml }}
+            />
+          )}
           {!loading && !error && book.file_type === 'pdf' && !pdfReflow && (
             <div
-              className="pdf-page"
+              {...panHandlers}
+              className={panClass('pdf-page')}
               ref={pdfWrapRef}
               // 样式表默认上下 24px，叠加页面间距
               style={{ paddingTop: 24 + typo.pageGap, paddingBottom: 24 + typo.pageGap }}
@@ -3660,21 +4920,29 @@ ${body}</body></html>`;
               className="txt-page pdf-reflow"
               style={{ fontSize: settings.fontSize, lineHeight: settings.lineHeight }}
             >
-              {reflowPages[reflowPage].map((block, i) =>
-                block.kind === 'heading' ? (
+              {reflowPages[reflowPage].map((block, i) => {
+                const cls = block.kind === 'heading' ? `reflow-heading reflow-h${block.level}` : 'reflow-para';
+                // 检索命中后标红：块是纯文本渲染的，没有 DOM 可以插标记，只能自己拼 HTML。
+                // 没命中时 marked 为空串，原样走纯文本这条更快的路。
+                const marked = searchMark
+                  ? markKeywordHtml(block.text, searchMark, {
+                      caseSensitive: searchCaseSensitive,
+                      wholeWord: searchWholeWord,
+                    })
+                  : '';
+                return marked ? (
                   <p
                     key={i}
                     data-reflow-block={`${reflowPage}-${i}`}
-                    className={`reflow-heading reflow-h${block.level}`}
-                  >
-                    {block.text}
-                  </p>
+                    className={cls}
+                    dangerouslySetInnerHTML={{ __html: marked }}
+                  />
                 ) : (
-                  <p key={i} data-reflow-block={`${reflowPage}-${i}`} className="reflow-para">
+                  <p key={i} data-reflow-block={`${reflowPage}-${i}`} className={cls}>
                     {block.text}
                   </p>
-                ),
-              )}
+                );
+              })}
             </div>
           )}
 
@@ -3684,14 +4952,14 @@ ${body}</body></html>`;
               <div
                 className="edge-zone edge-left"
                 style={{ width: `${view.edgeWidth}%` }}
-                onClick={book.file_type === 'cbz' && comicRtl ? handleNext : handlePrev}
-                title={book.file_type === 'cbz' && comicRtl ? '下一页' : '上一页'}
+                onClick={isComicFile(book.file_type) && comicRtl ? handleNext : handlePrev}
+                title={isComicFile(book.file_type) && comicRtl ? '下一页' : '上一页'}
               />
               <div
                 className="edge-zone edge-right"
                 style={{ width: `${view.edgeWidth}%` }}
-                onClick={book.file_type === 'cbz' && comicRtl ? handlePrev : handleNext}
-                title={book.file_type === 'cbz' && comicRtl ? '上一页' : '下一页'}
+                onClick={isComicFile(book.file_type) && comicRtl ? handlePrev : handleNext}
+                title={isComicFile(book.file_type) && comicRtl ? '上一页' : '下一页'}
               />
             </>
           )}
@@ -3715,7 +4983,12 @@ ${body}</body></html>`;
         >
           <Icon name="redo" size={16} />
         </button>
-        <button className="nav-btn" onClick={handlePrev}>上一页</button>
+        <button className="nav-btn" onClick={handlePrev}>{pageNavLabels.prev}</button>
+        {isDoc && (
+          <span className="page-indicator" title="文档型格式 没有页码，这里表示读到全篇的位置">
+            {docPercent}%
+          </span>
+        )}
         {book.file_type === 'epub' && chapterIdx != null && chapterTotal > 0 ? (
           <span className="page-indicator wide">
             第{chapterIdx + 1}章 · {chapterPage}/{chapterTotal}页 · {bookPercent}%
@@ -3758,7 +5031,7 @@ ${body}</body></html>`;
             title="输入阅读百分比（1-100）回车跳转"
           />
         )}
-        <button className="nav-btn" onClick={handleNext}>下一页</button>
+        <button className="nav-btn" onClick={handleNext}>{pageNavLabels.next}</button>
       </div>
 
       {/* 选中操作条 */}

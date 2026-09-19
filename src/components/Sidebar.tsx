@@ -1,6 +1,6 @@
 import { Icon, type IconName } from './Icon';
 
-type View = 'library' | 'reader' | 'sources' | 'rag' | 'vocab' | 'notes' | 'models' | 'settings' | 'stats' | 'help' | 'compare' | 'pdf';
+type View = 'library' | 'reader' | 'rag' | 'vocab' | 'notes' | 'models' | 'settings' | 'stats' | 'help' | 'compare' | 'pdf';
 
 interface SidebarProps {
   currentView: View;
@@ -15,7 +15,6 @@ const NAV_GROUPS: { title: string; items: { view: View; icon: IconName; label: s
     title: '书库',
     items: [
       { view: 'library', icon: 'library', label: '书架' },
-      { view: 'sources', icon: 'globe', label: '书源' },
     ],
   },
   {

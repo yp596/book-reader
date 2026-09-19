@@ -63,6 +63,10 @@ contextBridge.exposeInMainWorld('electronAPI', {
   importOneBook: () => ipcRenderer.invoke('books:importOne'),
   saveBookAs: (id: number) => ipcRenderer.invoke('books:saveAs', id),
   exportBookText: (id: number) => ipcRenderer.invoke('books:exportText', id),
+  exportEpub: (id: number) => ipcRenderer.invoke('books:exportEpub', id),
+  exportBatch: (ids: number[], format: 'txt' | 'epub') =>
+    ipcRenderer.invoke('books:exportBatch', ids, format),
+  extractBookImages: (ids: number[]) => ipcRenderer.invoke('books:extractImages', ids),
   getReadingPositions: (bookId: number) => ipcRenderer.invoke('positions:list', bookId),
   addReadingPosition: (p: any) => ipcRenderer.invoke('positions:add', p),
   deleteReadingPosition: (id: number) => ipcRenderer.invoke('positions:delete', id),
@@ -72,6 +76,8 @@ contextBridge.exposeInMainWorld('electronAPI', {
     ipcRenderer.invoke('books:categories'),
   getBookToc: (id: number) =>
     ipcRenderer.invoke('books:toc', id),
+  getDocHtml: (id: number) =>
+    ipcRenderer.invoke('books:docHtml', id),
   getTocRules: (id: number) =>
     ipcRenderer.invoke('books:tocRules', id),
   reparseToc: (id: number, ruleName?: string) =>
@@ -86,40 +92,27 @@ contextBridge.exposeInMainWorld('electronAPI', {
     ipcRenderer.invoke('books:releaseComicCache', id),
   setContentProtection: (flag: boolean) =>
     ipcRenderer.invoke('window:setContentProtection', flag),
+  setAutoLaunch: (flag: boolean) =>
+    ipcRenderer.invoke('app:setAutoLaunch', flag),
+  getAutoLaunch: () =>
+    ipcRenderer.invoke('app:getAutoLaunch'),
+  /** 全局热键（隐藏 / 显示窗口）：立即注册，返回值即是否真的注册上 */
+  setGlobalHotkey: (accel: string): Promise<boolean> =>
+    ipcRenderer.invoke('app:setGlobalHotkey', accel),
+  /** 窗口标题（任务栏悬停时显示的就是它） */
+  setWindowTitle: (title: string) =>
+    ipcRenderer.invoke('window:setTitle', title),
   printPreview: (html: string, title: string) =>
     ipcRenderer.invoke('books:printPreview', html, title),
+  /** 与预览同源，但直接唤起系统打印对话框 */
+  printContent: (html: string, title: string): Promise<{ ok: boolean; cancelled?: boolean; reason?: string }> =>
+    ipcRenderer.invoke('books:printContent', html, title),
   exportPageImage: (
     rect: { x: number; y: number; width: number; height: number },
     title: string,
   ) => ipcRenderer.invoke('reader:exportImage', rect, title),
   openReaderWindow: (bookId: number) =>
     ipcRenderer.invoke('window:openReader', bookId),
-
-  // Sources
-  getAllSources: () => ipcRenderer.invoke('sources:getAll'),
-  addSource: (source: any) => ipcRenderer.invoke('sources:add', source),
-  deleteSource: (id: number) => ipcRenderer.invoke('sources:delete', id),
-  searchBooks: (sourceId: number, keyword: string) =>
-    ipcRenderer.invoke('sources:search', sourceId, keyword),
-  getChapters: (sourceId: number, url: string) =>
-    ipcRenderer.invoke('sources:chapters', sourceId, url),
-  getChapterContent: (sourceId: number, book: any, chapter: any) =>
-    ipcRenderer.invoke('sources:content', sourceId, book, chapter),
-  exportBookTxt: (sourceId: number, book: any, chapters: any[]) =>
-    ipcRenderer.invoke('sources:exportTxt', sourceId, book, chapters),
-  exportBookEpub: (sourceId: number, book: any, chapters: any[]) =>
-    ipcRenderer.invoke('sources:exportEpub', sourceId, book, chapters),
-
-  // Filters & follows
-  getFilters: () => ipcRenderer.invoke('filters:list'),
-  addFilter: (filter: any) => ipcRenderer.invoke('filters:add', filter),
-  toggleFilter: (id: number, enabled: number) => ipcRenderer.invoke('filters:toggle', id, enabled),
-  deleteFilter: (id: number) => ipcRenderer.invoke('filters:delete', id),
-  getFollows: () => ipcRenderer.invoke('follows:list'),
-  followBook: (follow: any) => ipcRenderer.invoke('follows:add', follow),
-  unfollowBook: (id: number) => ipcRenderer.invoke('follows:remove', id),
-  clearFollowUpdate: (id: number) => ipcRenderer.invoke('follows:clearUpdate', id),
-  checkUpdates: (ids?: number[]) => ipcRenderer.invoke('follows:check', ids),
 
   // Bookmarks & Notes
   getBookmarks: (bookId: number) => ipcRenderer.invoke('bookmarks:get', bookId),
@@ -140,14 +133,12 @@ contextBridge.exposeInMainWorld('electronAPI', {
   setSetting: (key: string, value: string) =>
     ipcRenderer.invoke('settings:set', key, value),
 
-  // Notes export & reading timer & sync
+  // Notes export & reading timer
   exportNotes: (bookId?: number) => ipcRenderer.invoke('notes:export', bookId),
   recordReadingTime: (bookId: number, seconds: number) =>
     ipcRenderer.invoke('stats:recordTime', bookId, seconds),
   getReadingTimeStats: () => ipcRenderer.invoke('stats:readingTime'),
   getWeeklyStats: (days: number) => ipcRenderer.invoke('stats:weekly', days),
-  syncBackup: () => ipcRenderer.invoke('sync:backup'),
-  syncRestore: () => ipcRenderer.invoke('sync:restore'),
 
   openExternal: (url: string) => ipcRenderer.invoke('app:openExternal', url),
 
@@ -164,7 +155,7 @@ contextBridge.exposeInMainWorld('electronAPI', {
 
   // 缓存管理
   getCacheStats: () => ipcRenderer.invoke('cache:stats'),
-  clearCache: (opts: { snapshots?: boolean; chapterCache?: boolean }) =>
+  clearCache: (opts: { snapshots?: boolean }) =>
     ipcRenderer.invoke('cache:clear', opts),
 
   // PDF 编辑
@@ -186,7 +177,6 @@ contextBridge.exposeInMainWorld('electronAPI', {
   // 隐私清理
   clearPrivacy: (opts: {
     positions?: boolean;
-    chapterCache?: boolean;
     timestamps?: boolean;
     clipboard?: boolean;
   }) => ipcRenderer.invoke('privacy:clear', opts),
@@ -269,5 +259,11 @@ contextBridge.exposeInMainWorld('electronAPI', {
     const listener = (_e: any, filePath?: string) => callback(filePath);
     ipcRenderer.on('menu:open-file', listener);
     return () => ipcRenderer.removeListener('menu:open-file', listener);
+  },
+  // Ctrl+W 关闭当前文档：主进程拦下键再转发过来，关哪个标签由渲染层按自身状态决定
+  onCloseTab: (callback: () => void) => {
+    const listener = () => callback();
+    ipcRenderer.on('menu:close-tab', listener);
+    return () => ipcRenderer.removeListener('menu:close-tab', listener);
   },
 });

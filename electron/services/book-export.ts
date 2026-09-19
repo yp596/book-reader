@@ -168,3 +168,30 @@ export function backupFileName(title: string, now: Date = new Date()): string {
   const safe = String(title || "book").replace(/[\\/:*?"<>|]/g, "_").slice(0, 60);
   return `${safe}-备份-${localDateStamp(now)}.json`;
 }
+
+/**
+ * 在一次导出里挑一个不和已有文件冲突的名字。
+ *
+ * 重名时追加 ` (2)`、` (3)`：批量导出必然碰到同名书（同一本书的不同版本、不同来源的
+ * 文件常常同名），直接写下去就是把前一本无声覆盖掉。
+ *
+ * `used` 里存的必须是**小写**文件名——Windows 的文件系统不区分大小写，`A.txt` 与
+ * `a.txt` 指的是同一个文件，只按原样比较会判成不冲突。所以调用方在开头把目标目录列一次
+ * 并全部转小写，之后同一批里新写出的名字也即时入集合，同批内部重名同样能避开。
+ *
+ * 书名经 sanitize 后可能为空（整本书名都是非法字符），此时用 id 兜底，
+ * 否则会生成一个只有扩展名的文件——在资源管理器里是看不见的隐藏名。
+ */
+export function uniqueExportName(
+  used: Set<string>,
+  rawName: string,
+  ext: string,
+  fallbackId: number,
+): string {
+  const base = String(rawName || '').trim() || `book-${fallbackId}`;
+  let name = `${base}${ext}`;
+  for (let i = 2; used.has(name.toLowerCase()); i++) {
+    name = `${base} (${i})${ext}`;
+  }
+  return name;
+}

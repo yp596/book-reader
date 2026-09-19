@@ -63,6 +63,8 @@ export function BookList({ books, searchQuery, onSelectBook, onShowDetail, onRef
   // 批量管理：勾选态与所选 id
   const [batchMode, setBatchMode] = useState(false);
   const [selectedIds, setSelectedIds] = useState<Set<number>>(new Set());
+  /** 批量操作的进行中类型（导出 TXT / EPUB、提取图片）；非空时相关按钮一并禁用，避免重复点两遍 */
+  const [batchExporting, setBatchExporting] = useState<'txt' | 'epub' | 'images' | null>(null);
   /** 源文件已改动或已移走的书：导入是复制，书库不主动看就发现不了 */
   const [sourceIssues, setSourceIssues] = useState<
     { id: number; title: string; status: 'changed' | 'missing'; sourcePath: string }[]
@@ -363,6 +365,19 @@ ${r.filePath}`);
     closeMenu();
   };
 
+  const handleExportEpub = async () => {
+    if (!contextMenu) return;
+    try {
+      const r = await window.electronAPI?.exportEpub(contextMenu.book.id);
+      if (r) {
+        alert(`已导出 EPUB（${r.chapters} 章，${formatFileSize(r.bytes)}）：\n${r.filePath}`);
+      }
+    } catch (err) {
+      alert(err instanceof Error ? err.message : '导出失败');
+    }
+    closeMenu();
+  };
+
   const handleSetSeries = async () => {
     const book = contextMenu?.book;
     if (!book) return;
@@ -569,6 +584,68 @@ ${r.filePath}`);
     }
     exitBatch();
     alert('已重置，下次打开这些书籍将使用全局默认排版。');
+  };
+
+  /**
+   * 批量导出为 TXT / EPUB。目录只选一次，逐本写入由主进程完成。
+   *
+   * 这里刻意不用 batchTargets()——锁定的书也一并导出。锁的语义是「不能被删除或批量修改」，
+   * 导出是纯读操作，把锁定书排除掉没有道理。
+   */
+  const handleBatchExport = async (format: 'txt' | 'epub') => {
+    const api = window.electronAPI;
+    if (!api || selectedIds.size === 0) return;
+    setBatchExporting(format);
+    try {
+      const r = await api.exportBatch([...selectedIds], format);
+      if (!r) return; // 用户取消了目录选择：静默返回，不再弹一次提示打断
+      // 跳过原因先归类再报。整批都是扫描版时逐个列书名会糊满一屏，
+      // 归并后一眼能看出该去修哪一类书；每类最多举 3 本做样子。
+      const byReason = new Map<string, string[]>();
+      for (const s of r.skipped) {
+        byReason.set(s.reason, [...(byReason.get(s.reason) ?? []), s.title]);
+      }
+      const lines = [`已导出 ${r.done} 本到：\n${r.dir}`];
+      for (const [reason, titles] of byReason) {
+        const sample = titles.slice(0, 3).join('、');
+        lines.push(`跳过 ${titles.length} 本——${reason}\n　${sample}${titles.length > 3 ? ' 等' : ''}`);
+      }
+      alert(lines.join('\n\n'));
+      exitBatch();
+    } catch (err) {
+      alert(err instanceof Error ? err.message : '批量导出失败');
+    } finally {
+      setBatchExporting(null);
+    }
+  };
+
+  /**
+   * 批量提取内嵌图片。与批量导出同理：锁定的书也照抽——抽图同样是纯读操作。
+   * 每本书在所选目录里单独占一个子目录，所以回执报的是「N 本 / M 张」两个数。
+   */
+  const handleBatchExtractImages = async () => {
+    const api = window.electronAPI;
+    if (!api || selectedIds.size === 0) return;
+    setBatchExporting('images');
+    try {
+      const r = await api.extractBookImages([...selectedIds]);
+      if (!r) return; // 用户取消了目录选择
+      const byReason = new Map<string, string[]>();
+      for (const s of r.skipped) {
+        byReason.set(s.reason, [...(byReason.get(s.reason) ?? []), s.title]);
+      }
+      const lines = [`已从 ${r.books} 本里提取 ${r.images} 张图片到：\n${r.dir}`];
+      for (const [reason, titles] of byReason) {
+        const sample = titles.slice(0, 3).join('、');
+        lines.push(`跳过 ${titles.length} 本——${reason}\n　${sample}${titles.length > 3 ? ' 等' : ''}`);
+      }
+      alert(lines.join('\n\n'));
+      exitBatch();
+    } catch (err) {
+      alert(err instanceof Error ? err.message : '提取图片失败');
+    } finally {
+      setBatchExporting(null);
+    }
   };
 
   const handleBatchDelete = async () => {
@@ -916,6 +993,30 @@ ${r.filePath}`);
             重置排版
           </button>
           <button
+            className="btn-secondary small"
+            onClick={() => handleBatchExport('txt')}
+            disabled={selectedIds.size === 0 || batchExporting !== null}
+            title="把所选书籍的正文导出为 TXT（只需选一次目录）"
+          >
+            {batchExporting === 'txt' ? '导出中…' : '导出TXT'}
+          </button>
+          <button
+            className="btn-secondary small"
+            onClick={() => handleBatchExport('epub')}
+            disabled={selectedIds.size === 0 || batchExporting !== null}
+            title="把所选书籍重新打包为 EPUB（只需选一次目录）"
+          >
+            {batchExporting === 'epub' ? '导出中…' : '导出EPUB'}
+          </button>
+          <button
+            className="btn-secondary small"
+            onClick={handleBatchExtractImages}
+            disabled={selectedIds.size === 0 || batchExporting !== null}
+            title="把所选书籍的内嵌图片提取到文件夹（每本一个子目录，只需选一次目录）"
+          >
+            {batchExporting === 'images' ? '提取中…' : '提取图片'}
+          </button>
+          <button
             className="btn-danger small"
             onClick={handleBatchDelete}
             disabled={selectedIds.size === 0}
@@ -1162,6 +1263,7 @@ ${r.filePath}`);
           <div className="context-menu-item" onClick={handleImportOne}>恢复批注与笔记</div>
           <div className="context-menu-item" onClick={handleSaveAs}>另存为副本</div>
           <div className="context-menu-item" onClick={handleExportText}>导出正文为 TXT</div>
+          <div className="context-menu-item" onClick={handleExportEpub}>导出为 EPUB</div>
           <div className="context-menu-item" onClick={handleReveal}>打开所在位置</div>
           <div className="context-menu-item" onClick={handleCopyPath}>复制文件路径</div>
           <div className="context-menu-item" onClick={handleOpenWithSystem}>用默认程序打开</div>

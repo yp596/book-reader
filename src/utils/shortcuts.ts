@@ -198,3 +198,73 @@ export function keyForAction(
   const hit = Object.entries(preset.map).find(([, a]) => a === action);
   return hit ? hit[0] : null;
 }
+
+// ---------- 全局热键（系统级） ----------
+
+/**
+ * 特殊键名 → Electron accelerator 的键码。
+ * 两套写法的名字不一样（`ArrowUp` vs `Up`、`Escape` vs `Esc`），
+ * 而 accelerator 只认右边这一套——写错不会抛错，`register` 直接返回 false，
+ * 热键就静默不生效，所以这里必须逐个映射，不能靠"看起来差不多"。
+ */
+const ACCEL_KEYS: Record<string, string> = {
+  ArrowUp: 'Up',
+  ArrowDown: 'Down',
+  ArrowLeft: 'Left',
+  ArrowRight: 'Right',
+  PageUp: 'PageUp',
+  PageDown: 'PageDown',
+  Home: 'Home',
+  End: 'End',
+  Escape: 'Escape',
+  Enter: 'Return',
+  Backspace: 'Backspace',
+  Delete: 'Delete',
+  Insert: 'Insert',
+  Tab: 'Tab',
+  ' ': 'Space',
+};
+
+/** 单字符键里可以直接当键码用的：字母数字与 Electron 列出的标点 */
+const PUNCT = new Set([...'`-=[]\\;\',./!@#$%^&*()_+{}|:"<>?~']);
+
+/**
+ * 把一次录制结果转成 Electron 的 accelerator；转不了返回 null。
+ *
+ * 与 `normalizeKey` 的关键差别：**这里必须显式保留 Shift**。
+ * `normalizeKey` 把 Shift 折进字符本身（按 Ctrl+Shift+H 得到 'Ctrl+h'），
+ * 那套用于应用内比对没问题，但拿去做全局热键会把 Ctrl+Shift+H 错注册成 Ctrl+H——
+ * 于是用户的 Ctrl+H 被抢走，而自己设的键根本没生效。
+ *
+ * 不带任何修饰键的裸键一律拒绝：注册成全局热键会把那个字符从所有软件里夺走
+ * （连打字都受影响），这不是「隐藏 / 显示窗口」该付的代价。
+ */
+export function toGlobalAccelerator(e: KeyLike & { shiftKey?: boolean }): string | null {
+  const mods: string[] = [];
+  if (e.ctrlKey) mods.push('Control');
+  if (e.metaKey) mods.push('Super');
+  if (e.altKey) mods.push('Alt');
+  if (e.shiftKey) mods.push('Shift');
+  if (mods.length === 0) return null;
+
+  const named = ACCEL_KEYS[e.key];
+  if (named) return [...mods, named].join('+');
+
+  if (/^F([1-9]|1[0-9]|2[0-4])$/.test(e.key)) return [...mods, e.key].join('+');
+
+  if (e.key.length !== 1) return null;
+  // Shift 已经单独作为修饰键记下了，此时字符若还是被 Shift 改写过的那一个
+  // （按 Shift+1 得到 '!'），再拼一次 Shift 会得到 'Shift+!' 这种谁都不认的组合，
+  // 不如直接拒绝——让用户换一个键，比注册出一个假的成功强
+  if (e.shiftKey && !/[A-Za-z]/.test(e.key)) return null;
+  if (/[a-z]/i.test(e.key)) return [...mods, e.key.toUpperCase()].join('+');
+  if (/[0-9]/.test(e.key)) return [...mods, e.key].join('+');
+  if (PUNCT.has(e.key)) return [...mods, e.key].join('+');
+  return null;
+}
+
+/** accelerator → 界面上的写法（与快捷键列表里的 Ctrl 保持一致） */
+export function acceleratorLabel(accel: string): string {
+  if (!accel) return '';
+  return accel.split('+').map(p => (p === 'Control' ? 'Ctrl' : p)).join('+');
+}

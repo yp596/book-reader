@@ -97,16 +97,6 @@ export class DatabaseService {
         last_read_at DATETIME,
         created_at DATETIME DEFAULT CURRENT_TIMESTAMP
       )`,
-      `CREATE TABLE IF NOT EXISTS book_sources (
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
-        name TEXT NOT NULL,
-        url TEXT NOT NULL,
-        search_url TEXT NOT NULL DEFAULT '',
-        chapters_url TEXT NOT NULL DEFAULT '',
-        content_url TEXT NOT NULL DEFAULT '',
-        enabled INTEGER DEFAULT 1,
-        created_at DATETIME DEFAULT CURRENT_TIMESTAMP
-      )`,
       `CREATE TABLE IF NOT EXISTS bookmarks (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
         book_id INTEGER NOT NULL,
@@ -136,18 +126,6 @@ export class DatabaseService {
         key TEXT PRIMARY KEY,
         value TEXT NOT NULL
       )`,
-      // 在线书源章节缓存
-      `CREATE TABLE IF NOT EXISTS cached_chapters (
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
-        source_id INTEGER NOT NULL,
-        book_url TEXT NOT NULL,
-        chapter_url TEXT NOT NULL UNIQUE,
-        title TEXT NOT NULL DEFAULT '',
-        content TEXT NOT NULL DEFAULT '',
-        idx INTEGER DEFAULT 0,
-        cached_at DATETIME DEFAULT CURRENT_TIMESTAMP
-      )`,
-      `CREATE INDEX IF NOT EXISTS idx_cached_book ON cached_chapters(book_url)`,
       // 生词本
       `CREATE TABLE IF NOT EXISTS words (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -156,26 +134,6 @@ export class DatabaseService {
         definition TEXT NOT NULL DEFAULT '',
         context TEXT DEFAULT '',
         created_at DATETIME DEFAULT CURRENT_TIMESTAMP
-      )`,
-      // 文本净化规则（全局正则替换）
-      `CREATE TABLE IF NOT EXISTS text_filters (
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
-        name TEXT NOT NULL,
-        pattern TEXT NOT NULL,
-        replacement TEXT NOT NULL DEFAULT '',
-        enabled INTEGER DEFAULT 1,
-        created_at DATETIME DEFAULT CURRENT_TIMESTAMP
-      )`,
-      // 追更订阅
-      `CREATE TABLE IF NOT EXISTS followed_books (
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
-        source_id INTEGER NOT NULL,
-        book_url TEXT NOT NULL UNIQUE,
-        title TEXT NOT NULL,
-        last_chapter TEXT DEFAULT '',
-        last_count INTEGER DEFAULT 0,
-        last_check DATETIME,
-        has_update INTEGER DEFAULT 0
       )`,
       // RAG 向量
       `CREATE TABLE IF NOT EXISTS book_vectors (
@@ -203,10 +161,6 @@ export class DatabaseService {
       `CREATE INDEX IF NOT EXISTS idx_positions_book ON reading_positions(book_id)`,
     ];
     for (const sql of tables) this.db.run(sql);
-    // 存量库迁移：书源表加规则列
-    try {
-      this.db.run(`ALTER TABLE book_sources ADD COLUMN rules TEXT DEFAULT ''`);
-    } catch { /* 列已存在则忽略 */ }
     // 存量库迁移：书籍表加收藏/分类/目录缓存列
     for (const ddl of [
       `ALTER TABLE books ADD COLUMN favorite INTEGER DEFAULT 0`,
@@ -219,9 +173,6 @@ export class DatabaseService {
       `ALTER TABLE bookmarks ADD COLUMN updated_at DATETIME`,
       `ALTER TABLE notes ADD COLUMN updated_at DATETIME`,
       `ALTER TABLE words ADD COLUMN updated_at DATETIME`,
-      // 书源表也要有：增量备份对每张表都查 COALESCE(updated_at, created_at)，
-      // 少这一列会让「导出增量备份」在第二次导出时直接报 no such column
-      `ALTER TABLE book_sources ADD COLUMN updated_at DATETIME`,
       // 书籍锁定：防误删、防误改（仅保留阅读权限）
       `ALTER TABLE books ADD COLUMN locked INTEGER DEFAULT 0`,
       // 笔记标签（逗号分隔存储，无需额外建表）
@@ -647,58 +598,6 @@ export class DatabaseService {
     this.run("DELETE FROM settings WHERE key LIKE 'lastPos:%'");
   }
 
-  // ============ Sources ============
-
-  getAllSources() {
-    return this.all('SELECT * FROM book_sources WHERE enabled = 1');
-  }
-
-  getSourceById(id: number) {
-    return this.get('SELECT * FROM book_sources WHERE id = ?', [id]);
-  }
-
-  insertSource(source: { name: string; url: string; search_url: string; chapters_url: string; content_url: string; rules?: string }) {
-    this.run(
-      'INSERT INTO book_sources (name, url, search_url, chapters_url, content_url, rules) VALUES (?, ?, ?, ?, ?, ?)',
-      [source.name, source.url, source.search_url, source.chapters_url, source.content_url, source.rules ?? ''],
-    );
-    const row = this.get('SELECT last_insert_rowid() as id');
-    return row?.id;
-  }
-
-  deleteSource(id: number) {
-    this.run('DELETE FROM book_sources WHERE id = ?', [id]);
-  }
-
-  updateSourceRules(id: number, rules: string) {
-    this.run('UPDATE book_sources SET rules = ? WHERE id = ?', [rules, id]);
-  }
-
-  // ============ 在线章节缓存 ============
-
-  getCachedChapter(chapterUrl: string) {
-    return this.get('SELECT * FROM cached_chapters WHERE chapter_url = ?', [chapterUrl]);
-  }
-
-  getCachedChapters(bookUrl: string) {
-    return this.all('SELECT chapter_url FROM cached_chapters WHERE book_url = ?', [bookUrl]);
-  }
-
-  saveCachedChapter(c: {
-    source_id: number;
-    book_url: string;
-    chapter_url: string;
-    title: string;
-    content: string;
-    idx: number;
-  }) {
-    this.run(
-      `INSERT OR REPLACE INTO cached_chapters
-        (source_id, book_url, chapter_url, title, content, idx) VALUES (?, ?, ?, ?, ?, ?)`,
-      [c.source_id, c.book_url, c.chapter_url, c.title, c.content, c.idx],
-    );
-  }
-
   // ============ Notes ============
 
   /** 跨书籍笔记：带书名，供「我的笔记」页汇总与筛选 */
@@ -825,64 +724,6 @@ export class DatabaseService {
     );
   }
 
-  // ============ 文本净化 ============
-
-  getEnabledFilters(): { pattern: string; replacement: string }[] {
-    return this.all('SELECT pattern, replacement FROM text_filters WHERE enabled = 1 ORDER BY id');
-  }
-
-  getAllFilters() {
-    return this.all('SELECT * FROM text_filters ORDER BY id');
-  }
-
-  insertFilter(f: { name: string; pattern: string; replacement: string }) {
-    // 校验正则合法性
-    new RegExp(f.pattern);
-    this.run('INSERT INTO text_filters (name, pattern, replacement) VALUES (?, ?, ?)', [
-      f.name,
-      f.pattern,
-      f.replacement ?? '',
-    ]);
-    const row = this.get('SELECT last_insert_rowid() as id');
-    return row?.id;
-  }
-
-  toggleFilter(id: number, enabled: number) {
-    this.run('UPDATE text_filters SET enabled = ? WHERE id = ?', [enabled ? 1 : 0, id]);
-  }
-
-  deleteFilter(id: number) {
-    this.run('DELETE FROM text_filters WHERE id = ?', [id]);
-  }
-
-  // ============ 追更订阅 ============
-
-  getFollowedBooks() {
-    return this.all('SELECT * FROM followed_books ORDER BY has_update DESC, last_check DESC');
-  }
-
-  followBook(f: { source_id: number; book_url: string; title: string }) {
-    this.run(
-      'INSERT OR IGNORE INTO followed_books (source_id, book_url, title) VALUES (?, ?, ?)',
-      [f.source_id, f.book_url, f.title],
-    );
-  }
-
-  unfollowBook(id: number) {
-    this.run('DELETE FROM followed_books WHERE id = ?', [id]);
-  }
-
-  updateFollowResult(id: number, lastChapter: string, count: number, hasUpdate: boolean) {
-    this.run(
-      `UPDATE followed_books SET last_chapter = ?, last_count = ?, has_update = ?, last_check = CURRENT_TIMESTAMP WHERE id = ?`,
-      [lastChapter, count, hasUpdate ? 1 : 0, id],
-    );
-  }
-
-  clearFollowUpdate(id: number) {
-    this.run('UPDATE followed_books SET has_update = 0 WHERE id = ?', [id]);
-  }
-
   // ============ RAG 向量 ============
 
   clearBookVectors(bookId: number) {
@@ -969,7 +810,7 @@ export class DatabaseService {
 
   /**
    * 出站请求的总闸门。纯离线定位要求默认关闭，
-   * 关闭状态下 AI 回退、书源抓取、WebDAV 同步、模型下载都不许发出请求。
+   * 关闭状态下 AI 回退、模型下载都不许发出请求。
    */
   isOnlineEnabled(): boolean {
     return this.isSettingOn('onlineFeaturesEnabled');
@@ -977,7 +818,7 @@ export class DatabaseService {
 
   /**
    * 出站请求的总闸门。纯离线定位要求默认关闭，
-   * 关闭状态下 AI 回退、书源抓取、WebDAV 同步、模型下载都不许发出请求。
+   * 关闭状态下 AI 回退、模型下载都不许发出请求。
    *
    * 传入 targetUrl 且目标为本机服务时直接放行：回环地址不离开这台机器，
    * 不属于「联网附加能力」该管的范围。否则默认配置里指向 localhost 的
@@ -990,15 +831,11 @@ export class DatabaseService {
   }
 
   /**
-   * 首次初始化开关（只在没写过值时执行一次）。
-   * 新装默认关闭；但老用户可能已经配好书源或 WebDAV 地址，
-   * 一刀切关掉等于让既有配置变成哑巴，故检测到既有配置时视为已开启。
+   * 首次初始化开关（只在没写过值时执行一次）。新装默认关闭。
    */
   initOnlineSwitch() {
     if (this.getSetting('onlineFeaturesEnabled') !== null) return;
-    const hasSources = this.all('SELECT id FROM book_sources LIMIT 1').length > 0;
-    const hasWebdav = !!(this.getSetting('webdavUrl') || '').trim();
-    this.setSetting('onlineFeaturesEnabled', hasSources || hasWebdav ? '1' : '0');
+    this.setSetting('onlineFeaturesEnabled', '0');
   }
 
   /**
@@ -1092,19 +929,6 @@ export class DatabaseService {
     return Number(row?.c ?? 0);
   }
 
-  /** 章节缓存条数（缓存管理页展示用） */
-  countCachedChapters(): number {
-    const row = this.get('SELECT COUNT(*) AS c FROM cached_chapters') as { c?: number } | undefined;
-    return Number(row?.c ?? 0);
-  }
-
-  /** 清空在线书源章节缓存：属于临时数据，需要时可重新抓取。返回清理条数。 */
-  clearChapterCache(): number {
-    const row = this.get('SELECT COUNT(*) AS c FROM cached_chapters') as { c?: number } | undefined;
-    this.run('DELETE FROM cached_chapters');
-    return Number(row?.c ?? 0);
-  }
-
   /** 抹掉「什么时候读过」的记录，保留阅读进度本身。返回影响的书籍数。 */
   clearReadingTimestamps(): number {
     const row = this.get('SELECT COUNT(*) AS c FROM books WHERE last_read_at IS NOT NULL') as
@@ -1121,7 +945,7 @@ export class DatabaseService {
    * 表名来自内部白名单，不接受外部输入。
    */
   exportRowsSince(
-    table: 'books' | 'bookmarks' | 'notes' | 'words' | 'book_sources',
+    table: 'books' | 'bookmarks' | 'notes' | 'words',
     since: string | null,
   ): any[] {
     if (!since) return this.all(`SELECT * FROM ${table}`);
@@ -1137,7 +961,7 @@ export class DatabaseService {
   }
 
   /** 各表最近一次变更时间（用于增量基线） */
-  latestChangeAt(table: 'books' | 'bookmarks' | 'notes' | 'words' | 'book_sources'): string | null {
+  latestChangeAt(table: 'books' | 'bookmarks' | 'notes' | 'words'): string | null {
     const row = this.get(
       `SELECT MAX(COALESCE(updated_at, created_at)) AS t FROM ${table}`,
     ) as { t?: string } | undefined;

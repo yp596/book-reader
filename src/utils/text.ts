@@ -35,6 +35,49 @@ export const findKeyword = (text: string, keyword: string, opts: KeywordOptions 
   return m ? { index: m.index, length: m[0].length } : null;
 };
 
+/**
+ * 纯文本 → 把命中词包成 <mark> 的 HTML。
+ * 给「没有 DOM 可以下手」的渲染路径用：PDF 重排块就是直接渲染字符串的。
+ * 先转义再匹配——标记只能插在转义过的文本上，否则原文里一个 < 就成了标签。
+ * 没命中返回空串，调用方据此走原来的纯文本路径。
+ */
+export const markKeywordHtml = (text: string, keyword: string, opts: KeywordOptions = {}) => {
+  const kw = keyword.trim();
+  if (!kw) return '';
+  const escaped = escapeHtml(text);
+  const base = buildKeywordRegex(escapeHtml(kw), opts);
+  // 另起一个带 g 的实例：复用同一个正则，exec 的 lastIndex 会跨次调用串味
+  const re = new RegExp(base.source, base.flags + 'g');
+  let out = '';
+  let last = 0;
+  let m: RegExpExecArray | null;
+  while ((m = re.exec(escaped)) !== null) {
+    // 空匹配会让 lastIndex 原地打转，直接跳出
+    if (m[0].length === 0) break;
+    out += escaped.slice(last, m.index) + `<mark class="search-mark">${m[0]}</mark>`;
+    last = m.index + m[0].length;
+    re.lastIndex = last;
+  }
+  return last === 0 ? '' : out + escaped.slice(last);
+};
+
+/**
+ * 取 epub.js 某一章的正文文本。
+ *
+ * epub.js 的 Section.load() resolve 出来的是 xml.documentElement（即 <html> 元素），
+ * 不是 Document——所以这里不能写 `doc.body`：body 是 Document 才有的属性，在 <html>
+ * 元素上取到的是 undefined，文本会变成空串，检索就「不报错但永远 0 命中」。
+ * 取 body 的子文本而不是整个 <html>，是为了不把 <head> 里的 CSS 和 <title> 搜进去。
+ * 兼容 Document 是给缓存路径留的余量：那时拿到的可能是 document 本身。
+ */
+export function epubSectionText(node: unknown): string {
+  const anyNode = node as any;
+  if (!anyNode) return '';
+  const root = anyNode.nodeType === 9 ? anyNode.documentElement : anyNode;
+  const body = root?.querySelector?.('body');
+  return (body?.textContent ?? root?.textContent ?? '') as string;
+}
+
 /** 秒数转中文时长 */
 export const formatMinutes = (seconds: number) => {
   const m = Math.round(seconds / 60);
@@ -82,6 +125,19 @@ export const lineToPageIndex = (pageStartLines: number[], line: number) => {
 export interface SavedPosition {
   cfi?: string;
   page?: number;
+  /**
+   * PDF 重排模式下的屏号。
+   * 重排屏是按字数重新切的，跨原始页边界，与 PDF 页序不互相换算。所以同一处位置
+   * 两套坐标都记：切回原始版式用 page，重排时用 reflow。
+   */
+  reflow?: number;
+  /**
+   * 文档型格式（Markdown / DOCX）的块序号（顶层块，0 起）。
+   * 它们是一整篇连续滚动，没有页可分，能指望的稳定锚点就是「第几个顶层块」
+   * ——块结构不随字号、窗口宽度变化，重新打开时把那一块滚回顶端即可。
+   * 早期只有 Markdown 时这个键叫 mdBlock，读的时候一并认，免得旧进度丢失。
+   */
+  docBlock?: number;
 }
 
 /** 序列化阅读位置，存入 settings 表的 lastPos:<bookId> */
@@ -90,15 +146,24 @@ export const serializeSavedPosition = (pos: SavedPosition) => JSON.stringify(pos
 /** 解析阅读位置，损坏或空值返回 null */
 export const parseSavedPosition = (raw: string | null | undefined): SavedPosition | null => {
   if (!raw) return null;
+  const nonNegInt = (v: unknown) =>
+    typeof v === 'number' && Number.isInteger(v) && v >= 0 ? v : undefined;
   try {
     const parsed = JSON.parse(raw) as SavedPosition | null;
     const cfi = typeof parsed?.cfi === 'string' && parsed.cfi ? parsed.cfi : undefined;
-    const page =
-      typeof parsed?.page === 'number' && Number.isInteger(parsed.page) && parsed.page >= 0
-        ? parsed.page
-        : undefined;
-    if (cfi === undefined && page === undefined) return null;
-    return { ...(cfi !== undefined ? { cfi } : {}), ...(page !== undefined ? { page } : {}) };
+    const page = nonNegInt(parsed?.page);
+    const reflow = nonNegInt(parsed?.reflow);
+    // 旧键 mdBlock 一并认：这批位置是早先按下标存的，丢了用户就得重新找位置
+    const docBlock = nonNegInt(parsed?.docBlock) ?? nonNegInt((parsed as { mdBlock?: unknown })?.mdBlock);
+    if (cfi === undefined && page === undefined && reflow === undefined && docBlock === undefined) {
+      return null;
+    }
+    return {
+      ...(cfi !== undefined ? { cfi } : {}),
+      ...(page !== undefined ? { page } : {}),
+      ...(reflow !== undefined ? { reflow } : {}),
+      ...(docBlock !== undefined ? { docBlock } : {}),
+    };
   } catch {
     return null;
   }

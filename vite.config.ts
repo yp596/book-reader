@@ -135,7 +135,6 @@ export default defineConfig({
                 /^jszip/,
                 /^pdf-lib/,
                 /^cheerio/,
-                /^webdav/,
               ],
             },
           },

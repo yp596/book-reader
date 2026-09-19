@@ -2,31 +2,8 @@ import { describe, it, expect } from 'vitest';
 import fs from 'fs';
 import os from 'os';
 import path from 'path';
-import { applyTextFilters } from './book-source';
 import { escapeXml, chapterToXhtml, buildOpf, buildNcx, buildEpub } from './epub-export';
 import JSZip from 'jszip';
-
-describe('applyTextFilters', () => {
-  it('按顺序应用多条替换', () => {
-    const out = applyTextFilters('欢迎访问XXX小说网，本章完', [
-      { pattern: 'XXX小说网', replacement: '' },
-      { pattern: '本章完', replacement: '' },
-    ]);
-    expect(out).toBe('欢迎访问，');
-  });
-
-  it('非法正则跳过不中断', () => {
-    const out = applyTextFilters('abc', [
-      { pattern: '([', replacement: '' },
-      { pattern: 'b', replacement: 'B' },
-    ]);
-    expect(out).toBe('aBc');
-  });
-
-  it('空规则原样返回', () => {
-    expect(applyTextFilters('abc', [])).toBe('abc');
-  });
-});
 
 describe('epub builders', () => {
   it('escapeXml 转义特殊字符', () => {
